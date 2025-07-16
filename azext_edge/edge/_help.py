@@ -191,12 +191,54 @@ def load_iotops_help():
         short-summary: Delete an mqtt broker.
 
         examples:
-        - name: Delete an mqtt broker from the instance.
+        - name: Delete the default mqtt broker from the instance.
           text: >
-            az iot ops broker delete -n default --in myinstance -g myresourcegroup
+            az iot ops broker delete --in myinstance -g myresourcegroup
         - name: Same as prior example but skipping the confirmation prompt.
           text: >
-            az iot ops broker delete -n default --in myinstance -g myresourcegroup -y
+            az iot ops broker delete --in myinstance -g myresourcegroup -y
+    """
+
+    helps[
+        "iot ops broker persist"
+    ] = """
+        type: group
+        short-summary: Mqtt broker disk persistence management.
+    """
+
+    helps[
+        "iot ops broker persist update"
+    ] = """
+        type: command
+        short-summary: Update an mqtt broker's disk persistence settings.
+        long-summary: |
+          Updating disk persistence depends on enablement at broker create time.
+          Setting the persistence mode of a broker component will reset its configuration.
+
+        examples:
+        - name: Update the persistence mode of subscriber message queues, retain topics and state store.
+          text: >
+            az iot ops broker persist update --in myinstance -g myresourcegroup --persist-mode subscriberQueue=All retain=All stateStore=All
+        - name: Update a custom persistence policy for retain messages.
+          text: >
+            az iot ops broker persist update --in myinstance -g myresourcegroup --persist-mode retain=Custom --retain-topics "sensor1" "factory/#" "groundfloor/+/temperature"
+        - name: Set up state store persistence with multiple key groups including string, pattern, and binary (base64 encoded) keys.
+          text: >
+            az iot ops broker persist update --in myinstance -g myresourcegroup --persist-mode stateStore=Custom
+            --state-store-str-keys "device-001" "device-002" --state-store-glob-keys "sensors/*" --state-store-bin-keys "bXlrZXkx" "bXlrZXky"
+        - name: Configure subscriber queue persistence for specific client IDs and apply user property key and value for dynamic persistence.
+          text: >
+            az iot ops broker persist update --in myinstance -g myresourcegroup --persist-mode subscriberQueue=Custom
+            --subscriber-client-ids "factory-client-*" "sensor-gateway-01" --user-key disk-persistence --user-value disk
+        - name: Advanced configuration with multiple persistence modes, state store key groupings, and dynamic settings for a custom broker.
+          text: >
+            az iot ops broker persist update --in myinstance -g myresourcegroup --name default --persist-mode retain=Custom stateStore=Custom subscriberQueue=All
+            --retain-topics "alerts/#" "diagnostics/#" --state-store-str-keys "user:admin" "session:active" --state-store-str-keys "config:database" "config:security"
+            --state-store-glob-keys "logs/*" "backups/*" --disable-dynamic stateStore
+        - name: Disable all persistence modes and remove user properties for dynamic persistence.
+          text: >
+            az iot ops broker persist update --in myinstance -g myresourcegroup --persist-mode retain=None stateStore=None subscriberQueue=None
+            --user-key="" --user-value=""
     """
 
     helps[
