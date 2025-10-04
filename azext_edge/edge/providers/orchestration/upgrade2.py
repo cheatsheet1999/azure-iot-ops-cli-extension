@@ -56,6 +56,7 @@ def upgrade_ops_instance(
     cmd,
     resource_group_name: str,
     instance_name: str,
+    adr_namespace_resource_id: Optional[str] = None,
     no_progress: Optional[bool] = None,
     confirm_yes: Optional[bool] = None,
     force: Optional[bool] = None,
@@ -65,6 +66,7 @@ def upgrade_ops_instance(
         cmd=cmd,
         instance_name=instance_name,
         resource_group_name=resource_group_name,
+        adr_namespace_resource_id=adr_namespace_resource_id,
         no_progress=no_progress,
         force=force,
     )
@@ -91,6 +93,7 @@ class UpgradeManager:
         cmd,
         resource_group_name: str,
         instance_name: str,
+        adr_namespace_resource_id: Optional[str] = None,
         no_progress: Optional[bool] = None,
         force: Optional[bool] = None,
     ):
@@ -100,11 +103,14 @@ class UpgradeManager:
         self.no_progress = no_progress
         self.force = force
         self.instances = Instances(self.cmd)
-        self.resource_map = self.instances.get_resource_map(
-            self.instances.show(name=self.instance_name, resource_group_name=self.resource_group_name)
+        self.instance_record = self.instances.show(
+            name=self.instance_name, resource_group_name=self.resource_group_name
         )
+        self.resource_map = self.instances.get_resource_map(self.instance_record)
         self.targets = InitTargets(
-            cluster_name=self.resource_map.connected_cluster.cluster_name, resource_group_name=resource_group_name
+            cluster_name=self.resource_map.connected_cluster.cluster_name,
+            resource_group_name=resource_group_name,
+            adr_namespace_resource_id=adr_namespace_resource_id,
         )
 
     def get_desired_config(self) -> Dict[str, str]:
@@ -129,6 +135,7 @@ class UpgradeManager:
             _ = progress.add_task("Analyzing cluster...", total=None)
             if not self.resource_map.connected_cluster.connected:
                 raise ValidationError(f"Cluster {self.resource_map.connected_cluster.cluster_name} is not connected.")
+
             return ClusterUpgradeState(
                 extensions_map=self.resource_map.connected_cluster.get_extensions_by_type(
                     *list(EXTENSION_TYPE_TO_MONIKER_MAP.keys())
@@ -139,6 +146,8 @@ class UpgradeManager:
                 },
                 desired_config_map=self.get_desired_config(),
                 override_map=build_override_map(**override_kwargs),
+                instance=self.instance_record,
+                adr_namespace_resource_id=self.targets.adr_namespace_resource_id,
                 force=self.force,
             )
 
@@ -159,6 +168,9 @@ class UpgradeManager:
             operations = self._group_by_operation(upgrade_state.extension_upgrades)
             total = sum(len(ops) for ops in operations.values())
 
+            if upgrade_state.instance_upgrade:
+                total += 1
+
             return_payload = []
             correlation_id = str(uuid4())
             headers = {"x-ms-correlation-request-id": correlation_id, "CommandName": "iot ops upgrade"}
@@ -176,7 +188,27 @@ class UpgradeManager:
                         logger.error(f"Correlation Id for failed {op_type.value} operation: {correlation_id}")
                         raise e
 
+            if upgrade_state.instance_upgrade:
+                try:
+                    instance_result = self._apply_instance_update(headers)
+                    return_payload.append(instance_result)
+                    progress.advance(task)
+                except HttpResponseError as e:
+                    progress.stop()
+                    logger.error(f"Correlation Id for failed instance update: {correlation_id}")
+                    raise e
+
             return return_payload
+
+    def _apply_instance_update(self, headers: dict) -> dict:
+        return self.instances.update(
+            name=self.instance_name,
+            resource_group_name=self.resource_group_name,
+            instance=self.instance_record,
+            adr_namespace_resource_id=self.targets.adr_namespace_resource_id,
+            headers=headers,
+            no_status=True,  # Disable status since we're already in a Progress context
+        )
 
     def _group_by_operation(self, extensions: List["ExtensionUpgradeState"]) -> Dict[ExtensionOperation, List]:
         groups = {op: [] for op in ExtensionOperation}
@@ -238,6 +270,61 @@ class UpgradeManager:
         }
 
 
+def format_version_with_train(version: Optional[str], train: Optional[str]) -> str:
+    if not version:
+        return "[dim]Not Available[/dim]"
+    if not train:
+        return version
+    return f"{version} \\[{train}]"
+
+
+def format_extension_row(ext: "ExtensionUpgradeState") -> Tuple[str, str, str, any]:
+    """Format an extension row for the upgrade table.
+    Returns: (current_version, desired_version, action, patch_payload)
+    """
+    # Add status indicator for non-succeeded states
+    status_indicator = ""
+    if ext.provisioning_state.lower() != "succeeded":
+        status_indicator = f" [yellow]({ext.provisioning_state})[/yellow]"
+
+    if ext.operation_type == ExtensionOperation.DELETE:
+        current = format_version_with_train(ext.current_version[0], ext.current_version[1]) + status_indicator
+        desired = "[red]Remove[/red]"
+        action = f"[red]Delete {ext.moniker}[/red]"
+        return current, desired, action
+
+    elif ext.operation_type == ExtensionOperation.CREATE:
+        current = "[dim]Not Installed[/dim]"
+        version = ext.desired_version[0] or "N/A"
+        train = ext.desired_version[1] or "N/A"
+        desired = f"[green]{format_version_with_train(version, train)}[/green]"
+        action = f"[green]Install {ext.moniker}[/green]"
+        return current, desired, action
+
+    else:  # UPDATE
+        current = format_version_with_train(ext.current_version[0], ext.current_version[1]) + status_indicator
+        desired = format_version_with_train(ext.desired_version[0], ext.desired_version[1])
+        patch = ext.get_patch()
+        action = JSON(dumps(patch)) if patch else None
+        return current, desired, action
+
+
+def get_default_table() -> Table:
+    table = Table(
+        box=box.ROUNDED,
+        highlight=True,
+        expand=False,
+        title="The Upgrade Story",
+        min_width=79,
+    )
+    table.add_column("Resource", style="cyan")
+    table.add_column("Current State")
+    table.add_column("Desired State")
+    table.add_column("Action")
+
+    return table
+
+
 def render_upgrade_table(upgrade_state: "ClusterUpgradeState"):
     table = get_default_table()
 
@@ -245,41 +332,32 @@ def render_upgrade_table(upgrade_state: "ClusterUpgradeState"):
         if not ext.can_upgrade():
             continue
 
-        # Format versions based on operation
-        if ext.operation_type == ExtensionOperation.DELETE:
-            current_version = "-"
-            if ext.current_version[0] and ext.current_version[1]:
-                current_version = f"{ext.current_version[0]} [{ext.current_version[1]}]"
-            desired_version = "[red]Remove[/red]"
-            # More descriptive message
-            patch_payload = f"[red]Delete {ext.moniker} extension[/red]"
-        elif ext.operation_type == ExtensionOperation.CREATE:
-            current_version = "[dim]Not Installed[/dim]"
-            version = ext.desired_version[0] or "latest"
-            train = ext.desired_version[1] or "stable"
-            # Add green color for creation
-            desired_version = f"[green]{version} [{train}][/green]"
-            # More descriptive message
-            patch_payload = f"[green]Create {ext.moniker} extension[/green]"
-        else:  # UPDATE
-            current_v = ext.current_version[0] or "unknown"
-            current_t = ext.current_version[1] or "unknown"
-            desired_v = ext.desired_version[0] or current_v
-            desired_t = ext.desired_version[1] or current_t
-            current_version = f"{current_v} [{current_t}]"
-            desired_version = f"{desired_v} [{desired_t}]"
-            patch_payload = ext.get_patch()
-            if patch_payload:
-                patch_payload = JSON(dumps(patch_payload))
-            else:
-                continue
+        row_data = format_extension_row(ext)
+        if row_data[2] is None:  # Skip if no action
+            continue
+
+        table.add_row(ext.moniker, *row_data)
+        table.add_section()
+
+    # Add instance update row if needed
+    if upgrade_state.instance_upgrade:
+        adr_id = upgrade_state.adr_namespace_resource_id
+        adr_name = adr_id.split("/")[-1] if "/" in adr_id else adr_id
+
+        # Show current state based on what's configured
+        namespace_ref = upgrade_state.instance.get("properties", {}).get("adrNamespaceRef")
+        if namespace_ref and namespace_ref.get("resourceId"):
+            current_adr_id = namespace_ref.get("resourceId")
+            current_adr_name = current_adr_id.split("/")[-1] if "/" in current_adr_id else current_adr_id
+            current_state = f"[dim]Linked to {current_adr_name}[/dim]"
+        else:
+            current_state = "[dim]No ADR namespace[/dim]"
 
         table.add_row(
-            ext.moniker,
-            current_version,
-            desired_version,
-            ext.provisioning_state,
-            patch_payload,
+            "instance",
+            current_state,
+            f"[green]Link {adr_name}[/green]",
+            JSON(dumps({"properties": {"adrNamespaceRef": {"resourceId": f"*/{adr_name}"}}})),
         )
         table.add_section()
 
@@ -326,20 +404,58 @@ class ClusterUpgradeState:
         init_version_map: Dict[str, dict],
         desired_config_map: Dict[str, str],
         override_map: Dict[str, "ConfigOverride"],
+        instance: Optional[dict] = None,
+        adr_namespace_resource_id: Optional[str] = None,
         force: Optional[bool] = None,
     ):
         self.extensions_map = extensions_map
         self.init_version_map = init_version_map
         self.desired_config_map = desired_config_map
         self.override_map = override_map
+        self.instance = instance
+        self.adr_namespace_resource_id = adr_namespace_resource_id
         self.force = force
         self.semver = scoped_semver_import()
-        self.extension_upgrades = self.refresh_upgrade_state()
+        self.extension_upgrades = self._refresh_upgrade_state()
+        self.instance_upgrade = self._check_instance_upgrade()
 
     def has_upgrades(self) -> bool:
-        return any(ext_state.can_upgrade() for ext_state in self.extension_upgrades)
+        return any(ext_state.can_upgrade() for ext_state in self.extension_upgrades) or bool(self.instance_upgrade)
 
-    def refresh_upgrade_state(self) -> List["ExtensionUpgradeState"]:
+    def _check_instance_upgrade(self) -> bool:
+        """Check if instance needs ADR namespace update.
+
+        Returns True if:
+        1. During v2 migration and instance needs ADR namespace (required)
+        2. User provided --ns-resource-id to update/set ADR namespace (optional update)
+
+        Raises ValidationError if ADR namespace is required but not provided.
+        """
+        if not self.instance:
+            return False
+
+        namespace_ref = self.instance.get("properties", {}).get("adrNamespaceRef")
+        has_adr_namespace = namespace_ref and namespace_ref.get("resourceId")
+
+        # If user provided an ADR namespace, check if update is needed
+        if self.adr_namespace_resource_id:
+            # Update needed if no current ADR or different from provided
+            current_adr_id = namespace_ref.get("resourceId") if namespace_ref else None
+            return not current_adr_id or current_adr_id != self.adr_namespace_resource_id
+
+        # If no ADR namespace provided, check if it's required for v2 migration
+        # Check if we're doing a v2 migration (platform -> certmanager)
+        is_v2_migration = self._is_target_version_above_migration_threshold()
+
+        if is_v2_migration and not has_adr_namespace:
+            raise ValidationError(
+                "The instance requires an ADR namespace for migration to v2.\n"
+                "Please provide a value for --ns-resource-id."
+            )
+
+        return False
+
+    def _refresh_upgrade_state(self) -> List["ExtensionUpgradeState"]:
         ext_queue: List["ExtensionUpgradeState"] = []
 
         if not self.extensions_map.get(EXTENSION_TYPE_OPS):
@@ -647,23 +763,6 @@ class ExtensionUpgradeState:
                     f"Desired version would be on train {self.desired_version[1]}.\n"
                     f"Upgrades to or from non-stable release trains are not supported."
                 )
-
-
-def get_default_table() -> Table:
-    table = Table(
-        box=box.ROUNDED,
-        highlight=True,
-        expand=False,
-        title="The Upgrade Story",
-        min_width=79,
-    )
-    table.add_column("Extension")
-    table.add_column("Current Version")
-    table.add_column("Desired Version")
-    table.add_column("Provisioning State")
-    table.add_column("Action")
-
-    return table
 
 
 def calculate_config_delta(
