@@ -46,6 +46,7 @@ from .common import (
 from .permissions import ROLE_DEF_FORMAT_STR, PermissionManager, PrincipalType
 from .resource_map import IoTOperationsResourceMap
 from .resources.custom_locations import CustomLocations
+from .rp_namespace import HEALTH_PROVIDER, register_providers
 from .targets import InitTargets, InstancePhase
 
 logger = get_logger(__name__)
@@ -357,7 +358,6 @@ class WorkManager:
 
     def _do_work(self):
         from .host import verify_cli_client_connections
-        from .rp_namespace import register_providers
 
         try:
             # Ensure connection to ARM if needed. Show remediation error message otherwise.
@@ -369,7 +369,7 @@ class WorkManager:
             if self._pre_flight:
                 # WorkStepKey.REG_RP
                 self._render_display(category=WorkCategoryKey.PRE_FLIGHT, active_step=WorkStepKey.REG_RP)
-                register_providers(self.subscription_id)
+                failed_optional_rps = register_providers(self.subscription_id)
                 self._complete_step(
                     category=WorkCategoryKey.PRE_FLIGHT,
                     completed_step=WorkStepKey.REG_RP,
@@ -377,7 +377,9 @@ class WorkManager:
                 )
 
                 # WorkStepKey.ENUMERATE_PRE_FLIGHT
-                self._eval_cluster_health()
+                # Skip health check if ResourceHealth RP registration failed
+                if HEALTH_PROVIDER not in failed_optional_rps:
+                    self._eval_cluster_health()
                 if self._check_cluster:
                     cluster_check_kwargs = self._build_cluster_check_kwargs()
                     # TODO - load_config_context should be moved down to functions that directly call it
@@ -691,10 +693,15 @@ class WorkManager:
             )
 
     def _eval_cluster_health(self):
-        if self._resource_map.connected_cluster.available:
+        connected_cluster = self._resource_map.connected_cluster
+        if connected_cluster.available:
             return
 
-        properties: dict = self._resource_map.connected_cluster.health_state.get("properties", {})
+        health_state = connected_cluster.health_state
+        if not health_state:
+            return
+
+        properties: dict = health_state.get("properties", {})
         summary = properties.get("summary", "No additional details available.")
         reason_type = properties.get("reasonType", "")
 
