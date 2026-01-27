@@ -237,7 +237,7 @@ class ConnectorMetadataValidator:
                     break
 
             if not matched_template:
-                logger.warning(
+                logger.info(
                     f"No connector template found for endpoint type '{self.endpoint_type}' "
                     f"version '{self.endpoint_version}'. Validation will be skipped."
                 )
@@ -245,9 +245,11 @@ class ConnectorMetadataValidator:
 
             connector_metadata_ref = matched_template.get("properties", {}).get("connectorMetadataRef")
             if not connector_metadata_ref:
-                raise ValidationError(
-                    f"Connector template '{matched_template.get('name')}' is missing connectorMetadataRef."
+                logger.info(
+                    f"Connector template '{matched_template.get('name')}' is missing connectorMetadataRef. "
+                    "Validation will be skipped."
                 )
+                return None
 
             logger.info(f"Fetching connector metadata from OCI: {connector_metadata_ref}")
             metadata = self._fetch_connector_metadata_from_oci(connector_metadata_ref)
