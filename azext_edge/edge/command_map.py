@@ -416,6 +416,16 @@ def load_iotops_commands(self, _):
         pass
 
     with self.command_group(
+        "iot ops connector template",
+        command_type=connector_resource_ops,
+    ) as cmd_group:
+        cmd_group.command("create", "create_connector_template")
+        cmd_group.command("update", "update_connector_template")
+        cmd_group.show_command("show", "show_connector_template")
+        cmd_group.command("delete", "delete_connector_template")
+        cmd_group.command("list", "list_connector_templates")
+
+    with self.command_group(
         "iot ops connector opcua trust",
         command_type=connector_resource_ops,
     ) as cmd_group:
