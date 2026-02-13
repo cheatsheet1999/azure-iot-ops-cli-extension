@@ -1551,6 +1551,13 @@ def load_adr_arguments(self, _):
                 arg_type=get_three_state_flag(),
             )
 
+    with self.argument_context("iot ops ns asset opcua mgmt-action") as context:
+        context.argument(
+            "type_ref",
+            options_list=["--type-ref", "--tr"],
+            help="URI or type definition ID for the action.",
+        )
+
     with self.argument_context("iot ops ns asset custom dataset") as context:
         context.argument(
             "dataset_custom_configuration",

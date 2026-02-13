@@ -1268,7 +1268,7 @@ class NamespaceAssets(Queryable):
         instance_resource_group: str,
         asset_type: str,
         group_name: str,
-        data_source: str,
+        data_source: Optional[str] = None,
         default_topic: Optional[str] = None,
         default_timeout: Optional[int] = None,
         type_ref: Optional[str] = None,

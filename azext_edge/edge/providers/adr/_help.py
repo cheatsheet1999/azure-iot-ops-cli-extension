@@ -2414,9 +2414,9 @@ def load_iotops_adr_help():
         - name: Add a basic management group to an OPC UA asset.
           text: >
             az iot ops ns asset opcua mgmt-group add --asset myopcuaasset --instance myInstance -g myInstanceResourceGroup
-            --name myManagementGroup --data-source mydatasource
+            --name myManagementGroup
 
-        - name: Add a management group with default topic and timeout.
+        - name: Add a management group with data source, default topic and timeout.
           text: >
             az iot ops ns asset opcua mgmt-group add --asset myopcuaasset --instance myInstance -g myInstanceResourceGroup
             --name myManagementGroup --default-topic factory/opcua/management/responses --default-timeout 30
@@ -2517,6 +2517,12 @@ def load_iotops_adr_help():
             az iot ops ns asset opcua mgmt-action add --asset myopcuaasset --instance myInstance -g myInstanceResourceGroup
             --group myManagementGroup --name myAction --target-uri /opcua/device_service?OPCUAProfile=Profile1
             --action-type Call --timeout 30
+
+        - name: Add an action with a type reference.
+          text: >
+            az iot ops ns asset opcua mgmt-action add --asset myopcuaasset --instance myInstance -g myInstanceResourceGroup
+            --group myManagementGroup --name myAction --target-uri /opcua/device_service?OPCUAProfile=Profile1
+            --type-ref ns=2;i=1234
 
         - name: Replace an existing action with the same name.
           text: >

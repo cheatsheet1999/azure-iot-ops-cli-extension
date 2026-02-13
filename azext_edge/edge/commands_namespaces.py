@@ -2356,7 +2356,7 @@ def add_namespace_opcua_asset_management_group(
     instance_name: str,
     instance_resource_group: str,
     group_name: str,
-    data_source: str,
+    data_source: Optional[str] = None,
     default_topic: Optional[str] = None,
     default_timeout: Optional[int] = None,
     # mgmt_custom_configuration: Optional[str] = None,
@@ -2384,7 +2384,7 @@ def add_namespace_onvif_asset_management_group(
     instance_name: str,
     instance_resource_group: str,
     group_name: str,
-    data_source: str,
+    data_source: Optional[str] = None,
     default_topic: Optional[str] = None,
     default_timeout: Optional[int] = None,
     # mgmt_custom_configuration: Optional[str] = None,
@@ -2578,6 +2578,7 @@ def add_namespace_opcua_asset_management_group_action(
     # custom_configuration: Optional[str] = None,
     timeout: Optional[int] = None,
     topic: Optional[str] = None,
+    type_ref: Optional[str] = None,
     replace: Optional[bool] = False,
     **kwargs
 ) -> dict:
@@ -2593,6 +2594,7 @@ def add_namespace_opcua_asset_management_group_action(
         # custom_configuration=custom_configuration,
         timeout=timeout,
         topic=topic,
+        type_ref=type_ref,
         replace=replace,
         **kwargs
     )
