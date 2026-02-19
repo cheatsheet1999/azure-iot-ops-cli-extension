@@ -419,3 +419,23 @@ DATAFLOW_GRAPH_ANNOTATION_DESCRIPTION = "org.opencontainers.artifact.description
 MIN_INSTANCE_VERSION_V2 = "1.2.36"
 MIN_INSTANCE_VERSION_V1_FOR_V2_UPGRADE = "1.1.59"
 MIN_INSTANCE_VERSION_FOR_CM_MIGRATE = "1.2.83"
+
+# Management Actions (outer loop)
+EG_TOPICSPACES_PUBLISHER_ROLE_ID = "a12b0b94-b317-4dcd-84a8-502ce99884c6"
+EG_TOPICSPACES_SUBSCRIBER_ROLE_ID = "4b0f2fd7-60b4-4eca-896f-4435034f8bf5"
+MIN_INSTANCE_VERSION_MGMT_ACTIONS = "1.2.189"
+MGMT_ACTIONS_RESOURCE_PREFIX = "mgmt-actions"
+MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP = "$all"
+MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE = "default"
+
+
+def get_mgmt_actions_resource_name(purpose: str, instance_resource_id: str) -> str:
+    """Build a deterministic resource name for mgmt-actions resources.
+
+    Format: mgmt-actions-{purpose}-{hash8}
+    Where hash8 = first 8 chars of sha256(instance_resource_id).
+    """
+    from ...util.common import url_safe_hash_phrase
+
+    hash8 = url_safe_hash_phrase(instance_resource_id)[:8]
+    return f"{MGMT_ACTIONS_RESOURCE_PREFIX}-{purpose}-{hash8}"
