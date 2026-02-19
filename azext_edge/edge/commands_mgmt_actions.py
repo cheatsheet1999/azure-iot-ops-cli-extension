@@ -6,11 +6,7 @@
 
 from typing import Dict, List, Optional
 
-from knack.log import get_logger
-
 from .providers.orchestration.mgmt_actions import MgmtActions
-
-logger = get_logger(__name__)
 
 
 def mgmt_actions_enable(
