@@ -427,15 +427,5 @@ MIN_INSTANCE_VERSION_MGMT_ACTIONS = "1.2.189"
 MGMT_ACTIONS_RESOURCE_PREFIX = "mgmt-actions"
 MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP = "$all"
 MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE = "default"
-
-
-def get_mgmt_actions_resource_name(purpose: str, instance_resource_id: str) -> str:
-    """Build a deterministic resource name for mgmt-actions resources.
-
-    Format: mgmt-actions-{purpose}-{hash8}
-    Where hash8 = first 8 chars of sha256(instance_resource_id).
-    """
-    from ...util.common import url_safe_hash_phrase
-
-    hash8 = url_safe_hash_phrase(instance_resource_id)[:8]
-    return f"{MGMT_ACTIONS_RESOURCE_PREFIX}-{purpose}-{hash8}"
+MGMT_ACTIONS_REQUEST_TOPIC_TEMPLATE = "actions/requests/{scope_id}/#"
+MGMT_ACTIONS_RESPONSE_TOPIC_TEMPLATE = "actions/responses/{scope_id}/#"
