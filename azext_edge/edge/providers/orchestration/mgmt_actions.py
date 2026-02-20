@@ -19,10 +19,13 @@ from ...util.az_client import (
 from ...util.id_tools import parse_resource_id as parse_resource_id_dict
 from ...util.queryable import Queryable
 from .common import (
+    MANAGED_IDENTITY_API_VERSION,
     MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP,
+    MGMT_ACTIONS_EG_AUDIENCE,
     MGMT_ACTIONS_REQUEST_TOPIC_TEMPLATE,
     MGMT_ACTIONS_RESOURCE_PREFIX,
     MGMT_ACTIONS_RESPONSE_TOPIC_TEMPLATE,
+    MQTT_ENDPOINT_TYPE,
     MIN_INSTANCE_VERSION_MGMT_ACTIONS,
 )
 from .permissions import PermissionManager
@@ -118,6 +121,9 @@ class MgmtActions(Queryable):
         # Step 3-4 — Validate EG namespace (format, existence, topic spaces, MQTT hostname)
         eg_ctx = self._validate_eg_namespace(eg_resource_id)
 
+        # Step 5 — Extract extendedLocation from instance (needed for AIO child resources)
+        extended_location: Dict = instance["extendedLocation"]
+
         # Stage 2 Lane A: Event Grid infrastructure setup
         topic_space_result = self._setup_eg_topic_space(
             eg_ctx=eg_ctx,
@@ -134,8 +140,18 @@ class MgmtActions(Queryable):
             **kwargs,
         )
 
+        # Stage 2 Lane C: AIO EG dataflow endpoint creation
+        dataflow_endpoint_result = self._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=name,
+            instance_resource_id=instance_resource_id,
+            resource_group_name=resource_group_name,
+            extended_location=extended_location,
+            mi_user_assigned=mi_user_assigned,
+            **kwargs,
+        )
+
         # TODO: Stage 2 Lane B — ADR namespace management endpoint setup
-        # TODO: Stage 2 Lane C — AIO EG dataflow endpoint creation
         # TODO: Stage 3 Lane D — Dataflow graph creation
         # TODO: Stage 3 Lane E — Response dataflow creation
         # TODO: Stage 3 Lane F — ADR namespace MI → EG role assignments
@@ -154,6 +170,7 @@ class MgmtActions(Queryable):
                 },
                 "topicSpace": topic_space_result,
                 "permissionBindings": permission_bindings_result,
+                "dataflowEndpoint": dataflow_endpoint_result,
             },
         }
 
@@ -380,3 +397,113 @@ class MgmtActions(Queryable):
             result[key] = {"name": binding_name, "status": "Created"}
 
         return result
+
+    def _setup_eg_dataflow_endpoint(
+        self,
+        eg_ctx: EgNamespaceContext,
+        instance_name: str,
+        instance_resource_id: str,
+        resource_group_name: str,
+        extended_location: Dict,
+        mi_user_assigned: Optional[str] = None,
+        **kwargs,
+    ) -> Dict:
+        """Create or confirm the EG MQTT dataflow endpoint on the AIO instance.
+
+        Uses GET-then-PUT to report accurate status. The endpoint connects to the EG
+        namespace's MQTT broker using managed identity authentication. Defaults to
+        SystemAssigned MI; when mi_user_assigned is provided, a UserAssigned MI is
+        configured instead (requires resolving clientId and tenantId from the UAMI resource).
+        """
+        endpoint_name = get_mgmt_actions_resource_name("ep", instance_resource_id)
+
+        # Check if endpoint already exists
+        try:
+            self.iotops_mgmt_client.dataflow_endpoint.get(
+                resource_group_name=resource_group_name,
+                instance_name=instance_name,
+                dataflow_endpoint_name=endpoint_name,
+            )
+            logger.info(
+                "Dataflow endpoint '%s' already exists on instance '%s'.",
+                endpoint_name,
+                instance_name,
+            )
+            return {"name": endpoint_name, "status": "Exists"}
+        except ResourceNotFoundError:
+            pass
+
+        # Build authentication block
+        if mi_user_assigned:
+            mi_resource = self._resolve_user_assigned_mi(mi_user_assigned)
+            authentication = {
+                "method": "UserAssignedManagedIdentity",
+                "userAssignedManagedIdentitySettings": {
+                    "clientId": mi_resource["properties"]["clientId"],
+                    "tenantId": mi_resource["properties"]["tenantId"],
+                    "scope": MGMT_ACTIONS_EG_AUDIENCE,
+                },
+            }
+        else:
+            authentication = {
+                "method": "SystemAssignedManagedIdentity",
+                "systemAssignedManagedIdentitySettings": {
+                    "audience": MGMT_ACTIONS_EG_AUDIENCE,
+                },
+            }
+
+        resource = {
+            "extendedLocation": extended_location,
+            "properties": {
+                "endpointType": MQTT_ENDPOINT_TYPE,
+                "mqttSettings": {
+                    "host": eg_ctx.mqtt_hostname,
+                    "authentication": authentication,
+                    "tls": {
+                        "mode": "Enabled",
+                    },
+                },
+            },
+        }
+
+        poller = self.iotops_mgmt_client.dataflow_endpoint.begin_create_or_update(
+            resource_group_name=resource_group_name,
+            instance_name=instance_name,
+            dataflow_endpoint_name=endpoint_name,
+            resource=resource,
+        )
+        wait_for_terminal_state(poller, **kwargs)
+        logger.info(
+            "Created dataflow endpoint '%s' on instance '%s'.",
+            endpoint_name,
+            instance_name,
+        )
+
+        return {"name": endpoint_name, "status": "Created"}
+
+    def _resolve_user_assigned_mi(self, mi_resource_id: str) -> Dict:
+        """Fetch a user-assigned managed identity resource to extract clientId and tenantId.
+
+        Uses the base Queryable resource_client for same-subscription lookups. When the
+        UAMI is in a different subscription, creates a cross-subscription client.
+        """
+        parsed = parse_resource_id_dict(mi_resource_id)
+        mi_subscription = parsed.get("subscription", self.default_subscription_id)
+
+        if mi_subscription.lower() != self.default_subscription_id.lower():
+            from ...util.az_client import get_resource_client
+
+            client = get_resource_client(subscription_id=mi_subscription)
+        else:
+            client = self.resource_client
+
+        try:
+            return client.resources.get_by_id(
+                resource_id=mi_resource_id,
+                api_version=MANAGED_IDENTITY_API_VERSION,
+            )
+        except ResourceNotFoundError:
+            raise InvalidArgumentValueError(
+                f"User-assigned managed identity '{mi_resource_id}' not found.\n"
+                f"Verify the --mi-user-assigned value and ensure the identity exists."
+            )

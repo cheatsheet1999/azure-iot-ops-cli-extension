@@ -13,8 +13,10 @@ from azure.cli.core.azclierror import InvalidArgumentValueError, ValidationError
 
 from azext_edge.edge.providers.orchestration.common import (
     MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP,
+    MGMT_ACTIONS_EG_AUDIENCE,
     MGMT_ACTIONS_REQUEST_TOPIC_TEMPLATE,
     MGMT_ACTIONS_RESPONSE_TOPIC_TEMPLATE,
+    MQTT_ENDPOINT_TYPE,
 )
 from azext_edge.edge.providers.orchestration.mgmt_actions import (
     EgNamespaceContext,
@@ -27,6 +29,9 @@ from ...generators import BASE_URL, generate_random_string, generate_resource_id
 ZEROED_SUBSCRIPTION = get_zeroed_subscription()
 EVENTGRID_RP = "Microsoft.EventGrid"
 EVENTGRID_API_VERSION = "2025-02-15"
+IOTOPS_RP = "Microsoft.IoTOperations"
+IOTOPS_API_VERSION = "2026-03-01"
+UAMI_API_VERSION = "2023-01-31"
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +68,54 @@ def _build_eg_endpoint(
         url += sub_resource
     url += f"?api-version={EVENTGRID_API_VERSION}"
     return url
+
+
+def _build_iotops_endpoint(
+    instance_name: str,
+    resource_group_name: str,
+    sub_resource: Optional[str] = None,
+) -> str:
+    """Build a full management endpoint URL for an IoT Operations instance or sub-resource."""
+    url = (
+        f"{BASE_URL}/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{resource_group_name}"
+        f"/providers/{IOTOPS_RP}/instances/{instance_name}"
+    )
+    if sub_resource:
+        url += sub_resource
+    url += f"?api-version={IOTOPS_API_VERSION}"
+    return url
+
+
+def _build_uami_endpoint(mi_resource_id: str) -> str:
+    """Build a full management endpoint URL for a user-assigned managed identity GET."""
+    return f"{BASE_URL}{mi_resource_id}?api-version={UAMI_API_VERSION}"
+
+
+def _build_uami_resource_id(
+    identity_name: str,
+    resource_group_name: str,
+    subscription_id: Optional[str] = None,
+) -> str:
+    sub_id = subscription_id or ZEROED_SUBSCRIPTION
+    return (
+        f"/subscriptions/{sub_id}/resourceGroups/{resource_group_name}"
+        f"/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{identity_name}"
+    )
+
+
+def _build_uami_response(
+    mi_resource_id: str,
+    client_id: str,
+    tenant_id: str,
+) -> dict:
+    return {
+        "id": mi_resource_id,
+        "properties": {
+            "clientId": client_id,
+            "tenantId": tenant_id,
+            "principalId": "00000000-0000-0000-0000-aaaaaaaaaaaa",
+        },
+    }
 
 
 def _build_namespace_response(
@@ -130,6 +183,30 @@ def _get_expected_topic_templates(instance_name: str) -> list:
         MGMT_ACTIONS_REQUEST_TOPIC_TEMPLATE.format(scope_id=instance_name),
         MGMT_ACTIONS_RESPONSE_TOPIC_TEMPLATE.format(scope_id=instance_name),
     ]
+
+
+def _make_eg_ctx(
+    namespace_name: Optional[str] = None,
+    resource_group_name: Optional[str] = None,
+    mqtt_hostname: Optional[str] = None,
+) -> EgNamespaceContext:
+    ns = namespace_name or "test-ns"
+    rg = resource_group_name or "test-rg"
+    return EgNamespaceContext(
+        resource_id=_build_eg_resource_id(ns, rg),
+        subscription_id=ZEROED_SUBSCRIPTION,
+        resource_group_name=rg,
+        namespace_name=ns,
+        mqtt_hostname=mqtt_hostname or "test-ns.eastus-1.ts.eventgrid.azure.net",
+    )
+
+
+def _make_extended_location() -> dict:
+    return {
+        "name": f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/test-rg"
+                f"/providers/Microsoft.ExtendedLocation/customLocations/my-cl",
+        "type": "CustomLocation",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -278,28 +355,13 @@ class TestValidateEgNamespace:
 class TestSetupEgTopicSpace:
     """Tests for MgmtActions._setup_eg_topic_space()."""
 
-    def _make_eg_ctx(
-        self,
-        namespace_name: Optional[str] = None,
-        resource_group_name: Optional[str] = None,
-    ) -> EgNamespaceContext:
-        return EgNamespaceContext(
-            resource_id=_build_eg_resource_id(
-                namespace_name or "test-ns", resource_group_name or "test-rg"
-            ),
-            subscription_id=ZEROED_SUBSCRIPTION,
-            resource_group_name=resource_group_name or "test-rg",
-            namespace_name=namespace_name or "test-ns",
-            mqtt_hostname="test-ns.eastus-1.ts.eventgrid.azure.net",
-        )
-
     def test_create_new_topic_space(self, mocked_cmd, mocked_responses: responses):
         """When topic space does not exist, creates it and returns status 'Created'."""
         ns_name = generate_random_string()
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        eg_ctx = self._make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
+        eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
 
         ts_name = get_mgmt_actions_resource_name("ops", instance_rid)
         expected_templates = _get_expected_topic_templates(instance_name)
@@ -344,7 +406,7 @@ class TestSetupEgTopicSpace:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        eg_ctx = self._make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
+        eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
 
         ts_name = get_mgmt_actions_resource_name("ops", instance_rid)
         expected_templates = _get_expected_topic_templates(instance_name)
@@ -399,27 +461,12 @@ class TestSetupEgTopicSpace:
 class TestSetupEgPermissionBindings:
     """Tests for MgmtActions._setup_eg_permission_bindings()."""
 
-    def _make_eg_ctx(
-        self,
-        namespace_name: Optional[str] = None,
-        resource_group_name: Optional[str] = None,
-    ) -> EgNamespaceContext:
-        return EgNamespaceContext(
-            resource_id=_build_eg_resource_id(
-                namespace_name or "test-ns", resource_group_name or "test-rg"
-            ),
-            subscription_id=ZEROED_SUBSCRIPTION,
-            resource_group_name=resource_group_name or "test-rg",
-            namespace_name=namespace_name or "test-ns",
-            mqtt_hostname="test-ns.eastus-1.ts.eventgrid.azure.net",
-        )
-
     def test_create_both_bindings(self, mocked_cmd, mocked_responses: responses):
         """When neither binding exists, creates both and returns status 'Created'."""
         ns_name = generate_random_string()
         rg = generate_random_string()
         instance_rid = _build_eg_resource_id("inst", rg)
-        eg_ctx = self._make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
+        eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
         ts_name = get_mgmt_actions_resource_name("ops", instance_rid)
         pub_name = get_mgmt_actions_resource_name("pub", instance_rid)
         sub_name = get_mgmt_actions_resource_name("sub", instance_rid)
@@ -481,7 +528,7 @@ class TestSetupEgPermissionBindings:
         ns_name = generate_random_string()
         rg = generate_random_string()
         instance_rid = _build_eg_resource_id("inst", rg)
-        eg_ctx = self._make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
+        eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
         ts_name = get_mgmt_actions_resource_name("ops", instance_rid)
         pub_name = get_mgmt_actions_resource_name("pub", instance_rid)
         sub_name = get_mgmt_actions_resource_name("sub", instance_rid)
@@ -518,7 +565,7 @@ class TestSetupEgPermissionBindings:
         ns_name = generate_random_string()
         rg = generate_random_string()
         instance_rid = _build_eg_resource_id("inst", rg)
-        eg_ctx = self._make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
+        eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
         ts_name = get_mgmt_actions_resource_name("ops", instance_rid)
         pub_name = get_mgmt_actions_resource_name("pub", instance_rid)
         sub_name = get_mgmt_actions_resource_name("sub", instance_rid)
@@ -562,7 +609,7 @@ class TestSetupEgPermissionBindings:
         ns_name = generate_random_string()
         rg = generate_random_string()
         instance_rid = _build_eg_resource_id("inst", rg)
-        eg_ctx = self._make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
+        eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
         ts_name = get_mgmt_actions_resource_name("ops", instance_rid)
         pub_name = get_mgmt_actions_resource_name("pub", instance_rid)
         sub_name = get_mgmt_actions_resource_name("sub", instance_rid)
@@ -606,7 +653,7 @@ class TestSetupEgPermissionBindings:
         ns_name = generate_random_string()
         rg = generate_random_string()
         instance_rid = _build_eg_resource_id("inst", rg)
-        eg_ctx = self._make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
+        eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
         ts_name = get_mgmt_actions_resource_name("ops", instance_rid)
         pub_name = get_mgmt_actions_resource_name("pub", instance_rid)
         sub_name = get_mgmt_actions_resource_name("sub", instance_rid)
@@ -637,3 +684,290 @@ class TestSetupEgPermissionBindings:
 
         pub_body = json.loads(mocked_responses.calls[1].request.body)
         assert pub_body["properties"]["clientGroupName"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
+
+
+# ---------------------------------------------------------------------------
+# _setup_eg_dataflow_endpoint tests
+# ---------------------------------------------------------------------------
+
+
+class TestSetupEgDataflowEndpoint:
+    """Tests for MgmtActions._setup_eg_dataflow_endpoint()."""
+
+    def test_create_new_system_assigned(self, mocked_cmd, mocked_responses: responses):
+        """When endpoint does not exist and no UAMI, creates with SystemAssigned MI."""
+        ns_name = generate_random_string()
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
+        extended_location = _make_extended_location()
+
+        ep_name = get_mgmt_actions_resource_name("ep", instance_rid)
+
+        # GET returns 404 (doesn't exist)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        # PUT creates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            wait_sec=0,
+        )
+
+        assert result["name"] == ep_name
+        assert result["status"] == "Created"
+        assert len(mocked_responses.calls) == 2
+
+        # Verify the PUT payload
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        assert put_body["extendedLocation"] == extended_location
+        props = put_body["properties"]
+        assert props["endpointType"] == MQTT_ENDPOINT_TYPE
+        mqtt = props["mqttSettings"]
+        assert mqtt["host"] == eg_ctx.mqtt_hostname
+        assert mqtt["tls"] == {"mode": "Enabled"}
+        auth = mqtt["authentication"]
+        assert auth["method"] == "SystemAssignedManagedIdentity"
+        assert auth["systemAssignedManagedIdentitySettings"]["audience"] == MGMT_ACTIONS_EG_AUDIENCE
+
+    def test_create_new_user_assigned(self, mocked_cmd, mocked_responses: responses):
+        """When endpoint does not exist and UAMI is provided, creates with UserAssigned MI."""
+        ns_name = generate_random_string()
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
+        extended_location = _make_extended_location()
+
+        ep_name = get_mgmt_actions_resource_name("ep", instance_rid)
+        uami_name = generate_random_string()
+        uami_rid = _build_uami_resource_id(uami_name, rg)
+        uami_client_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        uami_tenant_id = "tttttttt-tttt-tttt-tttt-tttttttttttt"
+
+        # GET dataflow endpoint returns 404
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        # GET UAMI returns identity details
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_uami_endpoint(uami_rid),
+            json=_build_uami_response(uami_rid, uami_client_id, uami_tenant_id),
+            status=200,
+        )
+        # PUT creates endpoint
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            mi_user_assigned=uami_rid,
+            wait_sec=0,
+        )
+
+        assert result["name"] == ep_name
+        assert result["status"] == "Created"
+        # GET endpoint (404) + GET UAMI (200) + PUT endpoint (200) = 3
+        assert len(mocked_responses.calls) == 3
+
+        # Verify the PUT payload
+        put_body = json.loads(mocked_responses.calls[2].request.body)
+        auth = put_body["properties"]["mqttSettings"]["authentication"]
+        assert auth["method"] == "UserAssignedManagedIdentity"
+        uami_settings = auth["userAssignedManagedIdentitySettings"]
+        assert uami_settings["clientId"] == uami_client_id
+        assert uami_settings["tenantId"] == uami_tenant_id
+        assert uami_settings["scope"] == MGMT_ACTIONS_EG_AUDIENCE
+
+    def test_existing_endpoint(self, mocked_cmd, mocked_responses: responses):
+        """When endpoint already exists, returns status 'Exists' without PUT."""
+        ns_name = generate_random_string()
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
+        extended_location = _make_extended_location()
+
+        ep_name = get_mgmt_actions_resource_name("ep", instance_rid)
+
+        # GET returns 200 (already exists)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            wait_sec=0,
+        )
+
+        assert result["name"] == ep_name
+        assert result["status"] == "Exists"
+        # Only the GET call, no PUT
+        assert len(mocked_responses.calls) == 1
+
+    def test_deterministic_naming(self, mocked_cmd, mocked_responses: responses):
+        """Endpoint name is deterministic based on instance resource ID."""
+        rg = generate_random_string()
+        instance_rid = _build_eg_resource_id("some-instance", rg)
+
+        name_a = get_mgmt_actions_resource_name("ep", instance_rid)
+        name_b = get_mgmt_actions_resource_name("ep", instance_rid)
+        assert name_a == name_b
+        assert name_a.startswith("mgmt-actions-ep-")
+        assert len(name_a) == 24  # "mgmt-actions-ep-" (16) + hash8 (8) = 24
+
+    def test_host_is_raw_hostname(self, mocked_cmd, mocked_responses: responses):
+        """Host in the MQTT settings is the raw MQTT hostname without port."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        hostname = "my-ns.westus2-1.ts.eventgrid.azure.net"
+        eg_ctx = _make_eg_ctx(
+            namespace_name="my-ns", resource_group_name=rg, mqtt_hostname=hostname,
+        )
+        extended_location = _make_extended_location()
+        ep_name = get_mgmt_actions_resource_name("ep", instance_rid)
+
+        # GET 404, PUT 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            wait_sec=0,
+        )
+
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        assert put_body["properties"]["mqttSettings"]["host"] == hostname
+        # Verify no port appended
+        assert ":" not in put_body["properties"]["mqttSettings"]["host"]
+
+    def test_tls_enabled_no_custom_ca(self, mocked_cmd, mocked_responses: responses):
+        """TLS is enabled without a custom CA configmap for EG public endpoints."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        eg_ctx = _make_eg_ctx(resource_group_name=rg)
+        extended_location = _make_extended_location()
+        ep_name = get_mgmt_actions_resource_name("ep", instance_rid)
+
+        # GET 404, PUT 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            wait_sec=0,
+        )
+
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        tls = put_body["properties"]["mqttSettings"]["tls"]
+        assert tls["mode"] == "Enabled"
+        assert "trustedCaCertificateConfigMapRef" not in tls
+
+    def test_uami_not_found(self, mocked_cmd, mocked_responses: responses):
+        """When UAMI resource is not found, raises InvalidArgumentValueError."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        eg_ctx = _make_eg_ctx(resource_group_name=rg)
+        extended_location = _make_extended_location()
+        ep_name = get_mgmt_actions_resource_name("ep", instance_rid)
+        uami_rid = _build_uami_resource_id("missing-identity", rg)
+
+        # GET endpoint returns 404
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        # GET UAMI returns 404
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_uami_endpoint(uami_rid),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        with pytest.raises(InvalidArgumentValueError, match="not found"):
+            provider._setup_eg_dataflow_endpoint(
+                eg_ctx=eg_ctx,
+                instance_name=instance_name,
+                instance_resource_id=instance_rid,
+                resource_group_name=rg,
+                extended_location=extended_location,
+                mi_user_assigned=uami_rid,
+                wait_sec=0,
+            )
+
+        # GET endpoint (404) + GET UAMI (404) = 2, no PUT
+        assert len(mocked_responses.calls) == 2
