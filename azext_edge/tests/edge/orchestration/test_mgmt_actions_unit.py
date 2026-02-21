@@ -13,14 +13,20 @@ from azure.cli.core.azclierror import InvalidArgumentValueError, ValidationError
 
 from azext_edge.edge.providers.orchestration.common import (
     MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP,
+    MGMT_ACTIONS_DEFAULT_MQTT_ENDPOINT,
+    MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT,
     MGMT_ACTIONS_EG_AUDIENCE,
+    MGMT_ACTIONS_GRAPH_ARTIFACT,
+    MGMT_ACTIONS_GRAPH_RULES_VERSION,
     MGMT_ACTIONS_REQUEST_TOPIC_TEMPLATE,
     MGMT_ACTIONS_RESPONSE_TOPIC_TEMPLATE,
+    MIN_INSTANCE_VERSION_MGMT_ACTIONS,
     MQTT_ENDPOINT_TYPE,
 )
 from azext_edge.edge.providers.orchestration.mgmt_actions import (
     EgNamespaceContext,
     MgmtActions,
+    _build_graph_rules_config,
     get_mgmt_actions_resource_name,
 )
 
@@ -206,6 +212,27 @@ def _make_extended_location() -> dict:
         "name": f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/test-rg"
                 f"/providers/Microsoft.ExtendedLocation/customLocations/my-cl",
         "type": "CustomLocation",
+    }
+
+
+def _build_instance_response(
+    instance_name: str,
+    resource_group_name: str,
+    version: str = MIN_INSTANCE_VERSION_MGMT_ACTIONS,
+) -> dict:
+    extended_location = _make_extended_location()
+    return {
+        "id": (
+            f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{resource_group_name}"
+            f"/providers/{IOTOPS_RP}/instances/{instance_name}"
+        ),
+        "name": instance_name,
+        "location": "eastus",
+        "extendedLocation": extended_location,
+        "properties": {
+            "version": version,
+            "provisioningState": "Succeeded",
+        },
     }
 
 
@@ -971,3 +998,383 @@ class TestSetupEgDataflowEndpoint:
 
         # GET endpoint (404) + GET UAMI (404) = 2, no PUT
         assert len(mocked_responses.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# _setup_dataflow_graph tests
+# ---------------------------------------------------------------------------
+
+
+class TestSetupDataflowGraph:
+    """Tests for MgmtActions._setup_dataflow_graph()."""
+
+    def test_create_new(self, mocked_cmd, mocked_responses: responses):
+        """When graph does not exist, creates with correct nodes and connections."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        extended_location = _make_extended_location()
+        profile_name = "default"
+        eg_ep_name = get_mgmt_actions_resource_name("ep", instance_rid)
+        graph_name = get_mgmt_actions_resource_name("graph", instance_rid)
+
+        # GET returns 404
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                instance_name, rg,
+                sub_resource=f"/dataflowProfiles/{profile_name}/dataflowGraphs/{graph_name}",
+            ),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        # PUT creates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(
+                instance_name, rg,
+                sub_resource=f"/dataflowProfiles/{profile_name}/dataflowGraphs/{graph_name}",
+            ),
+            json={"id": f"/fake/path/dataflowGraphs/{graph_name}", "name": graph_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_dataflow_graph(
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            eg_dataflow_endpoint_name=eg_ep_name,
+            dataflow_profile_name=profile_name,
+            wait_sec=0,
+        )
+
+        assert result["name"] == graph_name
+        assert result["status"] == "Created"
+        assert len(mocked_responses.calls) == 2
+
+        # Verify PUT payload structure
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        assert put_body["extendedLocation"] == extended_location
+        props = put_body["properties"]
+        assert props["mode"] == "Enabled"
+
+        # Verify 3 nodes
+        nodes = props["nodes"]
+        assert len(nodes) == 3
+
+        source_node = nodes[0]
+        assert source_node["name"] == "source"
+        assert source_node["nodeType"] == "Source"
+        assert source_node["sourceSettings"]["endpointRef"] == eg_ep_name
+        assert source_node["sourceSettings"]["dataSources"] == [f"actions/requests/{instance_name}/#"]
+
+        graph_node = nodes[1]
+        assert graph_node["name"] == "graph"
+        assert graph_node["nodeType"] == "Graph"
+        gs = graph_node["graphSettings"]
+        assert gs["registryEndpointRef"] == MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT
+        assert gs["artifact"] == MGMT_ACTIONS_GRAPH_ARTIFACT
+        # Verify configuration is a list with key-value structure
+        config = gs["configuration"]
+        assert isinstance(config, list)
+        assert len(config) == 1
+        assert config[0]["key"] == "rules"
+        rules_value = json.loads(config[0]["value"])
+        assert rules_value["version"] == MGMT_ACTIONS_GRAPH_RULES_VERSION
+        assert len(rules_value["map"]) == 2
+        assert f"^actions/requests/{instance_name}/" in rules_value["map"][0]["expression"]
+
+        dest_node = nodes[2]
+        assert dest_node["name"] == "destination"
+        assert dest_node["nodeType"] == "Destination"
+        assert dest_node["destinationSettings"]["endpointRef"] == MGMT_ACTIONS_DEFAULT_MQTT_ENDPOINT
+        assert dest_node["destinationSettings"]["dataDestination"] == "${outputTopic}"
+
+        # Verify 2 connections
+        conns = props["nodeConnections"]
+        assert len(conns) == 2
+        assert conns[0]["from"]["name"] == "source"
+        assert conns[0]["to"]["name"] == "graph"
+        assert conns[1]["from"]["name"] == "graph"
+        assert conns[1]["to"]["name"] == "destination"
+
+    def test_already_exists(self, mocked_cmd, mocked_responses: responses):
+        """When graph already exists, returns 'Exists' without PUT."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        extended_location = _make_extended_location()
+        profile_name = "default"
+        graph_name = get_mgmt_actions_resource_name("graph", instance_rid)
+        eg_ep_name = get_mgmt_actions_resource_name("ep", instance_rid)
+
+        # GET returns 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                instance_name, rg,
+                sub_resource=f"/dataflowProfiles/{profile_name}/dataflowGraphs/{graph_name}",
+            ),
+            json={"id": f"/fake/path/dataflowGraphs/{graph_name}", "name": graph_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_dataflow_graph(
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            eg_dataflow_endpoint_name=eg_ep_name,
+            dataflow_profile_name=profile_name,
+            wait_sec=0,
+        )
+
+        assert result["name"] == graph_name
+        assert result["status"] == "Exists"
+        assert len(mocked_responses.calls) == 1
+
+    def test_deterministic_naming(self, mocked_cmd, mocked_responses: responses):
+        """Graph name is deterministic and uses 'graph' purpose."""
+        rg = generate_random_string()
+        instance_rid = _build_eg_resource_id("some-instance", rg)
+
+        name_a = get_mgmt_actions_resource_name("graph", instance_rid)
+        name_b = get_mgmt_actions_resource_name("graph", instance_rid)
+        assert name_a == name_b
+        assert name_a.startswith("mgmt-actions-graph-")
+        assert len(name_a) == 27  # "mgmt-actions-graph-" (19) + hash8 (8) = 27
+
+    def test_custom_dataflow_profile(self, mocked_cmd, mocked_responses: responses):
+        """Graph is created under the specified dataflow profile, not just 'default'."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        extended_location = _make_extended_location()
+        custom_profile = "my-custom-profile"
+        graph_name = get_mgmt_actions_resource_name("graph", instance_rid)
+        eg_ep_name = get_mgmt_actions_resource_name("ep", instance_rid)
+
+        # GET returns 404
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                instance_name, rg,
+                sub_resource=f"/dataflowProfiles/{custom_profile}/dataflowGraphs/{graph_name}",
+            ),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        # PUT creates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(
+                instance_name, rg,
+                sub_resource=f"/dataflowProfiles/{custom_profile}/dataflowGraphs/{graph_name}",
+            ),
+            json={"id": f"/fake/path/dataflowGraphs/{graph_name}", "name": graph_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_dataflow_graph(
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            eg_dataflow_endpoint_name=eg_ep_name,
+            dataflow_profile_name=custom_profile,
+            wait_sec=0,
+        )
+
+        assert result["name"] == graph_name
+        assert result["status"] == "Created"
+        assert len(mocked_responses.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# _build_graph_rules_config tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildGraphRulesConfig:
+    """Tests for the _build_graph_rules_config module-level helper."""
+
+    def test_produces_valid_config_list(self):
+        """Output is a key-value list with a JSON string rules value."""
+        result = _build_graph_rules_config(topic_prefix_regex="^actions/requests/myinst/")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["key"] == "rules"
+        rules_value = json.loads(result[0]["value"])
+        assert rules_value["version"] == MGMT_ACTIONS_GRAPH_RULES_VERSION
+        assert rules_value["datasets"] == []
+        assert len(rules_value["map"]) == 2
+
+    def test_topic_prefix_regex_in_expression(self):
+        """The topic prefix regex is embedded in the regex_replace expression."""
+        regex = "^actions/requests/[^/]+/"
+        result = _build_graph_rules_config(topic_prefix_regex=regex)
+        rules_value = json.loads(result[0]["value"])
+        strip_entry = rules_value["map"][0]
+        assert strip_entry["description"] == "Strip the topic prefix"
+        assert strip_entry["inputs"] == ["$metadata.topic"]
+        assert strip_entry["output"] == "$metadata.topic"
+        assert regex in strip_entry["expression"]
+
+    def test_copy_payload_entry(self):
+        """The second map entry copies the full payload through."""
+        result = _build_graph_rules_config(topic_prefix_regex="^test/")
+        rules_value = json.loads(result[0]["value"])
+        copy_entry = rules_value["map"][1]
+        assert copy_entry["description"] == "Copy the payload"
+        assert copy_entry["inputs"] == ["*"]
+        assert copy_entry["output"] == "*"
+
+
+# ---------------------------------------------------------------------------
+# enable() orchestration tests
+# ---------------------------------------------------------------------------
+
+
+class TestEnable:
+    """Tests for MgmtActions.enable() — orchestration wiring and return structure.
+
+    Individual sub-method logic (payloads, error paths, naming) is tested in
+    the dedicated Test* classes above. These tests focus on how enable() ties
+    the stages together and the shape of the return object.
+    """
+
+    def test_happy_path_return_structure(self, mocked_cmd, mocked_responses: responses):
+        """All resources created fresh — validates return object shape and key data flow."""
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+        ns_name = generate_random_string()
+        hostname = f"{ns_name}.eastus-1.ts.eventgrid.azure.net"
+
+        instance_response = _build_instance_response(instance_name, rg)
+        instance_rid = instance_response["id"]
+        eg_rid = _build_eg_resource_id(ns_name, rg)
+
+        ts_name = get_mgmt_actions_resource_name("ops", instance_rid)
+        pub_name = get_mgmt_actions_resource_name("pub", instance_rid)
+        sub_name = get_mgmt_actions_resource_name("sub", instance_rid)
+        ep_name = get_mgmt_actions_resource_name("ep", instance_rid)
+        graph_name = get_mgmt_actions_resource_name("graph", instance_rid)
+
+        # 1. GET instance
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg),
+            json=instance_response,
+            status=200,
+        )
+        # 2. GET EG namespace
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_eg_endpoint(ns_name, rg),
+            json=_build_namespace_response(ns_name, rg, mqtt_hostname=hostname),
+            status=200,
+        )
+        # 3-4. Topic space: GET 404, PUT 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_eg_endpoint(ns_name, rg, sub_resource=f"/topicSpaces/{ts_name}"),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_eg_endpoint(ns_name, rg, sub_resource=f"/topicSpaces/{ts_name}"),
+            json=_build_topic_space_response(ts_name, _get_expected_topic_templates(instance_name)),
+            status=200,
+        )
+        # 5-8. Permission bindings (pub + sub): each GET 404, PUT 200
+        for name, perm in [(pub_name, "Publisher"), (sub_name, "Subscriber")]:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(ns_name, rg, sub_resource=f"/permissionBindings/{name}"),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+            mocked_responses.add(
+                method=responses.PUT,
+                url=_build_eg_endpoint(ns_name, rg, sub_resource=f"/permissionBindings/{name}"),
+                json=_build_permission_binding_response(name, perm, ts_name),
+                status=200,
+            )
+        # 9-10. Dataflow endpoint: GET 404, PUT 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+        # 11-12. Dataflow graph: GET 404, PUT 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                instance_name, rg,
+                sub_resource=f"/dataflowProfiles/default/dataflowGraphs/{graph_name}",
+            ),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(
+                instance_name, rg,
+                sub_resource=f"/dataflowProfiles/default/dataflowGraphs/{graph_name}",
+            ),
+            json={"id": f"/fake/path/dataflowGraphs/{graph_name}", "name": graph_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.enable(
+            name=instance_name,
+            resource_group_name=rg,
+            eg_resource_id=eg_rid,
+            wait_sec=0,
+        )
+
+        # -- Assert top-level keys --
+        assert set(result.keys()) == {"instance", "eventGrid"}
+
+        # -- Assert instance section --
+        inst = result["instance"]
+        assert inst["name"] == instance_name
+        assert inst["resourceId"] == instance_rid
+        assert inst["version"] == MIN_INSTANCE_VERSION_MGMT_ACTIONS
+        # dataflowEndpoint is an instance child resource, not under eventGrid
+        assert "dataflowEndpoint" in inst
+        assert inst["dataflowEndpoint"]["name"] == ep_name
+        assert inst["dataflowEndpoint"]["status"] == "Created"
+        assert inst["dataflowGraph"]["name"] == graph_name
+        assert inst["dataflowGraph"]["status"] == "Created"
+
+        # -- Assert eventGrid section --
+        eg = result["eventGrid"]
+        assert eg["namespace"]["resourceId"] == eg_rid
+        assert eg["namespace"]["mqttHostname"] == hostname
+        assert "dataflowEndpoint" not in eg  # must not be here
+
+        assert eg["topicSpace"]["name"] == ts_name
+        assert eg["topicSpace"]["status"] == "Created"
+
+        assert eg["permissionBindings"]["publisher"]["name"] == pub_name
+        assert eg["permissionBindings"]["subscriber"]["name"] == sub_name
+
+        # -- Assert total HTTP call count: 12 --
+        # GET instance + GET namespace + (GET+PUT topic space) +
+        # (GET+PUT pub binding) + (GET+PUT sub binding) + (GET+PUT endpoint) +
+        # (GET+PUT dataflow graph)
+        assert len(mocked_responses.calls) == 12
