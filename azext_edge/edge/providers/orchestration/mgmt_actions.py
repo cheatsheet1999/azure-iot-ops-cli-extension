@@ -23,15 +23,15 @@ from .common import (
     MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE,
     MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP,
     MGMT_ACTIONS_DEFAULT_MQTT_ENDPOINT,
-    MGMT_ACTIONS_EG_AUDIENCE,
     MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT,
+    MGMT_ACTIONS_EG_AUDIENCE,
     MGMT_ACTIONS_GRAPH_ARTIFACT,
     MGMT_ACTIONS_GRAPH_RULES_VERSION,
     MGMT_ACTIONS_REQUEST_TOPIC_TEMPLATE,
     MGMT_ACTIONS_RESOURCE_PREFIX,
     MGMT_ACTIONS_RESPONSE_TOPIC_TEMPLATE,
-    MQTT_ENDPOINT_TYPE,
     MIN_INSTANCE_VERSION_MGMT_ACTIONS,
+    MQTT_ENDPOINT_TYPE,
 )
 from .permissions import PermissionManager
 
@@ -199,20 +199,34 @@ class MgmtActions(Queryable):
             **kwargs,
         )
 
-        # TODO: Stage 3 Lane E — Response dataflow creation
+        # Response dataflow (edge→cloud: local MQTT → EG)
+        response_dataflow_result = self._setup_response_dataflow(
+            instance_name=name,
+            instance_resource_id=instance_resource_id,
+            resource_group_name=resource_group_name,
+            extended_location=extended_location,
+            eg_dataflow_endpoint_name=dataflow_endpoint_result["name"],
+            dataflow_profile_name=resolved_profile,
+            **kwargs,
+        )
+
         # TODO: Stage 3 Lane F — ADR namespace MI → EG role assignments
         # TODO: Stage 3 Lane G — AIO extension MI → EG role assignments
 
         return {
             "instance": {
                 "name": name,
+                "resourceGroup": resource_group_name,
                 "resourceId": instance_resource_id,
                 "version": instance_version,
+                "dataflowProfile": resolved_profile,
                 "dataflowEndpoint": dataflow_endpoint_result,
-                "dataflowGraph": dataflow_graph_result,
+                "requestDataflowGraph": dataflow_graph_result,
+                "responseDataflow": response_dataflow_result,
             },
             "eventGrid": {
                 "namespace": {
+                    "name": eg_ctx.namespace_name,
                     "resourceId": eg_ctx.resource_id,
                     "mqttHostname": eg_ctx.mqtt_hostname,
                 },
@@ -348,6 +362,7 @@ class MgmtActions(Queryable):
                 "name": topic_space_name,
                 "status": "Exists",
                 "topicTemplates": topic_templates,
+                "scopeId": instance_name,
             }
         except ResourceNotFoundError:
             pass
@@ -373,6 +388,7 @@ class MgmtActions(Queryable):
             "name": topic_space_name,
             "status": "Created",
             "topicTemplates": topic_templates,
+            "scopeId": instance_name,
         }
 
     def _setup_eg_permission_bindings(
@@ -409,7 +425,7 @@ class MgmtActions(Queryable):
                     binding_name,
                     eg_ctx.namespace_name,
                 )
-                result[key] = {"name": binding_name, "status": "Exists"}
+                result[key] = {"name": binding_name, "status": "Exists", "clientGroup": client_group}
                 continue
             except ResourceNotFoundError:
                 pass
@@ -439,7 +455,7 @@ class MgmtActions(Queryable):
                 permission,
                 eg_ctx.namespace_name,
             )
-            result[key] = {"name": binding_name, "status": "Created"}
+            result[key] = {"name": binding_name, "status": "Created", "clientGroup": client_group}
 
         return result
 
@@ -460,7 +476,7 @@ class MgmtActions(Queryable):
         SystemAssigned MI; when mi_user_assigned is provided, a UserAssigned MI is
         configured instead (requires resolving clientId and tenantId from the UAMI resource).
         """
-        endpoint_name = get_mgmt_actions_resource_name("ep", instance_resource_id)
+        endpoint_name = get_mgmt_actions_resource_name("eg", instance_resource_id)
 
         # Check if endpoint already exists
         try:
@@ -542,7 +558,7 @@ class MgmtActions(Queryable):
         and back to a local MQTT destination. Three nodes (Source → Graph → Destination)
         with two connections form the pipeline.
         """
-        graph_name = get_mgmt_actions_resource_name("graph", instance_resource_id)
+        graph_name = get_mgmt_actions_resource_name("req", instance_resource_id)
 
         # Check if dataflow graph already exists
         try:
@@ -626,6 +642,83 @@ class MgmtActions(Queryable):
         )
 
         return {"name": graph_name, "status": "Created"}
+
+    def _setup_response_dataflow(
+        self,
+        instance_name: str,
+        instance_resource_id: str,
+        resource_group_name: str,
+        extended_location: Dict,
+        eg_dataflow_endpoint_name: str,
+        dataflow_profile_name: str,
+        **kwargs,
+    ) -> Dict:
+        """Create or confirm the management actions response dataflow on the AIO instance.
+
+        Routes response messages from the local MQTT broker back to Event Grid.
+        This is a simple source→destination pipeline (not a graph) — responses don't
+        require topic transformation because they already carry the full topic path.
+        """
+        dataflow_name = get_mgmt_actions_resource_name("resp", instance_resource_id)
+
+        # Check if response dataflow already exists
+        try:
+            self.iotops_mgmt_client.dataflow.get(
+                resource_group_name=resource_group_name,
+                instance_name=instance_name,
+                dataflow_profile_name=dataflow_profile_name,
+                dataflow_name=dataflow_name,
+            )
+            logger.info(
+                "Response dataflow '%s' already exists on instance '%s'.",
+                dataflow_name,
+                instance_name,
+            )
+            return {"name": dataflow_name, "status": "Exists"}
+        except ResourceNotFoundError:
+            pass
+
+        response_topic = MGMT_ACTIONS_RESPONSE_TOPIC_TEMPLATE.format(scope_id=instance_name)
+
+        resource = {
+            "extendedLocation": extended_location,
+            "properties": {
+                "mode": "Enabled",
+                "operations": [
+                    {
+                        "operationType": "Source",
+                        "sourceSettings": {
+                            "endpointRef": MGMT_ACTIONS_DEFAULT_MQTT_ENDPOINT,
+                            "dataSources": [response_topic],
+                        },
+                    },
+                    {
+                        "operationType": "Destination",
+                        "destinationSettings": {
+                            "endpointRef": eg_dataflow_endpoint_name,
+                            "dataDestination": "${inputTopic}",
+                        },
+                    },
+                ],
+            },
+        }
+
+        poller = self.iotops_mgmt_client.dataflow.begin_create_or_update(
+            resource_group_name=resource_group_name,
+            instance_name=instance_name,
+            dataflow_profile_name=dataflow_profile_name,
+            dataflow_name=dataflow_name,
+            resource=resource,
+        )
+        wait_for_terminal_state(poller, **kwargs)
+        logger.info(
+            "Created response dataflow '%s' on instance '%s' (profile: '%s').",
+            dataflow_name,
+            instance_name,
+            dataflow_profile_name,
+        )
+
+        return {"name": dataflow_name, "status": "Created"}
 
     def _resolve_user_assigned_mi(self, mi_resource_id: str) -> Dict:
         """Fetch a user-assigned managed identity resource to extract clientId and tenantId.
