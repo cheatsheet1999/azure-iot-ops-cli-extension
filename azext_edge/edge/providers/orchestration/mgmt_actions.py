@@ -4,6 +4,7 @@
 # Licensed under the MIT License. See License file in the project root for license information.
 # ----------------------------------------------------------------------------------------------
 
+import json
 from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional
 
 from azure.cli.core.azclierror import InvalidArgumentValueError, ValidationError
@@ -13,17 +14,24 @@ from knack.log import get_logger
 from ...util.az_client import (
     get_eventgrid_mgmt_client,
     get_iotops_mgmt_client,
-    get_registry_mgmt_client,
     wait_for_terminal_state,
 )
 from ...util.id_tools import parse_resource_id as parse_resource_id_dict
 from ...util.queryable import Queryable
 from .common import (
+    MANAGED_IDENTITY_API_VERSION,
+    MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE,
     MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP,
+    MGMT_ACTIONS_DEFAULT_MQTT_ENDPOINT,
+    MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT,
+    MGMT_ACTIONS_EG_AUDIENCE,
+    MGMT_ACTIONS_GRAPH_ARTIFACT,
+    MGMT_ACTIONS_GRAPH_RULES_VERSION,
     MGMT_ACTIONS_REQUEST_TOPIC_TEMPLATE,
     MGMT_ACTIONS_RESOURCE_PREFIX,
     MGMT_ACTIONS_RESPONSE_TOPIC_TEMPLATE,
     MIN_INSTANCE_VERSION_MGMT_ACTIONS,
+    MQTT_ENDPOINT_TYPE,
 )
 from .permissions import PermissionManager
 
@@ -43,6 +51,39 @@ def get_mgmt_actions_resource_name(purpose: str, instance_resource_id: str) -> s
 
     hash8 = url_safe_hash_phrase(instance_resource_id)[:8]
     return f"{MGMT_ACTIONS_RESOURCE_PREFIX}-{purpose}-{hash8}"
+
+
+def _build_graph_rules_config(topic_prefix_regex: str) -> List[Dict]:
+    """Build the configuration array for the graph-dataflow-map rules engine.
+
+    Returns a key-value configuration list where the 'rules' key contains a JSON
+    string describing how to strip the topic prefix and copy the payload through.
+    The topic_prefix_regex anchors the regex_replace to the instance-scoped request
+    topic namespace.
+    """
+    rules_value = {
+        "version": MGMT_ACTIONS_GRAPH_RULES_VERSION,
+        "datasets": [],
+        "map": [
+            {
+                "description": "Strip the topic prefix",
+                "inputs": ["$metadata.topic"],
+                "output": "$metadata.topic",
+                "expression": f'str::regex_replace($1, "{topic_prefix_regex}", "")',
+            },
+            {
+                "description": "Copy the payload",
+                "inputs": ["*"],
+                "output": "*",
+            },
+        ],
+    }
+    return [
+        {
+            "key": "rules",
+            "value": json.dumps(rules_value),
+        },
+    ]
 
 
 class EgNamespaceContext(NamedTuple):
@@ -69,9 +110,6 @@ class MgmtActions(Queryable):
         )
         # May be replaced with a cross-subscription client by _validate_eg_namespace
         self.eventgrid_mgmt_client: "EventGridManagementClient" = get_eventgrid_mgmt_client(
-            subscription_id=self.default_subscription_id,
-        )
-        self.registry_mgmt_client = get_registry_mgmt_client(
             subscription_id=self.default_subscription_id,
         )
         self.permission_manager = PermissionManager(self.default_subscription_id)
@@ -107,9 +145,7 @@ class MgmtActions(Queryable):
 
         # Step 2 — Validate instance version
         instance_version = instance.get("properties", {}).get("version", "")
-        if not instance_version or (
-            semver.parse(instance_version) < semver.parse(MIN_INSTANCE_VERSION_MGMT_ACTIONS)
-        ):
+        if not instance_version or (semver.parse(instance_version) < semver.parse(MIN_INSTANCE_VERSION_MGMT_ACTIONS)):
             raise ValidationError(
                 f"Instance '{name}' version '{instance_version}' does not meet the minimum "
                 f"required version '{MIN_INSTANCE_VERSION_MGMT_ACTIONS}' for management actions."
@@ -117,6 +153,9 @@ class MgmtActions(Queryable):
 
         # Step 3-4 — Validate EG namespace (format, existence, topic spaces, MQTT hostname)
         eg_ctx = self._validate_eg_namespace(eg_resource_id)
+
+        # Step 5 — Extract extendedLocation from instance (needed for AIO child resources)
+        extended_location: Dict = instance["extendedLocation"]
 
         # Stage 2 Lane A: Event Grid infrastructure setup
         topic_space_result = self._setup_eg_topic_space(
@@ -134,21 +173,60 @@ class MgmtActions(Queryable):
             **kwargs,
         )
 
+        # Stage 2 Lane C: AIO EG dataflow endpoint creation
+        dataflow_endpoint_result = self._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=name,
+            instance_resource_id=instance_resource_id,
+            resource_group_name=resource_group_name,
+            extended_location=extended_location,
+            mi_user_assigned=mi_user_assigned,
+            **kwargs,
+        )
+
         # TODO: Stage 2 Lane B — ADR namespace management endpoint setup
-        # TODO: Stage 2 Lane C — AIO EG dataflow endpoint creation
-        # TODO: Stage 3 Lane D — Dataflow graph creation
-        # TODO: Stage 3 Lane E — Response dataflow creation
+
+        # Dataflow graph (uses default registry endpoint provisioned with instance)
+        resolved_profile = dataflow_profile or MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE
+
+        dataflow_graph_result = self._setup_dataflow_graph(
+            instance_name=name,
+            instance_resource_id=instance_resource_id,
+            resource_group_name=resource_group_name,
+            extended_location=extended_location,
+            eg_dataflow_endpoint_name=dataflow_endpoint_result["name"],
+            dataflow_profile_name=resolved_profile,
+            **kwargs,
+        )
+
+        # Response dataflow (edge→cloud: local MQTT → EG)
+        response_dataflow_result = self._setup_response_dataflow(
+            instance_name=name,
+            instance_resource_id=instance_resource_id,
+            resource_group_name=resource_group_name,
+            extended_location=extended_location,
+            eg_dataflow_endpoint_name=dataflow_endpoint_result["name"],
+            dataflow_profile_name=resolved_profile,
+            **kwargs,
+        )
+
         # TODO: Stage 3 Lane F — ADR namespace MI → EG role assignments
         # TODO: Stage 3 Lane G — AIO extension MI → EG role assignments
 
         return {
             "instance": {
                 "name": name,
+                "resourceGroup": resource_group_name,
                 "resourceId": instance_resource_id,
                 "version": instance_version,
+                "dataflowProfile": resolved_profile,
+                "dataflowEndpoint": dataflow_endpoint_result,
+                "requestDataflowGraph": dataflow_graph_result,
+                "responseDataflow": response_dataflow_result,
             },
             "eventGrid": {
                 "namespace": {
+                    "name": eg_ctx.namespace_name,
                     "resourceId": eg_ctx.resource_id,
                     "mqttHostname": eg_ctx.mqtt_hostname,
                 },
@@ -230,7 +308,8 @@ class MgmtActions(Queryable):
         topic_spaces_state = topic_spaces_config.get("state", "")
         if topic_spaces_state != "Enabled":
             state_detail = (
-                f"Current state: '{topic_spaces_state}'." if topic_spaces_state
+                f"Current state: '{topic_spaces_state}'."
+                if topic_spaces_state
                 else "MQTT broker has not been configured."
             )
             raise ValidationError(
@@ -283,6 +362,7 @@ class MgmtActions(Queryable):
                 "name": topic_space_name,
                 "status": "Exists",
                 "topicTemplates": topic_templates,
+                "scopeId": instance_name,
             }
         except ResourceNotFoundError:
             pass
@@ -290,9 +370,7 @@ class MgmtActions(Queryable):
         # Create the topic space
         topic_space_payload = {
             "properties": {
-                "description": (
-                    f"Management actions topic space for IoT Operations instance '{instance_name}'."
-                ),
+                "description": (f"Management actions topic space for IoT Operations instance '{instance_name}'."),
                 "topicTemplates": topic_templates,
             }
         }
@@ -310,6 +388,7 @@ class MgmtActions(Queryable):
             "name": topic_space_name,
             "status": "Created",
             "topicTemplates": topic_templates,
+            "scopeId": instance_name,
         }
 
     def _setup_eg_permission_bindings(
@@ -346,7 +425,7 @@ class MgmtActions(Queryable):
                     binding_name,
                     eg_ctx.namespace_name,
                 )
-                result[key] = {"name": binding_name, "status": "Exists"}
+                result[key] = {"name": binding_name, "status": "Exists", "clientGroup": client_group}
                 continue
             except ResourceNotFoundError:
                 pass
@@ -358,8 +437,7 @@ class MgmtActions(Queryable):
                     "permission": permission,
                     "topicSpaceName": topic_space_name,
                     "description": (
-                        f"Management actions {permission.lower()} binding "
-                        f"for topic space '{topic_space_name}'."
+                        f"Management actions {permission.lower()} binding " f"for topic space '{topic_space_name}'."
                     ),
                 }
             }
@@ -377,6 +455,294 @@ class MgmtActions(Queryable):
                 permission,
                 eg_ctx.namespace_name,
             )
-            result[key] = {"name": binding_name, "status": "Created"}
+            result[key] = {"name": binding_name, "status": "Created", "clientGroup": client_group}
 
         return result
+
+    def _setup_eg_dataflow_endpoint(
+        self,
+        eg_ctx: EgNamespaceContext,
+        instance_name: str,
+        instance_resource_id: str,
+        resource_group_name: str,
+        extended_location: Dict,
+        mi_user_assigned: Optional[str] = None,
+        **kwargs,
+    ) -> Dict:
+        """Create or confirm the EG MQTT dataflow endpoint on the AIO instance.
+
+        Uses GET-then-PUT to report accurate status. The endpoint connects to the EG
+        namespace's MQTT broker using managed identity authentication. Defaults to
+        SystemAssigned MI; when mi_user_assigned is provided, a UserAssigned MI is
+        configured instead (requires resolving clientId and tenantId from the UAMI resource).
+        """
+        endpoint_name = get_mgmt_actions_resource_name("eg", instance_resource_id)
+
+        # Check if endpoint already exists
+        try:
+            self.iotops_mgmt_client.dataflow_endpoint.get(
+                resource_group_name=resource_group_name,
+                instance_name=instance_name,
+                dataflow_endpoint_name=endpoint_name,
+            )
+            logger.info(
+                "Dataflow endpoint '%s' already exists on instance '%s'.",
+                endpoint_name,
+                instance_name,
+            )
+            return {"name": endpoint_name, "status": "Exists"}
+        except ResourceNotFoundError:
+            pass
+
+        # Build authentication block
+        if mi_user_assigned:
+            mi_resource = self._resolve_user_assigned_mi(mi_user_assigned)
+            authentication = {
+                "method": "UserAssignedManagedIdentity",
+                "userAssignedManagedIdentitySettings": {
+                    "clientId": mi_resource["properties"]["clientId"],
+                    "tenantId": mi_resource["properties"]["tenantId"],
+                    "scope": MGMT_ACTIONS_EG_AUDIENCE,
+                },
+            }
+        else:
+            authentication = {
+                "method": "SystemAssignedManagedIdentity",
+                "systemAssignedManagedIdentitySettings": {
+                    "audience": MGMT_ACTIONS_EG_AUDIENCE,
+                },
+            }
+
+        resource = {
+            "extendedLocation": extended_location,
+            "properties": {
+                "endpointType": MQTT_ENDPOINT_TYPE,
+                "mqttSettings": {
+                    "host": eg_ctx.mqtt_hostname,
+                    "authentication": authentication,
+                    "tls": {
+                        "mode": "Enabled",
+                    },
+                },
+            },
+        }
+
+        poller = self.iotops_mgmt_client.dataflow_endpoint.begin_create_or_update(
+            resource_group_name=resource_group_name,
+            instance_name=instance_name,
+            dataflow_endpoint_name=endpoint_name,
+            resource=resource,
+        )
+        wait_for_terminal_state(poller, **kwargs)
+        logger.info(
+            "Created dataflow endpoint '%s' on instance '%s'.",
+            endpoint_name,
+            instance_name,
+        )
+
+        return {"name": endpoint_name, "status": "Created"}
+
+    def _setup_dataflow_graph(
+        self,
+        instance_name: str,
+        instance_resource_id: str,
+        resource_group_name: str,
+        extended_location: Dict,
+        eg_dataflow_endpoint_name: str,
+        dataflow_profile_name: str,
+        **kwargs,
+    ) -> Dict:
+        """Create or confirm the management actions dataflow graph on the AIO instance.
+
+        The graph wires MQTT request messages through a graph-dataflow-map rules engine
+        and back to a local MQTT destination. Three nodes (Source → Graph → Destination)
+        with two connections form the pipeline.
+        """
+        graph_name = get_mgmt_actions_resource_name("req", instance_resource_id)
+
+        # Check if dataflow graph already exists
+        try:
+            self.iotops_mgmt_client.dataflow_graph.get(
+                resource_group_name=resource_group_name,
+                instance_name=instance_name,
+                dataflow_profile_name=dataflow_profile_name,
+                dataflow_graph_name=graph_name,
+            )
+            logger.info(
+                "Dataflow graph '%s' already exists on instance '%s'.",
+                graph_name,
+                instance_name,
+            )
+            return {"name": graph_name, "status": "Exists"}
+        except ResourceNotFoundError:
+            pass
+
+        request_topic_prefix = f"actions/requests/{instance_name}/"
+        rules_config = _build_graph_rules_config(
+            topic_prefix_regex=f"^{request_topic_prefix}",
+        )
+
+        resource = {
+            "extendedLocation": extended_location,
+            "properties": {
+                "mode": "Enabled",
+                "nodes": [
+                    {
+                        "name": "source",
+                        "nodeType": "Source",
+                        "sourceSettings": {
+                            "endpointRef": eg_dataflow_endpoint_name,
+                            "dataSources": [f"{request_topic_prefix}#"],
+                        },
+                    },
+                    {
+                        "name": "graph",
+                        "nodeType": "Graph",
+                        "graphSettings": {
+                            "registryEndpointRef": MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT,
+                            "artifact": MGMT_ACTIONS_GRAPH_ARTIFACT,
+                            "configuration": rules_config,
+                        },
+                    },
+                    {
+                        "name": "destination",
+                        "nodeType": "Destination",
+                        "destinationSettings": {
+                            "endpointRef": MGMT_ACTIONS_DEFAULT_MQTT_ENDPOINT,
+                            "dataDestination": "${outputTopic}",
+                        },
+                    },
+                ],
+                "nodeConnections": [
+                    {
+                        "from": {"name": "source"},
+                        "to": {"name": "graph"},
+                    },
+                    {
+                        "from": {"name": "graph"},
+                        "to": {"name": "destination"},
+                    },
+                ],
+            },
+        }
+
+        poller = self.iotops_mgmt_client.dataflow_graph.begin_create_or_update(
+            resource_group_name=resource_group_name,
+            instance_name=instance_name,
+            dataflow_profile_name=dataflow_profile_name,
+            dataflow_graph_name=graph_name,
+            resource=resource,
+        )
+        wait_for_terminal_state(poller, **kwargs)
+        logger.info(
+            "Created dataflow graph '%s' on instance '%s' (profile: '%s').",
+            graph_name,
+            instance_name,
+            dataflow_profile_name,
+        )
+
+        return {"name": graph_name, "status": "Created"}
+
+    def _setup_response_dataflow(
+        self,
+        instance_name: str,
+        instance_resource_id: str,
+        resource_group_name: str,
+        extended_location: Dict,
+        eg_dataflow_endpoint_name: str,
+        dataflow_profile_name: str,
+        **kwargs,
+    ) -> Dict:
+        """Create or confirm the management actions response dataflow on the AIO instance.
+
+        Routes response messages from the local MQTT broker back to Event Grid.
+        This is a simple source→destination pipeline (not a graph) — responses don't
+        require topic transformation because they already carry the full topic path.
+        """
+        dataflow_name = get_mgmt_actions_resource_name("resp", instance_resource_id)
+
+        # Check if response dataflow already exists
+        try:
+            self.iotops_mgmt_client.dataflow.get(
+                resource_group_name=resource_group_name,
+                instance_name=instance_name,
+                dataflow_profile_name=dataflow_profile_name,
+                dataflow_name=dataflow_name,
+            )
+            logger.info(
+                "Response dataflow '%s' already exists on instance '%s'.",
+                dataflow_name,
+                instance_name,
+            )
+            return {"name": dataflow_name, "status": "Exists"}
+        except ResourceNotFoundError:
+            pass
+
+        response_topic = MGMT_ACTIONS_RESPONSE_TOPIC_TEMPLATE.format(scope_id=instance_name)
+
+        resource = {
+            "extendedLocation": extended_location,
+            "properties": {
+                "mode": "Enabled",
+                "operations": [
+                    {
+                        "operationType": "Source",
+                        "sourceSettings": {
+                            "endpointRef": MGMT_ACTIONS_DEFAULT_MQTT_ENDPOINT,
+                            "dataSources": [response_topic],
+                        },
+                    },
+                    {
+                        "operationType": "Destination",
+                        "destinationSettings": {
+                            "endpointRef": eg_dataflow_endpoint_name,
+                            "dataDestination": "${inputTopic}",
+                        },
+                    },
+                ],
+            },
+        }
+
+        poller = self.iotops_mgmt_client.dataflow.begin_create_or_update(
+            resource_group_name=resource_group_name,
+            instance_name=instance_name,
+            dataflow_profile_name=dataflow_profile_name,
+            dataflow_name=dataflow_name,
+            resource=resource,
+        )
+        wait_for_terminal_state(poller, **kwargs)
+        logger.info(
+            "Created response dataflow '%s' on instance '%s' (profile: '%s').",
+            dataflow_name,
+            instance_name,
+            dataflow_profile_name,
+        )
+
+        return {"name": dataflow_name, "status": "Created"}
+
+    def _resolve_user_assigned_mi(self, mi_resource_id: str) -> Dict:
+        """Fetch a user-assigned managed identity resource to extract clientId and tenantId.
+
+        Uses the base Queryable resource_client for same-subscription lookups. When the
+        UAMI is in a different subscription, creates a cross-subscription client.
+        """
+        parsed = parse_resource_id_dict(mi_resource_id)
+        mi_subscription = parsed.get("subscription", self.default_subscription_id)
+
+        if mi_subscription.lower() != self.default_subscription_id.lower():
+            from ...util.az_client import get_resource_client
+
+            client = get_resource_client(subscription_id=mi_subscription)
+        else:
+            client = self.resource_client
+
+        try:
+            return client.resources.get_by_id(
+                resource_id=mi_resource_id,
+                api_version=MANAGED_IDENTITY_API_VERSION,
+            )
+        except ResourceNotFoundError:
+            raise InvalidArgumentValueError(
+                f"User-assigned managed identity '{mi_resource_id}' not found.\n"
+                f"Verify the --mi-user-assigned value and ensure the identity exists."
+            )

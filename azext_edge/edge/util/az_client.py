@@ -139,11 +139,26 @@ def get_storage_mgmt_client(subscription_id: str, **kwargs) -> "StorageManagemen
     )
 
 
-def get_eventgrid_mgmt_client(subscription_id: str, **kwargs) -> "EventGridManagementClient":
+class EventGridMgmtApiVersion(Enum):
+    V20250215 = "2025-02-15"
+
+
+DEFAULT_EVENTGRID_MGMT_API_VERSION = EventGridMgmtApiVersion.V20250215
+
+
+def get_eventgrid_mgmt_client(
+    subscription_id: str,
+    api_version: Union[EventGridMgmtApiVersion, str] = DEFAULT_EVENTGRID_MGMT_API_VERSION,
+    **kwargs,
+) -> "EventGridManagementClient":
     from ..vendor.clients.eventgridmgmt import EventGridManagementClient
+
+    if isinstance(api_version, EventGridMgmtApiVersion):
+        api_version = api_version.value
 
     if "http_logging_policy" not in kwargs:
         kwargs["http_logging_policy"] = get_default_logging_policy()
+    kwargs["api_version"] = api_version
 
     return EventGridManagementClient(
         credential=AZURE_CLI_CREDENTIAL,
