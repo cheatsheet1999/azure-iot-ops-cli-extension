@@ -26,7 +26,7 @@ from azext_edge.edge.providers.check.base.deployment import validate_cluster_pre
 from azext_edge.edge.providers.orchestration.base import verify_arc_cluster_config
 
 from ...util.az_client import (
-    DeviceRegistryMgmtApiVersion,
+    DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION,
     get_api_error_str,
     get_resource_client,
     parse_resource_id,
@@ -441,7 +441,7 @@ class WorkManager:
                 ]:
                     self.resource_client.resources.get_by_id(
                         resource_id=resource_id,
-                        api_version=DeviceRegistryMgmtApiVersion.V20251001.value,
+                        api_version=DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION.value,
                     )
 
                 self._process_extension_dependencies()

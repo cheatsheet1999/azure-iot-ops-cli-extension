@@ -48,6 +48,7 @@ from azext_edge.edge.providers.orchestration.common import (
     EXTENSION_TYPE_SSC,
     OPS_EXTENSION_DEPS,
 )
+from azext_edge.edge.util.az_client import DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION
 from azext_edge.edge.providers.orchestration.permissions import ROLE_DEF_FORMAT_STR
 from azext_edge.edge.providers.orchestration.rp_namespace import (
     RP_NAMESPACE_OPTIONAL_SET,
@@ -133,8 +134,8 @@ class ExpectedAPIVersion(Enum):
     CONNECTED_CLUSTER = "2024-07-15-preview"
     CLUSTER_EXTENSION = "2023-05-01"
     RESOURCE = "2024-03-01"
-    SCHEMA_REGISTRY = "2025-10-01"
-    ADR_NAMESPACE = "2025-10-01"
+    SCHEMA_REGISTRY = DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION.value
+    ADR_NAMESPACE = DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION.value
     AUTHORIZATION = "2022-04-01"
     CUSTOM_LOCATION = "2021-08-31-preview"
     GRAPH = "2022-10-01"

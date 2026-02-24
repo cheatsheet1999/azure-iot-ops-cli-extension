@@ -17,7 +17,7 @@ from azext_edge.edge.commands_namespaces import (
     show_namespace,
     update_namespace,
 )
-from azext_edge.edge.util.az_client import DeviceRegistryMgmtApiVersion
+from azext_edge.edge.util.az_client import DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION
 from ..orchestration.resources.conftest import get_base_endpoint
 
 from ...generators import generate_random_string, BASE_URL, get_zeroed_subscription
@@ -47,7 +47,7 @@ def get_namespace_mgmt_uri(
         f"Microsoft.DeviceRegistry/namespaces{namespace_name}"
     )
     if include_api:
-        namespace_id += f"?api-version={DeviceRegistryMgmtApiVersion.V20251001.value}"
+        namespace_id += f"?api-version={DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION.value}"
     return f"{BASE_URL}{namespace_id}"
 
 

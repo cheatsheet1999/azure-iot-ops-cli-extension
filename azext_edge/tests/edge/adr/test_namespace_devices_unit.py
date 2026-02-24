@@ -33,7 +33,7 @@ from azext_edge.edge.providers.adr.common import ADRAuthModes
 from azext_edge.edge.providers.adr.namespace_devices import DeviceEndpointType
 from azext_edge.edge.providers.adr.specs import SecurityMode, SecurityPolicy
 from azext_edge.edge.util.common import parse_kvp_nargs
-from azext_edge.edge.util.az_client import DeviceRegistryMgmtApiVersion
+from azext_edge.edge.util.az_client import DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION
 
 # Import necessary modules
 from .test_namespaces_unit import get_namespace_mgmt_uri
@@ -47,7 +47,7 @@ def get_namespace_device_mgmt_uri(namespace_name: str, resource_group_name: str,
     )
     if device_name:
         base_uri += f"/{device_name}"
-    return f"{base_uri}?api-version={DeviceRegistryMgmtApiVersion.V20251001.value}"
+    return f"{base_uri}?api-version={DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION.value}"
 
 
 def get_namespace_device_record(device_name: str, namespace_name: str, resource_group_name: str) -> Dict:

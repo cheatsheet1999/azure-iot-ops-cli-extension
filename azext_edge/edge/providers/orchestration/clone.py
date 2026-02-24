@@ -1799,7 +1799,7 @@ class VersionGuru:
             )
         return InstanceApiConfig(
             iotops_mgmt_api=IoTOpsMgmtApiVersion.V20260301.value,
-            registry_mgmt_api=DeviceRegistryMgmtApiVersion.V20251001.value,
+            registry_mgmt_api=DeviceRegistryMgmtApiVersion.V20260401.value,
         )
 
 
