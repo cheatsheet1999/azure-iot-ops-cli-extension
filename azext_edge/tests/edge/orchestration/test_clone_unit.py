@@ -1726,7 +1726,7 @@ def _replace_generic_resource(context: dict, **kwargs: dict) -> dict:
 def _get_asset_api_version(**kwargs: dict) -> str:
     v2_enabled = kwargs.get("v2_enabled", False)
     if v2_enabled:
-        return DeviceRegistryMgmtApiVersion.V20251001.value
+        return DeviceRegistryMgmtApiVersion.V20260401.value
     return DeviceRegistryMgmtApiVersion.V20241101.value
 
 
@@ -1889,7 +1889,7 @@ class CloneAssertor:
             target_adr_api = DeviceRegistryMgmtApiVersion.V20251001
         elif parsed_version < semver.parse("1.4.0"):
             target_iotops_api = IoTOpsMgmtApiVersion.V20260301
-            target_adr_api = DeviceRegistryMgmtApiVersion.V20251001
+            target_adr_api = DeviceRegistryMgmtApiVersion.V20260401
 
         assert target_iotops_api.value == self.api_config.iotops_mgmt_api
         assert target_adr_api.value == self.api_config.registry_mgmt_api
