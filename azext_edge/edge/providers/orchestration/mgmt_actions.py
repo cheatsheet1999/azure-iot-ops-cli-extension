@@ -14,12 +14,14 @@ from knack.log import get_logger
 from ...util.az_client import (
     get_eventgrid_mgmt_client,
     get_iotops_mgmt_client,
+    get_registry_mgmt_client,
     wait_for_terminal_state,
 )
 from ...util.id_tools import parse_resource_id as parse_resource_id_dict
 from ...util.queryable import Queryable
 from .common import (
     MANAGED_IDENTITY_API_VERSION,
+    MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
     MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE,
     MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP,
     MGMT_ACTIONS_DEFAULT_MQTT_ENDPOINT,
@@ -36,6 +38,7 @@ from .common import (
 from .permissions import PermissionManager
 
 if TYPE_CHECKING:
+    from ...vendor.clients.deviceregistrymgmt import MicrosoftDeviceRegistryManagementService
     from ...vendor.clients.eventgridmgmt import EventGridManagementClient
 
 logger = get_logger(__name__)
@@ -108,6 +111,9 @@ class MgmtActions(Queryable):
         self.iotops_mgmt_client = get_iotops_mgmt_client(
             subscription_id=self.default_subscription_id,
         )
+        self.registry_mgmt_client: "MicrosoftDeviceRegistryManagementService" = get_registry_mgmt_client(
+            subscription_id=self.default_subscription_id,
+        )
         # May be replaced with a cross-subscription client by _validate_eg_namespace
         self.eventgrid_mgmt_client: "EventGridManagementClient" = get_eventgrid_mgmt_client(
             subscription_id=self.default_subscription_id,
@@ -135,15 +141,14 @@ class MgmtActions(Queryable):
 
         semver = scoped_semver_import()
 
-        # Stage 1: Validation (sequential)
-        # Step 1 — Resolve instance
+        # Resolve instance
         instance = self.iotops_mgmt_client.instance.get(
             instance_name=name,
             resource_group_name=resource_group_name,
         )
         instance_resource_id: str = instance["id"]
 
-        # Step 2 — Validate instance version
+        # Validate instance version
         instance_version = instance.get("properties", {}).get("version", "")
         if not instance_version or (semver.parse(instance_version) < semver.parse(MIN_INSTANCE_VERSION_MGMT_ACTIONS)):
             raise ValidationError(
@@ -151,13 +156,13 @@ class MgmtActions(Queryable):
                 f"required version '{MIN_INSTANCE_VERSION_MGMT_ACTIONS}' for management actions."
             )
 
-        # Step 3-4 — Validate EG namespace (format, existence, topic spaces, MQTT hostname)
+        # Validate EG namespace (format, existence, topic spaces, MQTT hostname)
         eg_ctx = self._validate_eg_namespace(eg_resource_id)
 
-        # Step 5 — Extract extendedLocation from instance (needed for AIO child resources)
+        # Extract extendedLocation from instance (needed for AIO child resources)
         extended_location: Dict = instance["extendedLocation"]
 
-        # Stage 2 Lane A: Event Grid infrastructure setup
+        # Event Grid infrastructure setup
         topic_space_result = self._setup_eg_topic_space(
             eg_ctx=eg_ctx,
             instance_name=name,
@@ -173,7 +178,7 @@ class MgmtActions(Queryable):
             **kwargs,
         )
 
-        # Stage 2 Lane C: AIO EG dataflow endpoint creation
+        # EG dataflow endpoint
         dataflow_endpoint_result = self._setup_eg_dataflow_endpoint(
             eg_ctx=eg_ctx,
             instance_name=name,
@@ -184,7 +189,12 @@ class MgmtActions(Queryable):
             **kwargs,
         )
 
-        # TODO: Stage 2 Lane B — ADR namespace management endpoint setup
+        # ADR namespace — enable system MI + configure management endpoint
+        adr_result = self._setup_adr_management_endpoint(
+            instance=instance,
+            eg_ctx=eg_ctx,
+            **kwargs,
+        )
 
         # Dataflow graph (uses default registry endpoint provisioned with instance)
         resolved_profile = dataflow_profile or MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE
@@ -210,14 +220,12 @@ class MgmtActions(Queryable):
             **kwargs,
         )
 
-        # TODO: Stage 3 Lane F — ADR namespace MI → EG role assignments
-        # TODO: Stage 3 Lane G — AIO extension MI → EG role assignments
+        # TODO: Role assignments — ADR namespace MI + dataflow auth identity → EG namespace
 
         return {
             "instance": {
                 "name": name,
                 "resourceGroup": resource_group_name,
-                "resourceId": instance_resource_id,
                 "version": instance_version,
                 "dataflowProfile": resolved_profile,
                 "dataflowEndpoint": dataflow_endpoint_result,
@@ -227,12 +235,14 @@ class MgmtActions(Queryable):
             "eventGrid": {
                 "namespace": {
                     "name": eg_ctx.namespace_name,
-                    "resourceId": eg_ctx.resource_id,
+                    "resourceGroup": eg_ctx.resource_group_name,
+                    "subscriptionId": eg_ctx.subscription_id,
                     "mqttHostname": eg_ctx.mqtt_hostname,
                 },
                 "topicSpace": topic_space_result,
                 "permissionBindings": permission_bindings_result,
             },
+            "deviceRegistryNamespace": adr_result,
         }
 
     def disable(
@@ -360,7 +370,6 @@ class MgmtActions(Queryable):
             logger.info("Topic space '%s' already exists on namespace '%s'.", topic_space_name, eg_ctx.namespace_name)
             return {
                 "name": topic_space_name,
-                "status": "Exists",
                 "topicTemplates": topic_templates,
                 "scopeId": instance_name,
             }
@@ -386,7 +395,6 @@ class MgmtActions(Queryable):
 
         return {
             "name": topic_space_name,
-            "status": "Created",
             "topicTemplates": topic_templates,
             "scopeId": instance_name,
         }
@@ -425,7 +433,7 @@ class MgmtActions(Queryable):
                     binding_name,
                     eg_ctx.namespace_name,
                 )
-                result[key] = {"name": binding_name, "status": "Exists", "clientGroup": client_group}
+                result[key] = {"name": binding_name, "clientGroup": client_group}
                 continue
             except ResourceNotFoundError:
                 pass
@@ -455,7 +463,7 @@ class MgmtActions(Queryable):
                 permission,
                 eg_ctx.namespace_name,
             )
-            result[key] = {"name": binding_name, "status": "Created", "clientGroup": client_group}
+            result[key] = {"name": binding_name, "clientGroup": client_group}
 
         return result
 
@@ -480,7 +488,7 @@ class MgmtActions(Queryable):
 
         # Check if endpoint already exists
         try:
-            self.iotops_mgmt_client.dataflow_endpoint.get(
+            existing = self.iotops_mgmt_client.dataflow_endpoint.get(
                 resource_group_name=resource_group_name,
                 instance_name=instance_name,
                 dataflow_endpoint_name=endpoint_name,
@@ -490,7 +498,8 @@ class MgmtActions(Queryable):
                 endpoint_name,
                 instance_name,
             )
-            return {"name": endpoint_name, "status": "Exists"}
+            existing_auth = existing.get("properties", {}).get("mqttSettings", {}).get("authentication", {})
+            return {"name": endpoint_name, "authentication": existing_auth}
         except ResourceNotFoundError:
             pass
 
@@ -540,7 +549,131 @@ class MgmtActions(Queryable):
             instance_name,
         )
 
-        return {"name": endpoint_name, "status": "Created"}
+        return {"name": endpoint_name, "authentication": authentication}
+
+    def _setup_adr_management_endpoint(
+        self,
+        instance: Dict,
+        eg_ctx: EgNamespaceContext,
+        **kwargs,
+    ) -> Dict:
+        """Enable system-assigned MI and configure the management endpoint on the ADR namespace.
+
+        Performs a GET-merge-PUT to preserve existing management endpoints. The endpoint
+        key is the instance's custom location resource ID, connecting the ADR namespace
+        to the Event Grid MQTT broker for management actions routing.
+
+        Returns a dict with the ADR namespace identity state and the full management
+        endpoints map (all custom location entries, not just ours) for multi-instance
+        awareness.
+        """
+        # Resolve ADR namespace from instance
+        adr_namespace_resource_id = instance.get("properties", {}).get("adrNamespaceRef", {}).get("resourceId")
+        if not adr_namespace_resource_id:
+            raise ValidationError(
+                "Instance does not have an ADR namespace reference (adrNamespaceRef.resourceId). "
+                "This is required for management actions. Ensure the instance was deployed with an ADR namespace."
+            )
+
+        parsed_adr = parse_resource_id_dict(adr_namespace_resource_id)
+        adr_resource_group = parsed_adr.get("resource_group", "")
+        adr_namespace_name = parsed_adr.get("name", "")
+
+        if not all([adr_resource_group, adr_namespace_name]):
+            raise ValidationError(
+                f"Malformed ADR namespace resource Id '{adr_namespace_resource_id}'. "
+                f"Could not extract resource group or namespace name."
+            )
+
+        # GET the ADR namespace
+        adr_namespace = self.registry_mgmt_client.namespaces.get(
+            resource_group_name=adr_resource_group,
+            namespace_name=adr_namespace_name,
+        )
+
+        # Determine identity state and whether an update is needed
+        current_identity = adr_namespace.get("identity", {})
+        current_identity_type = (current_identity.get("type") or "").lower()
+        identity_already_enabled = current_identity_type == "systemassigned"
+
+        # Build management endpoint entry — keyed by custom location resource ID
+        custom_location_id: str = instance["extendedLocation"]["name"]
+        desired_endpoint = {
+            "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+            "address": eg_ctx.mqtt_hostname,
+            "scopeId": instance.get("name", ""),
+            "resourceId": eg_ctx.resource_id,
+        }
+
+        # Read existing management endpoints (GET-merge-PUT to preserve other entries)
+        existing_endpoints = adr_namespace.get("properties", {}).get("management", {}).get("endpoints", {})
+        current_endpoint = existing_endpoints.get(custom_location_id)
+        endpoint_already_configured = current_endpoint == desired_endpoint
+
+        # Skip update entirely if both identity and endpoint are already correct
+        if identity_already_enabled and endpoint_already_configured:
+            principal_id = current_identity.get("principalId", "")
+            logger.info(
+                "ADR namespace '%s' already has SystemAssigned identity and management endpoint configured.",
+                adr_namespace_name,
+            )
+            return {
+                "name": adr_namespace_name,
+                "identity": {
+                    "type": current_identity.get("type", ""),
+                    "principalId": principal_id,
+                },
+                "managementEndpoints": existing_endpoints,
+            }
+
+        # Build the update payload
+        merged_endpoints = dict(existing_endpoints)
+        merged_endpoints[custom_location_id] = desired_endpoint
+
+        update_payload: Dict = {
+            "properties": {
+                "management": {
+                    "endpoints": merged_endpoints,
+                },
+            },
+        }
+
+        # Always include identity in the update to ensure SystemAssigned is set
+        if not identity_already_enabled:
+            update_payload["identity"] = {"type": "SystemAssigned"}
+
+        poller = self.registry_mgmt_client.namespaces.begin_update(
+            resource_group_name=adr_resource_group,
+            namespace_name=adr_namespace_name,
+            properties=update_payload,
+        )
+        updated_namespace = wait_for_terminal_state(poller, **kwargs)
+
+        principal_id = updated_namespace.get("identity", {}).get("principalId", "")
+        if not principal_id:
+            raise ValidationError(
+                f"ADR namespace '{adr_namespace_name}' was updated with SystemAssigned identity "
+                f"but no principalId was returned. This may indicate the operation is still propagating."
+            )
+
+        updated_identity = updated_namespace.get("identity", {})
+        updated_endpoints = updated_namespace.get("properties", {}).get("management", {}).get("endpoints", {})
+
+        logger.info(
+            "ADR namespace '%s' updated — identity type: %s, management endpoints: %d.",
+            adr_namespace_name,
+            updated_identity.get("type", ""),
+            len(updated_endpoints),
+        )
+
+        return {
+            "name": adr_namespace_name,
+            "identity": {
+                "type": updated_identity.get("type", ""),
+                "principalId": principal_id,
+            },
+            "managementEndpoints": updated_endpoints,
+        }
 
     def _setup_dataflow_graph(
         self,
@@ -573,7 +706,7 @@ class MgmtActions(Queryable):
                 graph_name,
                 instance_name,
             )
-            return {"name": graph_name, "status": "Exists"}
+            return {"name": graph_name}
         except ResourceNotFoundError:
             pass
 
@@ -641,7 +774,7 @@ class MgmtActions(Queryable):
             dataflow_profile_name,
         )
 
-        return {"name": graph_name, "status": "Created"}
+        return {"name": graph_name}
 
     def _setup_response_dataflow(
         self,
@@ -674,7 +807,7 @@ class MgmtActions(Queryable):
                 dataflow_name,
                 instance_name,
             )
-            return {"name": dataflow_name, "status": "Exists"}
+            return {"name": dataflow_name}
         except ResourceNotFoundError:
             pass
 
@@ -718,7 +851,7 @@ class MgmtActions(Queryable):
             dataflow_profile_name,
         )
 
-        return {"name": dataflow_name, "status": "Created"}
+        return {"name": dataflow_name}
 
     def _resolve_user_assigned_mi(self, mi_resource_id: str) -> Dict:
         """Fetch a user-assigned managed identity resource to extract clientId and tenantId.

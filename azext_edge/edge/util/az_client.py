@@ -170,13 +170,14 @@ def get_eventgrid_mgmt_client(
 
 class DeviceRegistryMgmtApiVersion(Enum):
     V20260401 = "2026-04-01"
+    V20260201_preview = "2026-02-01-preview"
     V20251001 = "2025-10-01"
     V20250701_preview = "2025-07-01-preview"
     V20241101 = "2024-11-01"
     V20240901_preview = "2024-09-01-preview"
 
 
-DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION = DeviceRegistryMgmtApiVersion.V20260401
+DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION = DeviceRegistryMgmtApiVersion.V20260201_preview
 
 
 def get_registry_mgmt_client(
