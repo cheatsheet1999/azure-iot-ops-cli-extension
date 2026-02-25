@@ -23,6 +23,7 @@ from azext_edge.edge.providers.orchestration.common import (
     MGMT_ACTIONS_GRAPH_RULES_VERSION,
     MGMT_ACTIONS_REQUEST_TOPIC_TEMPLATE,
     MGMT_ACTIONS_RESPONSE_TOPIC_TEMPLATE,
+    MIN_EG_CLIENT_SESSIONS_PER_AUTH_NAME,
     MIN_INSTANCE_VERSION_MGMT_ACTIONS,
     MQTT_ENDPOINT_TYPE,
 )
@@ -140,6 +141,7 @@ def _build_namespace_response(
     topic_spaces_state: str = "Enabled",
     mqtt_hostname: str = "test-ns.eastus-1.ts.eventgrid.azure.net",
     subscription_id: Optional[str] = None,
+    max_client_sessions: int = MIN_EG_CLIENT_SESSIONS_PER_AUTH_NAME,
 ) -> dict:
     sub_id = subscription_id or ZEROED_SUBSCRIPTION
     return {
@@ -154,6 +156,7 @@ def _build_namespace_response(
             "topicSpacesConfiguration": {
                 "state": topic_spaces_state,
                 "hostname": mqtt_hostname,
+                "maximumClientSessionsPerAuthenticationName": max_client_sessions,
             },
         },
     }
@@ -422,6 +425,29 @@ class TestValidateEgNamespace:
 
         provider = MgmtActions(cmd=mocked_cmd)
         with pytest.raises(ValidationError, match="no MQTT hostname"):
+            provider._validate_eg_namespace(eg_resource_id)
+
+    @pytest.mark.parametrize("session_count", [0, 1])
+    def test_insufficient_client_sessions(
+        self,
+        mocked_cmd,
+        mocked_responses: responses,
+        session_count: int,
+    ):
+        """Namespace with maximumClientSessionsPerAuthenticationName below threshold raises ValidationError."""
+        ns_name = generate_random_string()
+        rg = generate_random_string()
+        eg_resource_id = _build_eg_resource_id(ns_name, rg)
+
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_eg_endpoint(ns_name, rg),
+            json=_build_namespace_response(ns_name, rg, max_client_sessions=session_count),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        with pytest.raises(ValidationError, match="maximumClientSessionsPerAuthenticationName"):
             provider._validate_eg_namespace(eg_resource_id)
 
     def test_cross_subscription(self, mocked_cmd, mocked_responses: responses):
