@@ -51,6 +51,7 @@ class Namespaces(Queryable):
 
         namespace_body = {
             "location": location,
+            "identity": {"type": "SystemAssigned"},
             "properties": {},
             "tags": tags,
         }

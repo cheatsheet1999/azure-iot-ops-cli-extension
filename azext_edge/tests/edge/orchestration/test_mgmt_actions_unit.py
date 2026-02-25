@@ -13,6 +13,7 @@ from azure.cli.core.azclierror import InvalidArgumentValueError, ValidationError
 
 from azext_edge.edge.providers.orchestration.common import (
     MANAGED_IDENTITY_API_VERSION,
+    MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
     MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE,
     MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP,
     MGMT_ACTIONS_DEFAULT_MQTT_ENDPOINT,
@@ -26,6 +27,7 @@ from azext_edge.edge.providers.orchestration.common import (
     MQTT_ENDPOINT_TYPE,
 )
 from azext_edge.edge.util.az_client import (
+    DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION,
     DEFAULT_EVENTGRID_MGMT_API_VERSION,
     DEFAULT_IOTOPS_MGMT_API_VERSION,
 )
@@ -39,6 +41,8 @@ from azext_edge.edge.providers.orchestration.mgmt_actions import (
 from ...generators import BASE_URL, generate_random_string, generate_resource_id, get_zeroed_subscription
 
 ZEROED_SUBSCRIPTION = get_zeroed_subscription()
+DEVICEREGISTRY_RP = "Microsoft.DeviceRegistry"
+DEVICEREGISTRY_API_VERSION = DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION.value
 EVENTGRID_RP = "Microsoft.EventGrid"
 EVENTGRID_API_VERSION = DEFAULT_EVENTGRID_MGMT_API_VERSION.value
 IOTOPS_RP = "Microsoft.IoTOperations"
@@ -197,6 +201,64 @@ def _get_expected_topic_templates(instance_name: str) -> list:
     ]
 
 
+def _build_adr_namespace_resource_id(
+    namespace_name: str,
+    resource_group_name: str,
+    subscription_id: Optional[str] = None,
+) -> str:
+    return generate_resource_id(
+        resource_group_name=resource_group_name,
+        resource_provider=DEVICEREGISTRY_RP,
+        resource_path=f"/namespaces/{namespace_name}",
+        resource_subscription=subscription_id,
+    )
+
+
+def _build_adr_endpoint(
+    namespace_name: str,
+    resource_group_name: str,
+    subscription_id: Optional[str] = None,
+) -> str:
+    """Build a full management endpoint URL for an ADR namespace."""
+    sub_id = subscription_id or ZEROED_SUBSCRIPTION
+    return (
+        f"{BASE_URL}/subscriptions/{sub_id}/resourceGroups/{resource_group_name}"
+        f"/providers/{DEVICEREGISTRY_RP}/namespaces/{namespace_name}"
+        f"?api-version={DEVICEREGISTRY_API_VERSION}"
+    )
+
+
+def _build_adr_namespace_response(
+    namespace_name: str,
+    resource_group_name: str,
+    identity_type: str = "None",
+    principal_id: Optional[str] = None,
+    management_endpoints: Optional[dict] = None,
+    subscription_id: Optional[str] = None,
+) -> dict:
+    """Build a mock ADR namespace GET response."""
+    sub_id = subscription_id or ZEROED_SUBSCRIPTION
+    result: dict = {
+        "id": (
+            f"/subscriptions/{sub_id}/resourceGroups/{resource_group_name}"
+            f"/providers/{DEVICEREGISTRY_RP}/namespaces/{namespace_name}"
+        ),
+        "name": namespace_name,
+        "location": "eastus",
+        "identity": {
+            "type": identity_type,
+        },
+        "properties": {
+            "provisioningState": "Succeeded",
+        },
+    }
+    if principal_id:
+        result["identity"]["principalId"] = principal_id
+    if management_endpoints is not None:
+        result["properties"]["management"] = {"endpoints": management_endpoints}
+    return result
+
+
 def _make_eg_ctx(
     namespace_name: Optional[str] = None,
     resource_group_name: Optional[str] = None,
@@ -225,8 +287,11 @@ def _build_instance_response(
     instance_name: str,
     resource_group_name: str,
     version: str = MIN_INSTANCE_VERSION_MGMT_ACTIONS,
+    adr_namespace_name: Optional[str] = None,
 ) -> dict:
     extended_location = _make_extended_location()
+    adr_ns_name = adr_namespace_name or f"{instance_name}-adr-ns"
+    adr_ns_rid = _build_adr_namespace_resource_id(adr_ns_name, resource_group_name)
     return {
         "id": (
             f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{resource_group_name}"
@@ -238,6 +303,7 @@ def _build_instance_response(
         "properties": {
             "version": version,
             "provisioningState": "Succeeded",
+            "adrNamespaceRef": {"resourceId": adr_ns_rid},
         },
     }
 
@@ -428,7 +494,6 @@ class TestSetupEgTopicSpace:
         )
 
         assert result["name"] == ts_name
-        assert result["status"] == "Created"
         assert result["topicTemplates"] == expected_templates
         assert result["scopeId"] == instance_name
         assert len(mocked_responses.calls) == 2
@@ -467,7 +532,6 @@ class TestSetupEgTopicSpace:
         )
 
         assert result["name"] == ts_name
-        assert result["status"] == "Exists"
         assert result["topicTemplates"] == expected_templates
         assert result["scopeId"] == instance_name
         # Only the GET call, no PUT
@@ -546,10 +610,8 @@ class TestSetupEgPermissionBindings:
         )
 
         assert result["publisher"]["name"] == pub_name
-        assert result["publisher"]["status"] == "Created"
         assert result["publisher"]["clientGroup"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
         assert result["subscriber"]["name"] == sub_name
-        assert result["subscriber"]["status"] == "Created"
         assert result["subscriber"]["clientGroup"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
         assert len(mocked_responses.calls) == 4
 
@@ -596,9 +658,7 @@ class TestSetupEgPermissionBindings:
             wait_sec=0,
         )
 
-        assert result["publisher"]["status"] == "Exists"
         assert result["publisher"]["clientGroup"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
-        assert result["subscriber"]["status"] == "Exists"
         assert result["subscriber"]["clientGroup"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
         # Only GET calls, no PUTs
         assert len(mocked_responses.calls) == 2
@@ -642,9 +702,7 @@ class TestSetupEgPermissionBindings:
             wait_sec=0,
         )
 
-        assert result["publisher"]["status"] == "Exists"
         assert result["publisher"]["clientGroup"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
-        assert result["subscriber"]["status"] == "Created"
         assert result["subscriber"]["clientGroup"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
         # 1 GET (pub) + 1 GET (sub 404) + 1 PUT (sub create) = 3
         assert len(mocked_responses.calls) == 3
@@ -684,9 +742,7 @@ class TestSetupEgPermissionBindings:
             wait_sec=0,
         )
 
-        assert result["publisher"]["status"] == "Created"
         assert result["publisher"]["clientGroup"] == custom_group
-        assert result["subscriber"]["status"] == "Created"
         assert result["subscriber"]["clientGroup"] == custom_group
 
         # Verify custom client group in PUT payloads
@@ -778,7 +834,7 @@ class TestSetupEgDataflowEndpoint:
         )
 
         assert result["name"] == ep_name
-        assert result["status"] == "Created"
+        assert result["authentication"]["method"] == "SystemAssignedManagedIdentity"
         assert len(mocked_responses.calls) == 2
 
         # Verify the PUT payload
@@ -842,7 +898,10 @@ class TestSetupEgDataflowEndpoint:
         )
 
         assert result["name"] == ep_name
-        assert result["status"] == "Created"
+        result_auth = result["authentication"]
+        assert result_auth["method"] == "UserAssignedManagedIdentity"
+        assert result_auth["userAssignedManagedIdentitySettings"]["clientId"] == uami_client_id
+        assert result_auth["userAssignedManagedIdentitySettings"]["tenantId"] == uami_tenant_id
         # GET endpoint (404) + GET UAMI (200) + PUT endpoint (200) = 3
         assert len(mocked_responses.calls) == 3
 
@@ -866,11 +925,19 @@ class TestSetupEgDataflowEndpoint:
 
         ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
 
+        existing_auth = {
+            "method": "SystemAssignedManagedIdentity",
+            "systemAssignedManagedIdentitySettings": {"audience": MGMT_ACTIONS_EG_AUDIENCE},
+        }
         # GET returns 200 (already exists)
         mocked_responses.add(
             method=responses.GET,
             url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
-            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            json={
+                "id": f"/fake/path/dataflowEndpoints/{ep_name}",
+                "name": ep_name,
+                "properties": {"mqttSettings": {"authentication": existing_auth}},
+            },
             status=200,
         )
 
@@ -885,7 +952,7 @@ class TestSetupEgDataflowEndpoint:
         )
 
         assert result["name"] == ep_name
-        assert result["status"] == "Exists"
+        assert result["authentication"] == existing_auth
         # Only the GET call, no PUT
         assert len(mocked_responses.calls) == 1
 
@@ -1023,6 +1090,395 @@ class TestSetupEgDataflowEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# _setup_adr_management_endpoint tests
+# ---------------------------------------------------------------------------
+
+
+class TestSetupAdrManagementEndpoint:
+    """Tests for MgmtActions._setup_adr_management_endpoint()."""
+
+    def _make_instance(
+        self,
+        instance_name: str,
+        rg: str,
+        adr_ns_name: str,
+    ) -> dict:
+        """Build a minimal instance dict with adrNamespaceRef and extendedLocation."""
+        return _build_instance_response(instance_name, rg, adr_namespace_name=adr_ns_name)
+
+    def test_create_new_identity_and_endpoint(self, mocked_cmd, mocked_responses: responses):
+        """ADR namespace has no identity and no management endpoint — enables both."""
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+        adr_ns_name = generate_random_string()
+        eg_ctx = _make_eg_ctx()
+
+        instance = self._make_instance(instance_name, rg, adr_ns_name)
+        principal_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        # GET: no identity, no management endpoints
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(adr_ns_name, rg, identity_type="None"),
+            status=200,
+        )
+        # PATCH: returns SystemAssigned with principalId
+        mocked_responses.add(
+            method=responses.PATCH,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(
+                adr_ns_name,
+                rg,
+                identity_type="SystemAssigned",
+                principal_id=principal_id,
+                management_endpoints={
+                    instance["extendedLocation"]["name"]: {
+                        "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                        "address": eg_ctx.mqtt_hostname,
+                        "scopeId": instance_name,
+                        "resourceId": eg_ctx.resource_id,
+                    },
+                },
+            ),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_adr_management_endpoint(
+            instance=instance,
+            eg_ctx=eg_ctx,
+            wait_sec=0,
+        )
+
+        assert "principalId" not in result
+        assert result["name"] == adr_ns_name
+        assert result["identity"]["type"] == "SystemAssigned"
+        assert result["identity"]["principalId"] == principal_id
+        cl_id = instance["extendedLocation"]["name"]
+        assert cl_id in result["managementEndpoints"]
+        assert result["managementEndpoints"][cl_id]["endpointType"] == MGMT_ACTIONS_ADR_ENDPOINT_TYPE
+        assert result["managementEndpoints"][cl_id]["address"] == eg_ctx.mqtt_hostname
+        assert "resourceId" not in result
+
+        # Verify PATCH payload
+        patch_body = json.loads(mocked_responses.calls[1].request.body)
+        assert patch_body["identity"]["type"] == "SystemAssigned"
+        mgmt_endpoints = patch_body["properties"]["management"]["endpoints"]
+        cl_id = instance["extendedLocation"]["name"]
+        assert cl_id in mgmt_endpoints
+        assert mgmt_endpoints[cl_id]["endpointType"] == MGMT_ACTIONS_ADR_ENDPOINT_TYPE
+        assert mgmt_endpoints[cl_id]["address"] == eg_ctx.mqtt_hostname
+        assert mgmt_endpoints[cl_id]["scopeId"] == instance_name
+        assert mgmt_endpoints[cl_id]["resourceId"] == eg_ctx.resource_id
+
+        assert len(mocked_responses.calls) == 2
+
+    def test_already_configured_skips_update(self, mocked_cmd, mocked_responses: responses):
+        """ADR namespace already has SystemAssigned identity and matching endpoint — returns Exists."""
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+        adr_ns_name = generate_random_string()
+        eg_ctx = _make_eg_ctx()
+
+        instance = self._make_instance(instance_name, rg, adr_ns_name)
+        cl_id = instance["extendedLocation"]["name"]
+        principal_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        # GET: already has matching identity and endpoint
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(
+                adr_ns_name,
+                rg,
+                identity_type="SystemAssigned",
+                principal_id=principal_id,
+                management_endpoints={
+                    cl_id: {
+                        "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                        "address": eg_ctx.mqtt_hostname,
+                        "scopeId": instance_name,
+                        "resourceId": eg_ctx.resource_id,
+                    },
+                },
+            ),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_adr_management_endpoint(
+            instance=instance,
+            eg_ctx=eg_ctx,
+        )
+
+        assert "principalId" not in result
+        assert result["name"] == adr_ns_name
+        assert result["identity"]["type"] == "SystemAssigned"
+        assert result["identity"]["principalId"] == principal_id
+        assert cl_id in result["managementEndpoints"]
+        assert result["managementEndpoints"][cl_id]["endpointType"] == MGMT_ACTIONS_ADR_ENDPOINT_TYPE
+
+        # Only GET — no PATCH
+        assert len(mocked_responses.calls) == 1
+
+    def test_identity_exists_endpoint_missing(self, mocked_cmd, mocked_responses: responses):
+        """ADR namespace has SystemAssigned identity but no management endpoint entry."""
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+        adr_ns_name = generate_random_string()
+        eg_ctx = _make_eg_ctx()
+
+        instance = self._make_instance(instance_name, rg, adr_ns_name)
+        principal_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        # GET: has identity, no management endpoints
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(
+                adr_ns_name,
+                rg,
+                identity_type="SystemAssigned",
+                principal_id=principal_id,
+            ),
+            status=200,
+        )
+        # PATCH: add endpoint
+        mocked_responses.add(
+            method=responses.PATCH,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(
+                adr_ns_name,
+                rg,
+                identity_type="SystemAssigned",
+                principal_id=principal_id,
+                management_endpoints={
+                    instance["extendedLocation"]["name"]: {
+                        "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                        "address": eg_ctx.mqtt_hostname,
+                        "scopeId": instance_name,
+                        "resourceId": eg_ctx.resource_id,
+                    },
+                },
+            ),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_adr_management_endpoint(
+            instance=instance,
+            eg_ctx=eg_ctx,
+            wait_sec=0,
+        )
+
+        assert "principalId" not in result
+        assert result["identity"]["type"] == "SystemAssigned"
+        assert result["identity"]["principalId"] == principal_id
+        cl_id = instance["extendedLocation"]["name"]
+        assert cl_id in result["managementEndpoints"]
+
+        # Verify PATCH does NOT include identity block (already SystemAssigned)
+        patch_body = json.loads(mocked_responses.calls[1].request.body)
+        assert "identity" not in patch_body
+
+        assert len(mocked_responses.calls) == 2
+
+    def test_preserves_existing_endpoints(self, mocked_cmd, mocked_responses: responses):
+        """PATCH payload includes existing management endpoints from other custom locations."""
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+        adr_ns_name = generate_random_string()
+        eg_ctx = _make_eg_ctx()
+
+        instance = self._make_instance(instance_name, rg, adr_ns_name)
+        cl_id = instance["extendedLocation"]["name"]
+        principal_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        # Pre-existing endpoint from a different custom location
+        other_cl_id = (
+            "/subscriptions/other-sub/resourceGroups/other-rg"
+            "/providers/Microsoft.ExtendedLocation/customLocations/other-cl"
+        )
+        existing_endpoints = {
+            other_cl_id: {
+                "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                "address": "other-host.eastus-1.ts.eventgrid.azure.net",
+                "scopeId": "other-instance",
+                "resourceId": (
+                    "/subscriptions/other-sub/resourceGroups/other-rg"
+                    "/providers/Microsoft.EventGrid/namespaces/other-ns"
+                ),
+            },
+        }
+
+        # GET: has identity but endpoint is for a different CL
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(
+                adr_ns_name,
+                rg,
+                identity_type="SystemAssigned",
+                principal_id=principal_id,
+                management_endpoints=existing_endpoints,
+            ),
+            status=200,
+        )
+        # PATCH: merge endpoints — response includes both endpoints
+        merged_endpoints = dict(existing_endpoints)
+        merged_endpoints[cl_id] = {
+            "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+            "address": eg_ctx.mqtt_hostname,
+            "scopeId": instance_name,
+            "resourceId": eg_ctx.resource_id,
+        }
+        mocked_responses.add(
+            method=responses.PATCH,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(
+                adr_ns_name,
+                rg,
+                identity_type="SystemAssigned",
+                principal_id=principal_id,
+                management_endpoints=merged_endpoints,
+            ),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_adr_management_endpoint(
+            instance=instance,
+            eg_ctx=eg_ctx,
+            wait_sec=0,
+        )
+
+        # Both our entry and the other CL's entry should be in the result
+        assert cl_id in result["managementEndpoints"]
+        assert other_cl_id in result["managementEndpoints"]
+
+        # Verify PATCH payload preserves the other CL's endpoint
+        patch_body = json.loads(mocked_responses.calls[1].request.body)
+        mgmt_endpoints = patch_body["properties"]["management"]["endpoints"]
+        assert other_cl_id in mgmt_endpoints
+        assert cl_id in mgmt_endpoints
+        # Other endpoint data unchanged
+        assert mgmt_endpoints[other_cl_id] == existing_endpoints[other_cl_id]
+
+        assert len(mocked_responses.calls) == 2
+
+    def test_endpoint_value_changed_reports_updated(self, mocked_cmd, mocked_responses: responses):
+        """When the CL key exists but values differ, reports 'Updated'."""
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+        adr_ns_name = generate_random_string()
+        eg_ctx = _make_eg_ctx()
+
+        instance = self._make_instance(instance_name, rg, adr_ns_name)
+        cl_id = instance["extendedLocation"]["name"]
+        principal_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        # Existing endpoint has a stale address
+        stale_endpoint = {
+            cl_id: {
+                "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                "address": "old-host.eventgrid.azure.net",
+                "scopeId": instance_name,
+                "resourceId": eg_ctx.resource_id,
+            },
+        }
+
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(
+                adr_ns_name,
+                rg,
+                identity_type="SystemAssigned",
+                principal_id=principal_id,
+                management_endpoints=stale_endpoint,
+            ),
+            status=200,
+        )
+        # PATCH response includes the updated endpoint
+        updated_endpoint = {
+            cl_id: {
+                "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                "address": eg_ctx.mqtt_hostname,
+                "scopeId": instance_name,
+                "resourceId": eg_ctx.resource_id,
+            },
+        }
+        mocked_responses.add(
+            method=responses.PATCH,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(
+                adr_ns_name,
+                rg,
+                identity_type="SystemAssigned",
+                principal_id=principal_id,
+                management_endpoints=updated_endpoint,
+            ),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_adr_management_endpoint(
+            instance=instance,
+            eg_ctx=eg_ctx,
+            wait_sec=0,
+        )
+
+        assert result["identity"]["type"] == "SystemAssigned"
+        assert cl_id in result["managementEndpoints"]
+        # Address should be the updated value from the PATCH response
+        assert result["managementEndpoints"][cl_id]["address"] == eg_ctx.mqtt_hostname
+        assert len(mocked_responses.calls) == 2
+
+    def test_missing_adr_namespace_ref(self, mocked_cmd, mocked_responses: responses):
+        """Instance without adrNamespaceRef raises ValidationError."""
+        instance = _build_instance_response("test-inst", "test-rg")
+        # Remove adrNamespaceRef
+        instance["properties"].pop("adrNamespaceRef", None)
+        eg_ctx = _make_eg_ctx()
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        with pytest.raises(ValidationError, match="adrNamespaceRef"):
+            provider._setup_adr_management_endpoint(instance=instance, eg_ctx=eg_ctx)
+
+        assert len(mocked_responses.calls) == 0
+
+    def test_no_principal_id_in_response_raises(self, mocked_cmd, mocked_responses: responses):
+        """When PATCH returns no principalId, raises ValidationError."""
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+        adr_ns_name = generate_random_string()
+        eg_ctx = _make_eg_ctx()
+
+        instance = self._make_instance(instance_name, rg, adr_ns_name)
+
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(adr_ns_name, rg, identity_type="None"),
+            status=200,
+        )
+        # PATCH response without principalId
+        mocked_responses.add(
+            method=responses.PATCH,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(adr_ns_name, rg, identity_type="SystemAssigned"),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        with pytest.raises(ValidationError, match="principalId"):
+            provider._setup_adr_management_endpoint(instance=instance, eg_ctx=eg_ctx, wait_sec=0)
+
+        assert len(mocked_responses.calls) == 2
+
+
+# ---------------------------------------------------------------------------
 # _setup_dataflow_graph tests
 # ---------------------------------------------------------------------------
 
@@ -1075,7 +1531,6 @@ class TestSetupDataflowGraph:
         )
 
         assert result["name"] == graph_name
-        assert result["status"] == "Created"
         assert len(mocked_responses.calls) == 2
 
         # Verify PUT payload structure
@@ -1158,7 +1613,6 @@ class TestSetupDataflowGraph:
         )
 
         assert result["name"] == graph_name
-        assert result["status"] == "Exists"
         assert len(mocked_responses.calls) == 1
 
     def test_deterministic_naming(self, mocked_cmd, mocked_responses: responses):
@@ -1217,7 +1671,6 @@ class TestSetupDataflowGraph:
         )
 
         assert result["name"] == graph_name
-        assert result["status"] == "Created"
         assert len(mocked_responses.calls) == 2
 
 
@@ -1314,7 +1767,6 @@ class TestSetupResponseDataflow:
         )
 
         assert result["name"] == dataflow_name
-        assert result["status"] == "Created"
 
         # Verify PUT body
         put_body = json.loads(mocked_responses.calls[1].request.body)
@@ -1373,7 +1825,6 @@ class TestSetupResponseDataflow:
         )
 
         assert result["name"] == dataflow_name
-        assert result["status"] == "Exists"
         assert len(mocked_responses.calls) == 1
 
     def test_deterministic_naming(self, mocked_cmd, mocked_responses: responses):
@@ -1432,7 +1883,6 @@ class TestSetupResponseDataflow:
         )
 
         assert result["name"] == dataflow_name
-        assert result["status"] == "Created"
 
         # Verify the PUT went to the custom profile URL
         put_url = mocked_responses.calls[1].request.url
@@ -1463,7 +1913,10 @@ class TestEnable:
 
         instance_response = _build_instance_response(instance_name, rg)
         instance_rid = instance_response["id"]
+        cl_id = instance_response["extendedLocation"]["name"]
         eg_rid = _build_eg_resource_id(ns_name, rg)
+        adr_ns_name = f"{instance_name}-adr-ns"
+        adr_principal_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
         ts_name = get_mgmt_actions_resource_name("ops", instance_rid)
         pub_name = get_mgmt_actions_resource_name("pub", instance_rid)
@@ -1526,7 +1979,33 @@ class TestEnable:
             json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
             status=200,
         )
-        # 11-12. Dataflow graph: GET 404, PUT 200
+        # 11-12. ADR namespace: GET, PATCH 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(adr_ns_name, rg, identity_type="None"),
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.PATCH,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(
+                adr_ns_name,
+                rg,
+                identity_type="SystemAssigned",
+                principal_id=adr_principal_id,
+                management_endpoints={
+                    cl_id: {
+                        "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                        "address": hostname,
+                        "scopeId": instance_name,
+                        "resourceId": eg_rid,
+                    },
+                },
+            ),
+            status=200,
+        )
+        # 13-14. Dataflow graph: GET 404, PUT 200
         mocked_responses.add(
             method=responses.GET,
             url=_build_iotops_endpoint(
@@ -1578,33 +2057,31 @@ class TestEnable:
         )
 
         # -- Assert top-level keys --
-        assert set(result.keys()) == {"instance", "eventGrid"}
+        assert set(result.keys()) == {"instance", "eventGrid", "deviceRegistryNamespace"}
 
         # -- Assert instance section --
         inst = result["instance"]
         assert inst["name"] == instance_name
         assert inst["resourceGroup"] == rg
-        assert inst["resourceId"] == instance_rid
+        assert "resourceId" not in inst
         assert inst["version"] == MIN_INSTANCE_VERSION_MGMT_ACTIONS
         assert inst["dataflowProfile"] == MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE
         # dataflowEndpoint is an instance child resource, not under eventGrid
         assert "dataflowEndpoint" in inst
         assert inst["dataflowEndpoint"]["name"] == ep_name
-        assert inst["dataflowEndpoint"]["status"] == "Created"
         assert inst["requestDataflowGraph"]["name"] == graph_name
-        assert inst["requestDataflowGraph"]["status"] == "Created"
         assert inst["responseDataflow"]["name"] == resp_name
-        assert inst["responseDataflow"]["status"] == "Created"
 
         # -- Assert eventGrid section --
         eg = result["eventGrid"]
         assert eg["namespace"]["name"] == ns_name
-        assert eg["namespace"]["resourceId"] == eg_rid
+        assert "resourceId" not in eg["namespace"]
+        assert eg["namespace"]["resourceGroup"] == rg
+        assert eg["namespace"]["subscriptionId"] == ZEROED_SUBSCRIPTION
         assert eg["namespace"]["mqttHostname"] == hostname
         assert "dataflowEndpoint" not in eg  # must not be here
 
         assert eg["topicSpace"]["name"] == ts_name
-        assert eg["topicSpace"]["status"] == "Created"
         assert eg["topicSpace"]["scopeId"] == instance_name
 
         assert eg["permissionBindings"]["publisher"]["name"] == pub_name
@@ -1612,11 +2089,17 @@ class TestEnable:
         assert eg["permissionBindings"]["subscriber"]["name"] == sub_name
         assert eg["permissionBindings"]["subscriber"]["clientGroup"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
 
-        # -- Assert total HTTP call count: 14 --
-        # GET instance + GET namespace + (GET+PUT topic space) +
+        # -- Assert deviceRegistryNamespace section --
+        adr = result["deviceRegistryNamespace"]
+        assert "principalId" not in adr
+        assert adr["identity"]["type"] == "SystemAssigned"
+        assert adr["identity"]["principalId"] == adr_principal_id
+
+        # -- Assert total HTTP call count: 16 --
+        # GET instance + GET EG namespace + (GET+PUT topic space) +
         # (GET+PUT pub binding) + (GET+PUT sub binding) + (GET+PUT endpoint) +
-        # (GET+PUT dataflow graph) + (GET+PUT response dataflow)
-        assert len(mocked_responses.calls) == 14
+        # (GET+PATCH ADR namespace) + (GET+PUT dataflow graph) + (GET+PUT response dataflow)
+        assert len(mocked_responses.calls) == 16
 
     def test_version_below_minimum(self, mocked_cmd, mocked_responses: responses):
         """enable() raises ValidationError when instance version is below the minimum."""
@@ -1678,7 +2161,10 @@ class TestEnable:
 
         instance_response = _build_instance_response(instance_name, rg)
         instance_rid = instance_response["id"]
+        cl_id = instance_response["extendedLocation"]["name"]
         eg_rid = _build_eg_resource_id(ns_name, rg)
+        adr_ns_name = f"{instance_name}-adr-ns"
+        adr_principal_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
         ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
         graph_name = get_mgmt_actions_resource_name("req", instance_rid)
@@ -1741,7 +2227,33 @@ class TestEnable:
             json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
             status=200,
         )
-        # 11-12. Dataflow graph: GET 404, PUT 200 — uses custom profile
+        # 11-12. ADR namespace: GET, PATCH 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(adr_ns_name, rg, identity_type="None"),
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.PATCH,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(
+                adr_ns_name,
+                rg,
+                identity_type="SystemAssigned",
+                principal_id=adr_principal_id,
+                management_endpoints={
+                    cl_id: {
+                        "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                        "address": hostname,
+                        "scopeId": instance_name,
+                        "resourceId": eg_rid,
+                    },
+                },
+            ),
+            status=200,
+        )
+        # 13-14. Dataflow graph: GET 404, PUT 200 — uses custom profile
         mocked_responses.add(
             method=responses.GET,
             url=_build_iotops_endpoint(
@@ -1794,16 +2306,14 @@ class TestEnable:
         )
 
         assert result["instance"]["requestDataflowGraph"]["name"] == graph_name
-        assert result["instance"]["requestDataflowGraph"]["status"] == "Created"
         assert result["instance"]["responseDataflow"]["name"] == resp_name
-        assert result["instance"]["responseDataflow"]["status"] == "Created"
         assert result["instance"]["dataflowProfile"] == custom_profile
 
         # Verify the response dataflow PUT went to the custom profile URL
         resp_put_url = mocked_responses.calls[-1].request.url
         assert f"/dataflowProfiles/{custom_profile}/" in resp_put_url
 
-        assert len(mocked_responses.calls) == 14
+        assert len(mocked_responses.calls) == 16
 
     def test_user_assigned_mi(self, mocked_cmd, mocked_responses: responses):
         """enable() configures UserAssignedManagedIdentity auth when mi_user_assigned is provided."""
@@ -1817,8 +2327,11 @@ class TestEnable:
 
         instance_response = _build_instance_response(instance_name, rg)
         instance_rid = instance_response["id"]
+        cl_id = instance_response["extendedLocation"]["name"]
         eg_rid = _build_eg_resource_id(ns_name, rg)
         mi_rid = _build_uami_resource_id(mi_name, rg)
+        adr_ns_name = f"{instance_name}-adr-ns"
+        adr_principal_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
         ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
         graph_name = get_mgmt_actions_resource_name("req", instance_rid)
@@ -1888,7 +2401,33 @@ class TestEnable:
             json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
             status=200,
         )
-        # 12-13. Dataflow graph: GET 404, PUT 200
+        # 12-13. ADR namespace: GET, PATCH 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(adr_ns_name, rg, identity_type="None"),
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.PATCH,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(
+                adr_ns_name,
+                rg,
+                identity_type="SystemAssigned",
+                principal_id=adr_principal_id,
+                management_endpoints={
+                    cl_id: {
+                        "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                        "address": hostname,
+                        "scopeId": instance_name,
+                        "resourceId": eg_rid,
+                    },
+                },
+            ),
+            status=200,
+        )
+        # 14-15. Dataflow graph: GET 404, PUT 200
         mocked_responses.add(
             method=responses.GET,
             url=_build_iotops_endpoint(
@@ -1940,7 +2479,7 @@ class TestEnable:
             wait_sec=0,
         )
 
-        assert result["instance"]["dataflowEndpoint"]["status"] == "Created"
+        assert result["instance"]["dataflowEndpoint"]["name"] == ep_name
 
         # Verify the endpoint PUT body contains UserAssignedManagedIdentity auth
         endpoint_put_call = mocked_responses.calls[10]
@@ -1952,4 +2491,4 @@ class TestEnable:
         assert uami_settings["tenantId"] == mi_tenant_id
         assert uami_settings["scope"] == MGMT_ACTIONS_EG_AUDIENCE
 
-        assert len(mocked_responses.calls) == 15
+        assert len(mocked_responses.calls) == 17
