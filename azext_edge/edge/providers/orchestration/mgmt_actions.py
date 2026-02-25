@@ -36,6 +36,7 @@ from .common import (
     MGMT_ACTIONS_REQUEST_TOPIC_TEMPLATE,
     MGMT_ACTIONS_RESOURCE_PREFIX,
     MGMT_ACTIONS_RESPONSE_TOPIC_TEMPLATE,
+    MIN_EG_CLIENT_SESSIONS_PER_AUTH_NAME,
     MIN_INSTANCE_VERSION_MGMT_ACTIONS,
     MQTT_ENDPOINT_TYPE,
 )
@@ -359,6 +360,15 @@ class MgmtActions(Queryable):
             raise ValidationError(
                 f"Event Grid namespace '{eg_name}' has topic spaces enabled but no MQTT hostname. "
                 f"This may indicate the namespace is still provisioning."
+            )
+
+        max_client_sessions = topic_spaces_config.get("maximumClientSessionsPerAuthenticationName", 0)
+        if max_client_sessions < MIN_EG_CLIENT_SESSIONS_PER_AUTH_NAME:
+            raise ValidationError(
+                f"Event Grid namespace '{eg_name}' has maximumClientSessionsPerAuthenticationName "
+                f"set to {max_client_sessions}. Management actions requires at least "
+                f"{MIN_EG_CLIENT_SESSIONS_PER_AUTH_NAME} concurrent client sessions per authentication name "
+                f"to support reliable dataflow connectivity."
             )
 
         return EgNamespaceContext(
