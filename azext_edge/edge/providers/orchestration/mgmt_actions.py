@@ -8,7 +8,7 @@ import json
 from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional
 
 from azure.cli.core.azclierror import InvalidArgumentValueError, ValidationError
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 from knack.log import get_logger
 
 from ...util.az_client import (
@@ -20,6 +20,10 @@ from ...util.az_client import (
 from ...util.id_tools import parse_resource_id as parse_resource_id_dict
 from ...util.queryable import Queryable
 from .common import (
+    CUSTOM_LOCATIONS_API_VERSION,
+    EG_TOPICSPACES_PUBLISHER_ROLE_ID,
+    EG_TOPICSPACES_SUBSCRIBER_ROLE_ID,
+    EXTENSION_TYPE_OPS,
     MANAGED_IDENTITY_API_VERSION,
     MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
     MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE,
@@ -35,7 +39,8 @@ from .common import (
     MIN_INSTANCE_VERSION_MGMT_ACTIONS,
     MQTT_ENDPOINT_TYPE,
 )
-from .permissions import PermissionManager
+from .connected_cluster import ConnectedCluster
+from .permissions import ROLE_DEF_FORMAT_STR, PermissionManager, PrincipalType
 
 if TYPE_CHECKING:
     from ...vendor.clients.deviceregistrymgmt import MicrosoftDeviceRegistryManagementService
@@ -92,8 +97,8 @@ def _build_graph_rules_config(topic_prefix_regex: str) -> List[Dict]:
 class EgNamespaceContext(NamedTuple):
     """Validated Event Grid namespace context, produced by _validate_eg_namespace().
 
-    Set once during Stage 1 (sequential validation), then read-only during
-    Stage 2 concurrent lanes — inherently thread-safe as an immutable NamedTuple.
+    Set once during validation, then shared read-only across all subsequent setup
+    methods. Immutable NamedTuple ensures thread safety if concurrency is added later.
     """
 
     resource_id: str
@@ -162,6 +167,9 @@ class MgmtActions(Queryable):
         # Extract extendedLocation from instance (needed for AIO child resources)
         extended_location: Dict = instance["extendedLocation"]
 
+        # Resolve UAMI once (used by EG dataflow endpoint + identity resolution)
+        mi_resource = self._resolve_user_assigned_mi(mi_user_assigned) if mi_user_assigned else None
+
         # Event Grid infrastructure setup
         topic_space_result = self._setup_eg_topic_space(
             eg_ctx=eg_ctx,
@@ -185,7 +193,7 @@ class MgmtActions(Queryable):
             instance_resource_id=instance_resource_id,
             resource_group_name=resource_group_name,
             extended_location=extended_location,
-            mi_user_assigned=mi_user_assigned,
+            mi_resource=mi_resource,
             **kwargs,
         )
 
@@ -220,9 +228,22 @@ class MgmtActions(Queryable):
             **kwargs,
         )
 
-        # TODO: Role assignments — ADR namespace MI + dataflow auth identity → EG namespace
+        # Role assignments — ADR namespace MI + dataflow auth identity → EG namespace
+        role_assignments_result = None
+        if not skip_role_assignments:
+            dataflow_auth_principal_id = self._resolve_dataflow_auth_identity(
+                instance=instance,
+                mi_resource=mi_resource,
+            )
+            role_assignments_result = self._setup_role_assignments(
+                eg_ctx=eg_ctx,
+                adr_principal_id=adr_result["identity"]["principalId"],
+                dataflow_auth_principal_id=dataflow_auth_principal_id,
+                adr_role_ids=adr_role_ids,
+                ops_role_ids=ops_role_ids,
+            )
 
-        return {
+        result: Dict = {
             "instance": {
                 "name": name,
                 "resourceGroup": resource_group_name,
@@ -244,6 +265,11 @@ class MgmtActions(Queryable):
             },
             "deviceRegistryNamespace": adr_result,
         }
+
+        if role_assignments_result is not None:
+            result["roleAssignments"] = role_assignments_result
+
+        return result
 
     def disable(
         self,
@@ -474,15 +500,15 @@ class MgmtActions(Queryable):
         instance_resource_id: str,
         resource_group_name: str,
         extended_location: Dict,
-        mi_user_assigned: Optional[str] = None,
+        mi_resource: Optional[Dict] = None,
         **kwargs,
     ) -> Dict:
         """Create or confirm the EG MQTT dataflow endpoint on the AIO instance.
 
         Uses GET-then-PUT to report accurate status. The endpoint connects to the EG
         namespace's MQTT broker using managed identity authentication. Defaults to
-        SystemAssigned MI; when mi_user_assigned is provided, a UserAssigned MI is
-        configured instead (requires resolving clientId and tenantId from the UAMI resource).
+        SystemAssigned MI; when mi_resource is provided, a UserAssigned MI is
+        configured instead using clientId and tenantId from the resolved UAMI resource.
         """
         endpoint_name = get_mgmt_actions_resource_name("eg", instance_resource_id)
 
@@ -504,8 +530,7 @@ class MgmtActions(Queryable):
             pass
 
         # Build authentication block
-        if mi_user_assigned:
-            mi_resource = self._resolve_user_assigned_mi(mi_user_assigned)
+        if mi_resource:
             authentication = {
                 "method": "UserAssignedManagedIdentity",
                 "userAssignedManagedIdentitySettings": {
@@ -879,3 +904,138 @@ class MgmtActions(Queryable):
                 f"User-assigned managed identity '{mi_resource_id}' not found.\n"
                 f"Verify the --mi-user-assigned value and ensure the identity exists."
             )
+
+    def _resolve_dataflow_auth_identity(
+        self,
+        instance: Dict,
+        mi_resource: Optional[Dict] = None,
+    ) -> str:
+        """Resolve the principal ID of the identity that authenticates the dataflow endpoint.
+
+        When a UAMI is provided, its principalId is used directly. Otherwise, resolves the
+        AIO extension's system MI by traversing: instance → custom location → connected
+        cluster → extensions. The resolved principal ID is used for EG role assignments.
+        """
+        if mi_resource:
+            principal_id = mi_resource.get("properties", {}).get("principalId")
+            if not principal_id:
+                raise ValidationError(
+                    "User-assigned managed identity is missing 'principalId'.\n"
+                    "Verify the identity resource has been fully provisioned."
+                )
+            return principal_id
+
+        # Resolve AIO extension system MI via custom location → connected cluster
+        cl_id = instance.get("extendedLocation", {}).get("name")
+        if not cl_id:
+            raise ValidationError(
+                "Instance is missing 'extendedLocation.name' (custom location ID).\n"
+                "The instance may not be fully provisioned."
+            )
+
+        custom_location = self.resource_client.resources.get_by_id(
+            resource_id=cl_id,
+            api_version=CUSTOM_LOCATIONS_API_VERSION,
+        )
+
+        host_resource_id = custom_location.get("properties", {}).get("hostResourceId")
+        if not host_resource_id:
+            raise ValidationError(
+                f"Custom location '{cl_id}' is missing 'hostResourceId'.\n"
+                "Unable to resolve the connected cluster for extension identity."
+            )
+
+        cluster_parts = parse_resource_id_dict(host_resource_id)
+        connected_cluster = ConnectedCluster(
+            cmd=self.cmd,
+            subscription_id=cluster_parts.get("subscription", self.default_subscription_id),
+            cluster_name=cluster_parts["name"],
+            resource_group_name=cluster_parts["resource_group"],
+        )
+
+        ext_map = connected_cluster.get_extensions_by_type(EXTENSION_TYPE_OPS)
+        ops_ext = ext_map.get(EXTENSION_TYPE_OPS)
+        if not ops_ext:
+            raise ValidationError(
+                "IoT Operations extension not found on the connected cluster.\n"
+                "Cannot resolve the extension identity for EG role assignments.\n"
+                "Ensure 'az iot ops create' has been run successfully."
+            )
+
+        principal_id = ops_ext.get("identity", {}).get("principalId")
+        if not principal_id:
+            raise ValidationError(
+                "IoT Operations extension is missing 'identity.principalId'.\n"
+                "Cannot assign EG roles without the extension identity.\n"
+                "Please re-deploy via 'az iot ops create'."
+            )
+
+        return principal_id
+
+    def _setup_role_assignments(
+        self,
+        eg_ctx: EgNamespaceContext,
+        adr_principal_id: str,
+        dataflow_auth_principal_id: str,
+        adr_role_ids: Optional[List[str]] = None,
+        ops_role_ids: Optional[List[str]] = None,
+    ) -> Dict:
+        """Assign EG Topic Spaces Publisher/Subscriber roles for both identity principals.
+
+        Two principals need EG namespace access:
+        - ADR namespace system MI (for device registry ↔ EG communication)
+        - Dataflow auth identity (for dataflow endpoint ↔ EG communication)
+
+        Uses a separate PermissionManager when the EG namespace is in a different
+        subscription than the instance. Role assignments are idempotent — existing
+        assignments are skipped.
+        """
+        default_role_ids = [EG_TOPICSPACES_PUBLISHER_ROLE_ID, EG_TOPICSPACES_SUBSCRIBER_ROLE_ID]
+        resolved_adr_roles = adr_role_ids or default_role_ids
+        resolved_ops_roles = ops_role_ids or default_role_ids
+
+        # Use a cross-subscription PermissionManager when the EG namespace lives
+        # in a different subscription than the instance.
+        if eg_ctx.subscription_id.lower() != self.default_subscription_id.lower():
+            eg_permission_manager = PermissionManager(subscription_id=eg_ctx.subscription_id)
+        else:
+            eg_permission_manager = self.permission_manager
+
+        scope = eg_ctx.resource_id
+
+        identity_assignments = [
+            ("adrNamespace", adr_principal_id, resolved_adr_roles),
+            ("dataflowIdentity", dataflow_auth_principal_id, resolved_ops_roles),
+        ]
+
+        result: Dict = {}
+        for result_key, principal_id, role_ids in identity_assignments:
+            try:
+                for role_id in role_ids:
+                    role_def_id = ROLE_DEF_FORMAT_STR.format(
+                        subscription_id=eg_ctx.subscription_id,
+                        role_id=role_id,
+                    )
+                    eg_permission_manager.apply_role_assignment(
+                        scope=scope,
+                        principal_id=principal_id,
+                        role_def_id=role_def_id,
+                        principal_type=PrincipalType.SERVICE_PRINCIPAL.value,
+                    )
+            except HttpResponseError as e:
+                raise ValidationError(
+                    f"Failed to assign role(s) for principal '{principal_id}' "
+                    f"on EG namespace '{eg_ctx.namespace_name}'.\n"
+                    f"Error: {e.message}\n"
+                    f"You can manually assign the required roles:\n"
+                    f"  Scope: {scope}\n"
+                    f"  Principal ID: {principal_id}\n"
+                    f"  Role IDs: {', '.join(role_ids)}"
+                )
+
+            result[result_key] = {
+                "principalId": principal_id,
+                "roles": list(role_ids),
+            }
+
+        return result

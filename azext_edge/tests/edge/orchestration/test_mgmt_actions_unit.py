@@ -850,7 +850,7 @@ class TestSetupEgDataflowEndpoint:
         assert auth["systemAssignedManagedIdentitySettings"]["audience"] == MGMT_ACTIONS_EG_AUDIENCE
 
     def test_create_new_user_assigned(self, mocked_cmd, mocked_responses: responses):
-        """When endpoint does not exist and UAMI is provided, creates with UserAssigned MI."""
+        """When endpoint does not exist and pre-resolved UAMI is provided, creates with UserAssigned MI."""
         ns_name = generate_random_string()
         rg = generate_random_string()
         instance_name = generate_random_string()
@@ -863,6 +863,7 @@ class TestSetupEgDataflowEndpoint:
         uami_rid = _build_uami_resource_id(uami_name, rg)
         uami_client_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
         uami_tenant_id = "tttttttt-tttt-tttt-tttt-tttttttttttt"
+        uami_resource = _build_uami_response(uami_rid, uami_client_id, uami_tenant_id)
 
         # GET dataflow endpoint returns 404
         mocked_responses.add(
@@ -870,13 +871,6 @@ class TestSetupEgDataflowEndpoint:
             url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
             json={"error": {"code": "ResourceNotFound"}},
             status=404,
-        )
-        # GET UAMI returns identity details
-        mocked_responses.add(
-            method=responses.GET,
-            url=_build_uami_endpoint(uami_rid),
-            json=_build_uami_response(uami_rid, uami_client_id, uami_tenant_id),
-            status=200,
         )
         # PUT creates endpoint
         mocked_responses.add(
@@ -893,7 +887,7 @@ class TestSetupEgDataflowEndpoint:
             instance_resource_id=instance_rid,
             resource_group_name=rg,
             extended_location=extended_location,
-            mi_user_assigned=uami_rid,
+            mi_resource=uami_resource,
             wait_sec=0,
         )
 
@@ -902,11 +896,11 @@ class TestSetupEgDataflowEndpoint:
         assert result_auth["method"] == "UserAssignedManagedIdentity"
         assert result_auth["userAssignedManagedIdentitySettings"]["clientId"] == uami_client_id
         assert result_auth["userAssignedManagedIdentitySettings"]["tenantId"] == uami_tenant_id
-        # GET endpoint (404) + GET UAMI (200) + PUT endpoint (200) = 3
-        assert len(mocked_responses.calls) == 3
+        # GET endpoint (404) + PUT endpoint (200) = 2 (UAMI already resolved by caller)
+        assert len(mocked_responses.calls) == 2
 
         # Verify the PUT payload
-        put_body = json.loads(mocked_responses.calls[2].request.body)
+        put_body = json.loads(mocked_responses.calls[1].request.body)
         auth = put_body["properties"]["mqttSettings"]["authentication"]
         assert auth["method"] == "UserAssignedManagedIdentity"
         uami_settings = auth["userAssignedManagedIdentitySettings"]
@@ -1049,22 +1043,10 @@ class TestSetupEgDataflowEndpoint:
         assert "trustedCaCertificateConfigMapRef" not in tls
 
     def test_uami_not_found(self, mocked_cmd, mocked_responses: responses):
-        """When UAMI resource is not found, raises InvalidArgumentValueError."""
+        """When UAMI resource is not found, _resolve_user_assigned_mi raises InvalidArgumentValueError."""
         rg = generate_random_string()
-        instance_name = generate_random_string()
-        instance_rid = _build_eg_resource_id(instance_name, rg)
-        eg_ctx = _make_eg_ctx(resource_group_name=rg)
-        extended_location = _make_extended_location()
-        ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
         uami_rid = _build_uami_resource_id("missing-identity", rg)
 
-        # GET endpoint returns 404
-        mocked_responses.add(
-            method=responses.GET,
-            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
-            json={"error": {"code": "ResourceNotFound"}},
-            status=404,
-        )
         # GET UAMI returns 404
         mocked_responses.add(
             method=responses.GET,
@@ -1075,18 +1057,9 @@ class TestSetupEgDataflowEndpoint:
 
         provider = MgmtActions(cmd=mocked_cmd)
         with pytest.raises(InvalidArgumentValueError, match="not found"):
-            provider._setup_eg_dataflow_endpoint(
-                eg_ctx=eg_ctx,
-                instance_name=instance_name,
-                instance_resource_id=instance_rid,
-                resource_group_name=rg,
-                extended_location=extended_location,
-                mi_user_assigned=uami_rid,
-                wait_sec=0,
-            )
+            provider._resolve_user_assigned_mi(uami_rid)
 
-        # GET endpoint (404) + GET UAMI (404) = 2, no PUT
-        assert len(mocked_responses.calls) == 2
+        assert len(mocked_responses.calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1892,6 +1865,374 @@ class TestSetupResponseDataflow:
 
 
 # ---------------------------------------------------------------------------
+# _resolve_dataflow_auth_identity tests
+# ---------------------------------------------------------------------------
+
+
+class TestResolveDataflowAuthIdentity:
+    """Tests for MgmtActions._resolve_dataflow_auth_identity()."""
+
+    def test_uami_returns_principal_id(self, mocked_cmd, mocked_responses: responses):
+        """When mi_resource is provided, returns its principalId directly."""
+        provider = MgmtActions(cmd=mocked_cmd)
+        mi_resource = _build_uami_response(
+            mi_resource_id=_build_uami_resource_id("test-mi", "test-rg"),
+            client_id="cccccccc-cccc-cccc-cccc-cccccccccccc",
+            tenant_id="tttttttt-tttt-tttt-tttt-tttttttttttt",
+        )
+
+        result = provider._resolve_dataflow_auth_identity(
+            instance=_build_instance_response("inst", "test-rg"),
+            mi_resource=mi_resource,
+        )
+
+        assert result == "00000000-0000-0000-0000-aaaaaaaaaaaa"
+        # No HTTP calls — UAMI resource already resolved
+        assert len(mocked_responses.calls) == 0
+
+    def test_uami_missing_principal_id_raises(self, mocked_cmd, mocked_responses: responses):
+        """When mi_resource has no principalId, raises ValidationError."""
+        provider = MgmtActions(cmd=mocked_cmd)
+        mi_resource = {
+            "id": _build_uami_resource_id("test-mi", "test-rg"),
+            "properties": {
+                "clientId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "tenantId": "tttttttt-tttt-tttt-tttt-tttttttttttt",
+            },
+        }
+
+        with pytest.raises(ValidationError, match="missing 'principalId'"):
+            provider._resolve_dataflow_auth_identity(
+                instance=_build_instance_response("inst", "test-rg"),
+                mi_resource=mi_resource,
+            )
+
+    def test_system_mi_resolves_via_connected_cluster(self, mocked_cmd, mocked_responses: responses):
+        """Default path: resolves AIO extension MI via custom location → connected cluster."""
+        from azext_edge.edge.providers.orchestration.common import (
+            CUSTOM_LOCATIONS_API_VERSION,
+            EXTENSION_TYPE_OPS,
+        )
+
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance = _build_instance_response(instance_name, rg)
+        cl_id = instance["extendedLocation"]["name"]
+        cluster_name = "my-cluster"
+        cluster_rg = rg
+        cluster_rid = (
+            f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{cluster_rg}"
+            f"/providers/Microsoft.Kubernetes/connectedClusters/{cluster_name}"
+        )
+        ext_principal_id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+
+        # GET custom location → returns hostResourceId
+        mocked_responses.add(
+            method=responses.GET,
+            url=f"{BASE_URL}{cl_id}?api-version={CUSTOM_LOCATIONS_API_VERSION}",
+            json={
+                "id": cl_id,
+                "properties": {"hostResourceId": cluster_rid},
+            },
+            status=200,
+        )
+        # GET extensions list → returns AIO extension with identity
+        mocked_responses.add(
+            method=responses.GET,
+            url=(
+                f"{BASE_URL}/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{cluster_rg}"
+                f"/providers/Microsoft.Kubernetes/connectedClusters/{cluster_name}"
+                f"/providers/Microsoft.KubernetesConfiguration/extensions"
+                f"?api-version=2023-05-01"
+            ),
+            json={
+                "value": [
+                    {
+                        "name": "aio-ext",
+                        "properties": {"extensionType": EXTENSION_TYPE_OPS},
+                        "identity": {"principalId": ext_principal_id},
+                    },
+                ],
+            },
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._resolve_dataflow_auth_identity(instance=instance)
+
+        assert result == ext_principal_id
+
+    def test_extension_not_found_raises(self, mocked_cmd, mocked_responses: responses):
+        """When AIO extension is not found on the cluster, raises ValidationError."""
+        from azext_edge.edge.providers.orchestration.common import CUSTOM_LOCATIONS_API_VERSION
+
+        rg = generate_random_string()
+        instance = _build_instance_response("inst", rg)
+        cl_id = instance["extendedLocation"]["name"]
+        cluster_name = "my-cluster"
+        cluster_rid = (
+            f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{rg}"
+            f"/providers/Microsoft.Kubernetes/connectedClusters/{cluster_name}"
+        )
+
+        # GET custom location
+        mocked_responses.add(
+            method=responses.GET,
+            url=f"{BASE_URL}{cl_id}?api-version={CUSTOM_LOCATIONS_API_VERSION}",
+            json={"id": cl_id, "properties": {"hostResourceId": cluster_rid}},
+            status=200,
+        )
+        # GET extensions list → no AIO extension
+        mocked_responses.add(
+            method=responses.GET,
+            url=(
+                f"{BASE_URL}/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{rg}"
+                f"/providers/Microsoft.Kubernetes/connectedClusters/{cluster_name}"
+                f"/providers/Microsoft.KubernetesConfiguration/extensions"
+                f"?api-version=2023-05-01"
+            ),
+            json={"value": [{"name": "other-ext", "properties": {"extensionType": "other.type"}}]},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        with pytest.raises(ValidationError, match="IoT Operations extension not found"):
+            provider._resolve_dataflow_auth_identity(instance=instance)
+
+    def test_extension_missing_principal_id_raises(self, mocked_cmd, mocked_responses: responses):
+        """When AIO extension has no principalId, raises ValidationError."""
+        from azext_edge.edge.providers.orchestration.common import (
+            CUSTOM_LOCATIONS_API_VERSION,
+            EXTENSION_TYPE_OPS,
+        )
+
+        rg = generate_random_string()
+        instance = _build_instance_response("inst", rg)
+        cl_id = instance["extendedLocation"]["name"]
+        cluster_name = "my-cluster"
+        cluster_rid = (
+            f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{rg}"
+            f"/providers/Microsoft.Kubernetes/connectedClusters/{cluster_name}"
+        )
+
+        # GET custom location
+        mocked_responses.add(
+            method=responses.GET,
+            url=f"{BASE_URL}{cl_id}?api-version={CUSTOM_LOCATIONS_API_VERSION}",
+            json={"id": cl_id, "properties": {"hostResourceId": cluster_rid}},
+            status=200,
+        )
+        # GET extensions list → AIO extension present but no principalId
+        mocked_responses.add(
+            method=responses.GET,
+            url=(
+                f"{BASE_URL}/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{rg}"
+                f"/providers/Microsoft.Kubernetes/connectedClusters/{cluster_name}"
+                f"/providers/Microsoft.KubernetesConfiguration/extensions"
+                f"?api-version=2023-05-01"
+            ),
+            json={
+                "value": [
+                    {
+                        "name": "aio-ext",
+                        "properties": {"extensionType": EXTENSION_TYPE_OPS},
+                        "identity": {},
+                    },
+                ],
+            },
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        with pytest.raises(ValidationError, match="missing 'identity.principalId'"):
+            provider._resolve_dataflow_auth_identity(instance=instance)
+
+
+# ---------------------------------------------------------------------------
+# _setup_role_assignments tests
+# ---------------------------------------------------------------------------
+
+
+class TestSetupRoleAssignments:
+    """Tests for MgmtActions._setup_role_assignments()."""
+
+    def test_assigns_default_roles_both_principals(self, mocked_cmd, mocker):
+        """Both identity principals get Publisher + Subscriber roles using defaults."""
+        from azext_edge.edge.providers.orchestration.common import (
+            EG_TOPICSPACES_PUBLISHER_ROLE_ID,
+            EG_TOPICSPACES_SUBSCRIBER_ROLE_ID,
+        )
+
+        mock_pm = mocker.patch(
+            "azext_edge.edge.providers.orchestration.mgmt_actions.PermissionManager"
+        ).return_value
+        mock_pm.apply_role_assignment.return_value = None  # existing (idempotent)
+
+        eg_ctx = _make_eg_ctx()
+        adr_pid = "aaaa-bbbb-cccc-dddd"
+        df_pid = "eeee-ffff-1111-2222"
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_role_assignments(
+            eg_ctx=eg_ctx,
+            adr_principal_id=adr_pid,
+            dataflow_auth_principal_id=df_pid,
+        )
+
+        assert set(result.keys()) == {"adrNamespace", "dataflowIdentity"}
+
+        assert result["adrNamespace"]["principalId"] == adr_pid
+        assert result["adrNamespace"]["roles"] == [
+            EG_TOPICSPACES_PUBLISHER_ROLE_ID,
+            EG_TOPICSPACES_SUBSCRIBER_ROLE_ID,
+        ]
+
+        assert result["dataflowIdentity"]["principalId"] == df_pid
+        assert result["dataflowIdentity"]["roles"] == [
+            EG_TOPICSPACES_PUBLISHER_ROLE_ID,
+            EG_TOPICSPACES_SUBSCRIBER_ROLE_ID,
+        ]
+
+        # 2 principals × 2 roles = 4 apply_role_assignment calls
+        assert mock_pm.apply_role_assignment.call_count == 4
+
+    def test_custom_role_ids(self, mocked_cmd, mocker):
+        """Custom role IDs override defaults for each identity principal."""
+        mock_pm = mocker.patch(
+            "azext_edge.edge.providers.orchestration.mgmt_actions.PermissionManager"
+        ).return_value
+        mock_pm.apply_role_assignment.return_value = None
+
+        eg_ctx = _make_eg_ctx()
+        adr_pid = "aaaa-bbbb-cccc-dddd"
+        df_pid = "eeee-ffff-1111-2222"
+        custom_adr_roles = ["custom-role-adr-1"]
+        custom_ops_roles = ["custom-role-ops-1", "custom-role-ops-2", "custom-role-ops-3"]
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_role_assignments(
+            eg_ctx=eg_ctx,
+            adr_principal_id=adr_pid,
+            dataflow_auth_principal_id=df_pid,
+            adr_role_ids=custom_adr_roles,
+            ops_role_ids=custom_ops_roles,
+        )
+
+        assert result["adrNamespace"]["roles"] == custom_adr_roles
+        assert result["dataflowIdentity"]["roles"] == custom_ops_roles
+        # 1 + 3 = 4 apply_role_assignment calls
+        assert mock_pm.apply_role_assignment.call_count == 4
+
+    def test_role_def_id_uses_eg_subscription(self, mocked_cmd, mocker):
+        """Role definition IDs are scoped to the EG namespace subscription."""
+        from azext_edge.edge.providers.orchestration.common import EG_TOPICSPACES_PUBLISHER_ROLE_ID
+        from azext_edge.edge.providers.orchestration.permissions import ROLE_DEF_FORMAT_STR
+
+        mock_pm = mocker.patch(
+            "azext_edge.edge.providers.orchestration.mgmt_actions.PermissionManager"
+        ).return_value
+        mock_pm.apply_role_assignment.return_value = None
+
+        eg_sub = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+        eg_ctx = _make_eg_ctx()
+        # Override subscription to simulate cross-sub
+        eg_ctx = EgNamespaceContext(
+            resource_id=eg_ctx.resource_id,
+            subscription_id=eg_sub,
+            resource_group_name=eg_ctx.resource_group_name,
+            namespace_name=eg_ctx.namespace_name,
+            mqtt_hostname=eg_ctx.mqtt_hostname,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        provider._setup_role_assignments(
+            eg_ctx=eg_ctx,
+            adr_principal_id="adr-pid",
+            dataflow_auth_principal_id="df-pid",
+        )
+
+        # Check that the first call used a role_def_id scoped to the EG subscription
+        first_call = mock_pm.apply_role_assignment.call_args_list[0]
+        expected_role_def = ROLE_DEF_FORMAT_STR.format(
+            subscription_id=eg_sub,
+            role_id=EG_TOPICSPACES_PUBLISHER_ROLE_ID,
+        )
+        assert first_call.kwargs["role_def_id"] == expected_role_def
+
+    def test_cross_subscription_creates_new_permission_manager(self, mocked_cmd, mocker):
+        """When EG is in a different subscription, a new PermissionManager is created."""
+        pm_cls = mocker.patch(
+            "azext_edge.edge.providers.orchestration.mgmt_actions.PermissionManager"
+        )
+        pm_cls.return_value.apply_role_assignment.return_value = None
+
+        cross_sub = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        eg_ctx = EgNamespaceContext(
+            resource_id=_build_eg_resource_id("ns", "rg", subscription_id=cross_sub),
+            subscription_id=cross_sub,
+            resource_group_name="rg",
+            namespace_name="ns",
+            mqtt_hostname="ns.eastus.ts.eventgrid.azure.net",
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        provider._setup_role_assignments(
+            eg_ctx=eg_ctx,
+            adr_principal_id="adr-pid",
+            dataflow_auth_principal_id="df-pid",
+        )
+
+        # PermissionManager should be constructed twice:
+        # once in __init__ (default sub) and once for the cross-sub EG
+        assert pm_cls.call_count == 2
+        cross_sub_call = pm_cls.call_args_list[1]
+        assert cross_sub_call.kwargs["subscription_id"] == cross_sub
+
+    def test_http_error_raises_validation_error(self, mocked_cmd, mocker):
+        """HttpResponseError from apply_role_assignment raises ValidationError."""
+        mock_pm = mocker.patch(
+            "azext_edge.edge.providers.orchestration.mgmt_actions.PermissionManager"
+        ).return_value
+
+        from azure.core.exceptions import HttpResponseError
+
+        mock_pm.apply_role_assignment.side_effect = HttpResponseError(
+            message="Authorization failed"
+        )
+
+        eg_ctx = _make_eg_ctx()
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        with pytest.raises(ValidationError, match="Failed to assign role"):
+            provider._setup_role_assignments(
+                eg_ctx=eg_ctx,
+                adr_principal_id="adr-pid",
+                dataflow_auth_principal_id="df-pid",
+            )
+
+    def test_same_principal_both_identities(self, mocked_cmd, mocker):
+        """When both identity principals share the same ID, roles are still assigned independently."""
+        mock_pm = mocker.patch(
+            "azext_edge.edge.providers.orchestration.mgmt_actions.PermissionManager"
+        ).return_value
+        mock_pm.apply_role_assignment.return_value = None
+
+        same_pid = "shared-principal-id"
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_role_assignments(
+            eg_ctx=_make_eg_ctx(),
+            adr_principal_id=same_pid,
+            dataflow_auth_principal_id=same_pid,
+        )
+
+        assert result["adrNamespace"]["principalId"] == same_pid
+        assert result["dataflowIdentity"]["principalId"] == same_pid
+        # Still 4 calls (idempotency handled by apply_role_assignment)
+        assert mock_pm.apply_role_assignment.call_count == 4
+
+
+# ---------------------------------------------------------------------------
 # enable() orchestration tests
 # ---------------------------------------------------------------------------
 
@@ -1904,7 +2245,7 @@ class TestEnable:
     the stages together and the shape of the return object.
     """
 
-    def test_happy_path_return_structure(self, mocked_cmd, mocked_responses: responses):
+    def test_happy_path_return_structure(self, mocked_cmd, mocked_responses: responses, mocker):
         """All resources created fresh — validates return object shape and key data flow."""
         instance_name = generate_random_string()
         rg = generate_random_string()
@@ -1917,6 +2258,15 @@ class TestEnable:
         eg_rid = _build_eg_resource_id(ns_name, rg)
         adr_ns_name = f"{instance_name}-adr-ns"
         adr_principal_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        df_auth_pid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+
+        # Mock role assignment infrastructure (tested in dedicated classes)
+        mock_role_result = {
+            "adrNamespace": {"principalId": adr_principal_id, "roles": ["pub-role", "sub-role"]},
+            "dataflowIdentity": {"principalId": df_auth_pid, "roles": ["pub-role", "sub-role"]},
+        }
+        mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity", return_value=df_auth_pid)
+        mocker.patch.object(MgmtActions, "_setup_role_assignments", return_value=mock_role_result)
 
         ts_name = get_mgmt_actions_resource_name("ops", instance_rid)
         pub_name = get_mgmt_actions_resource_name("pub", instance_rid)
@@ -2057,7 +2407,7 @@ class TestEnable:
         )
 
         # -- Assert top-level keys --
-        assert set(result.keys()) == {"instance", "eventGrid", "deviceRegistryNamespace"}
+        assert set(result.keys()) == {"instance", "eventGrid", "deviceRegistryNamespace", "roleAssignments"}
 
         # -- Assert instance section --
         inst = result["instance"]
@@ -2094,6 +2444,9 @@ class TestEnable:
         assert "principalId" not in adr
         assert adr["identity"]["type"] == "SystemAssigned"
         assert adr["identity"]["principalId"] == adr_principal_id
+
+        # -- Assert roleAssignments section --
+        assert result["roleAssignments"] == mock_role_result
 
         # -- Assert total HTTP call count: 16 --
         # GET instance + GET EG namespace + (GET+PUT topic space) +
@@ -2151,7 +2504,7 @@ class TestEnable:
 
         assert len(mocked_responses.calls) == 1
 
-    def test_custom_dataflow_profile(self, mocked_cmd, mocked_responses: responses):
+    def test_custom_dataflow_profile(self, mocked_cmd, mocked_responses: responses, mocker):
         """enable() uses a custom dataflow profile name when provided."""
         instance_name = generate_random_string()
         rg = generate_random_string()
@@ -2165,6 +2518,10 @@ class TestEnable:
         eg_rid = _build_eg_resource_id(ns_name, rg)
         adr_ns_name = f"{instance_name}-adr-ns"
         adr_principal_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        # Mock role assignment infrastructure (tested in dedicated classes)
+        mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity", return_value="df-pid")
+        mocker.patch.object(MgmtActions, "_setup_role_assignments", return_value={})
 
         ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
         graph_name = get_mgmt_actions_resource_name("req", instance_rid)
@@ -2315,7 +2672,7 @@ class TestEnable:
 
         assert len(mocked_responses.calls) == 16
 
-    def test_user_assigned_mi(self, mocked_cmd, mocked_responses: responses):
+    def test_user_assigned_mi(self, mocked_cmd, mocked_responses: responses, mocker):
         """enable() configures UserAssignedManagedIdentity auth when mi_user_assigned is provided."""
         instance_name = generate_random_string()
         rg = generate_random_string()
@@ -2324,6 +2681,10 @@ class TestEnable:
         mi_name = generate_random_string()
         mi_client_id = "11111111-1111-1111-1111-111111111111"
         mi_tenant_id = "22222222-2222-2222-2222-222222222222"
+
+        # Mock role assignment infrastructure (tested in dedicated classes)
+        mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity", return_value="df-pid")
+        mocker.patch.object(MgmtActions, "_setup_role_assignments", return_value={})
 
         instance_response = _build_instance_response(instance_name, rg)
         instance_rid = instance_response["id"]
@@ -2354,7 +2715,14 @@ class TestEnable:
             json=_build_namespace_response(ns_name, rg, mqtt_hostname=hostname),
             status=200,
         )
-        # 3-4. Topic space: GET 404, PUT 200
+        # 3. GET user-assigned managed identity (hoisted before resource setup)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_uami_endpoint(mi_rid),
+            json=_build_uami_response(mi_rid, mi_client_id, mi_tenant_id),
+            status=200,
+        )
+        # 4-5. Topic space: GET 404, PUT 200
         mocked_responses.add(
             method=responses.GET,
             url=_build_eg_endpoint(ns_name, rg, sub_resource=f"/topicSpaces/{ts_name}"),
@@ -2367,7 +2735,7 @@ class TestEnable:
             json=_build_topic_space_response(ts_name, _get_expected_topic_templates(instance_name)),
             status=200,
         )
-        # 5-8. Permission bindings (pub + sub): each GET 404, PUT 200
+        # 6-9. Permission bindings (pub + sub): each GET 404, PUT 200
         for name, perm in [(pub_name, "Publisher"), (sub_name, "Subscriber")]:
             mocked_responses.add(
                 method=responses.GET,
@@ -2381,13 +2749,6 @@ class TestEnable:
                 json=_build_permission_binding_response(name, perm, ts_name),
                 status=200,
             )
-        # 9. GET user-assigned managed identity
-        mocked_responses.add(
-            method=responses.GET,
-            url=_build_uami_endpoint(mi_rid),
-            json=_build_uami_response(mi_rid, mi_client_id, mi_tenant_id),
-            status=200,
-        )
         # 10-11. Dataflow endpoint: GET 404, PUT 200
         mocked_responses.add(
             method=responses.GET,
@@ -2492,3 +2853,170 @@ class TestEnable:
         assert uami_settings["scope"] == MGMT_ACTIONS_EG_AUDIENCE
 
         assert len(mocked_responses.calls) == 17
+
+    def test_skip_role_assignments(self, mocked_cmd, mocked_responses: responses, mocker):
+        """When skip_role_assignments=True, roleAssignments key is absent from result."""
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+        ns_name = generate_random_string()
+        hostname = f"{ns_name}.eastus-1.ts.eventgrid.azure.net"
+
+        instance_response = _build_instance_response(instance_name, rg)
+        instance_rid = instance_response["id"]
+        cl_id = instance_response["extendedLocation"]["name"]
+        eg_rid = _build_eg_resource_id(ns_name, rg)
+        adr_ns_name = f"{instance_name}-adr-ns"
+        adr_principal_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        # Spy on the methods that should NOT be called
+        mock_resolve = mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity")
+        mock_setup_ra = mocker.patch.object(MgmtActions, "_setup_role_assignments")
+
+        ts_name = get_mgmt_actions_resource_name("ops", instance_rid)
+        pub_name = get_mgmt_actions_resource_name("pub", instance_rid)
+        sub_name = get_mgmt_actions_resource_name("sub", instance_rid)
+        ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
+        graph_name = get_mgmt_actions_resource_name("req", instance_rid)
+        resp_name = get_mgmt_actions_resource_name("resp", instance_rid)
+
+        # 1. GET instance
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg),
+            json=instance_response,
+            status=200,
+        )
+        # 2. GET EG namespace
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_eg_endpoint(ns_name, rg),
+            json=_build_namespace_response(ns_name, rg, mqtt_hostname=hostname),
+            status=200,
+        )
+        # 3-4. Topic space: GET 404, PUT 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_eg_endpoint(ns_name, rg, sub_resource=f"/topicSpaces/{ts_name}"),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_eg_endpoint(ns_name, rg, sub_resource=f"/topicSpaces/{ts_name}"),
+            json=_build_topic_space_response(ts_name, _get_expected_topic_templates(instance_name)),
+            status=200,
+        )
+        # 5-8. Permission bindings (pub + sub): each GET 404, PUT 200
+        for name, perm in [(pub_name, "Publisher"), (sub_name, "Subscriber")]:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(ns_name, rg, sub_resource=f"/permissionBindings/{name}"),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+            mocked_responses.add(
+                method=responses.PUT,
+                url=_build_eg_endpoint(ns_name, rg, sub_resource=f"/permissionBindings/{name}"),
+                json=_build_permission_binding_response(name, perm, ts_name),
+                status=200,
+            )
+        # 9-10. Dataflow endpoint: GET 404, PUT 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+        # 11-12. ADR namespace: GET, PATCH 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(adr_ns_name, rg, identity_type="None"),
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.PATCH,
+            url=_build_adr_endpoint(adr_ns_name, rg),
+            json=_build_adr_namespace_response(
+                adr_ns_name,
+                rg,
+                identity_type="SystemAssigned",
+                principal_id=adr_principal_id,
+                management_endpoints={
+                    cl_id: {
+                        "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                        "address": hostname,
+                        "scopeId": instance_name,
+                        "resourceId": eg_rid,
+                    },
+                },
+            ),
+            status=200,
+        )
+        # 13-14. Dataflow graph: GET 404, PUT 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                instance_name,
+                rg,
+                sub_resource=f"/dataflowProfiles/default/dataflowGraphs/{graph_name}",
+            ),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(
+                instance_name,
+                rg,
+                sub_resource=f"/dataflowProfiles/default/dataflowGraphs/{graph_name}",
+            ),
+            json={"id": f"/fake/path/dataflowGraphs/{graph_name}", "name": graph_name},
+            status=200,
+        )
+        # 15-16. Response dataflow: GET 404, PUT 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                instance_name,
+                rg,
+                sub_resource=f"/dataflowProfiles/default/dataflows/{resp_name}",
+            ),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(
+                instance_name,
+                rg,
+                sub_resource=f"/dataflowProfiles/default/dataflows/{resp_name}",
+            ),
+            json={"id": f"/fake/path/dataflows/{resp_name}", "name": resp_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.enable(
+            name=instance_name,
+            resource_group_name=rg,
+            eg_resource_id=eg_rid,
+            skip_role_assignments=True,
+            wait_sec=0,
+        )
+
+        # roleAssignments key should be absent when skipped
+        assert "roleAssignments" not in result
+        assert set(result.keys()) == {"instance", "eventGrid", "deviceRegistryNamespace"}
+
+        # Verify identity resolution and role setup were NOT called
+        mock_resolve.assert_not_called()
+        mock_setup_ra.assert_not_called()
+
+        assert len(mocked_responses.calls) == 16
