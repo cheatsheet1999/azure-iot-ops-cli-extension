@@ -1480,6 +1480,7 @@ class TestSetupDataflowGraph:
             extended_location=extended_location,
             eg_dataflow_endpoint_name=eg_ep_name,
             dataflow_profile_name=profile_name,
+            registry_endpoint_name=MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT,
             wait_sec=0,
         )
 
@@ -1562,6 +1563,7 @@ class TestSetupDataflowGraph:
             extended_location=extended_location,
             eg_dataflow_endpoint_name=eg_ep_name,
             dataflow_profile_name=profile_name,
+            registry_endpoint_name=MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT,
             wait_sec=0,
         )
 
@@ -1609,11 +1611,66 @@ class TestSetupDataflowGraph:
             extended_location=extended_location,
             eg_dataflow_endpoint_name=eg_ep_name,
             dataflow_profile_name=custom_profile,
+            registry_endpoint_name=MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT,
             wait_sec=0,
         )
 
         assert result["name"] == graph_name
         assert len(mocked_responses.calls) == 2
+
+    def test_custom_registry_endpoint(self, mocked_cmd, mocked_responses: responses):
+        """Graph node uses the specified registry endpoint ref, not just 'default'."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        extended_location = _make_extended_location()
+        profile_name = "default"
+        custom_registry_ep = "my-custom-registry-ep"
+        graph_name = get_mgmt_actions_resource_name("req", instance_rid)
+        eg_ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
+
+        # GET returns 404
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                instance_name,
+                rg,
+                sub_resource=f"/dataflowProfiles/{profile_name}/dataflowGraphs/{graph_name}",
+            ),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        # PUT creates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(
+                instance_name,
+                rg,
+                sub_resource=f"/dataflowProfiles/{profile_name}/dataflowGraphs/{graph_name}",
+            ),
+            json={"id": f"/fake/path/dataflowGraphs/{graph_name}", "name": graph_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_dataflow_graph(
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            eg_dataflow_endpoint_name=eg_ep_name,
+            dataflow_profile_name=profile_name,
+            registry_endpoint_name=custom_registry_ep,
+            wait_sec=0,
+        )
+
+        assert result["name"] == graph_name
+        assert len(mocked_responses.calls) == 2
+
+        # Verify the graph node uses the custom registry endpoint
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        graph_node = put_body["properties"]["nodes"][1]
+        assert graph_node["graphSettings"]["registryEndpointRef"] == custom_registry_ep
 
 
 # ---------------------------------------------------------------------------

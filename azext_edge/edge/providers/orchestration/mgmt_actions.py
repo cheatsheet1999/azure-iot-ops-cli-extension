@@ -137,6 +137,7 @@ class MgmtActions(Queryable):
         ops_role_ids: Optional[List[str]] = None,
         skip_role_assignments: Optional[bool] = None,
         dataflow_profile: Optional[str] = None,
+        registry_endpoint: Optional[str] = None,
         **kwargs,
     ) -> Dict:
         """Enable management actions for an IoT Operations instance.
@@ -207,6 +208,7 @@ class MgmtActions(Queryable):
 
         # Dataflow graph (uses default registry endpoint provisioned with instance)
         resolved_profile = dataflow_profile or MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE
+        resolved_registry_endpoint = registry_endpoint or MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT
 
         dataflow_graph_result = self._setup_dataflow_graph(
             instance_name=name,
@@ -215,6 +217,7 @@ class MgmtActions(Queryable):
             extended_location=extended_location,
             eg_dataflow_endpoint_name=dataflow_endpoint_result["name"],
             dataflow_profile_name=resolved_profile,
+            registry_endpoint_name=resolved_registry_endpoint,
             **kwargs,
         )
 
@@ -877,6 +880,7 @@ class MgmtActions(Queryable):
         extended_location: Dict,
         eg_dataflow_endpoint_name: str,
         dataflow_profile_name: str,
+        registry_endpoint_name: str,
         **kwargs,
     ) -> Dict:
         """Create or confirm the management actions dataflow graph on the AIO instance.
@@ -926,7 +930,7 @@ class MgmtActions(Queryable):
                         "name": "graph",
                         "nodeType": "Graph",
                         "graphSettings": {
-                            "registryEndpointRef": MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT,
+                            "registryEndpointRef": registry_endpoint_name,
                             "artifact": MGMT_ACTIONS_GRAPH_ARTIFACT,
                             "configuration": rules_config,
                         },

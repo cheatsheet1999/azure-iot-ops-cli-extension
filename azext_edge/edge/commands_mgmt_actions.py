@@ -33,6 +33,7 @@ def mgmt_actions_enable(
     ops_role_ids: Optional[List[str]] = None,
     skip_role_assignments: Optional[bool] = None,
     dataflow_profile: Optional[str] = None,
+    registry_endpoint: Optional[str] = None,
     **kwargs,
 ) -> Dict:
     return MgmtActions(cmd).enable(
@@ -45,6 +46,7 @@ def mgmt_actions_enable(
         ops_role_ids=ops_role_ids,
         skip_role_assignments=skip_role_assignments,
         dataflow_profile=dataflow_profile,
+        registry_endpoint=registry_endpoint,
         **kwargs,
     )
 

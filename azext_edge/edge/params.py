@@ -1570,6 +1570,11 @@ def load_iotops_arguments(self, _):
             options_list=["--dataflow-profile"],
             help="Dataflow profile name for graph and dataflow resources. Default: 'default'.",
         )
+        context.argument(
+            "registry_endpoint",
+            options_list=["--registry-endpoint"],
+            help="Registry endpoint name for the dataflow graph. Default: 'default'.",
+        )
 
     with self.argument_context("iot ops schema") as context:
         context.argument(
