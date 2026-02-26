@@ -9,6 +9,19 @@ from typing import Dict, List, Optional
 from .providers.orchestration.mgmt_actions import MgmtActions
 
 
+def mgmt_actions_show(
+    cmd,
+    instance_name: str,
+    resource_group_name: str,
+    **kwargs,
+) -> Dict:
+    return MgmtActions(cmd).show(
+        name=instance_name,
+        resource_group_name=resource_group_name,
+        **kwargs,
+    )
+
+
 def mgmt_actions_enable(
     cmd,
     instance_name: str,

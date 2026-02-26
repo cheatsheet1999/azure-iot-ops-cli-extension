@@ -2177,6 +2177,25 @@ def load_iotops_help():
     """
 
     helps[
+        "iot ops mgmt-actions show"
+    ] = """
+        type: command
+        short-summary: Show management actions configuration for an IoT Operations instance.
+        long-summary: |
+            Displays the current management actions configuration by probing the ADR namespace
+            management endpoint and Event Grid resources.
+
+            Returns a structured summary showing whether management actions are enabled and,
+            if so, the Event Grid namespace, topic space, permission bindings, and ADR namespace
+            management endpoint details.
+
+        examples:
+        - name: Show management actions configuration for an instance.
+          text: >
+            az iot ops mgmt-actions show --instance myinstance -g myresourcegroup
+    """
+
+    helps[
         "iot ops schema"
     ] = """
         type: group

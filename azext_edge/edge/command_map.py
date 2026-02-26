@@ -65,6 +65,7 @@ def load_iotops_commands(self, _):
     ) as cmd_group:
         cmd_group.command("enable", "mgmt_actions_enable")
         cmd_group.command("disable", "mgmt_actions_disable")
+        cmd_group.show_command("show", "mgmt_actions_show")
 
     with self.command_group(
         "iot ops support",
