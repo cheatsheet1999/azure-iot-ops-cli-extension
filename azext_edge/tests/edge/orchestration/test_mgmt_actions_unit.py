@@ -2608,13 +2608,687 @@ class TestEnable:
 
 
 class TestDisable:
-    """Tests for MgmtActions.disable()."""
+    """Tests for MgmtActions.disable().
 
-    def test_disable_raises_not_implemented(self, mocked_cmd):
-        """disable() raises NotImplementedError until implementation is added."""
+    Validates the teardown orchestration: AIO resources (response dataflow, graph,
+    endpoint), ADR management endpoint removal, and EG resources (permission bindings,
+    topic space). EG discovery is auto-derived from the ADR namespace management endpoint.
+    """
+
+    PROMPT_TARGET = "azext_edge.edge.providers.orchestration.mgmt_actions.should_continue_prompt"
+
+    def _make_disable_fixtures(
+        self,
+        eg_subscription_id: Optional[str] = None,
+        include_mgmt_endpoint: bool = True,
+        include_adr_namespace_ref: bool = True,
+    ) -> dict:
+        """Build common test fixtures for disable tests."""
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+        adr_ns_name = f"{instance_name}-adr-ns"
+        eg_ns_name = generate_random_string()
+        eg_rg = generate_random_string()
+        eg_sub = eg_subscription_id or ZEROED_SUBSCRIPTION
+        hostname = f"{eg_ns_name}.eastus-1.ts.eventgrid.azure.net"
+        extended_location = _make_extended_location()
+        custom_location_id = extended_location["name"]
+
+        instance_response = _build_instance_response(
+            instance_name, rg, adr_namespace_name=adr_ns_name
+        )
+        if not include_adr_namespace_ref:
+            instance_response["properties"].pop("adrNamespaceRef", None)
+
+        instance_rid = instance_response["id"]
+        eg_rid = _build_eg_resource_id(eg_ns_name, eg_rg, subscription_id=eg_sub)
+
+        mgmt_endpoints = {}
+        if include_mgmt_endpoint:
+            mgmt_endpoints[custom_location_id] = {
+                "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                "address": hostname,
+                "scopeId": instance_name,
+                "resourceId": eg_rid,
+            }
+
+        return {
+            "instance_name": instance_name,
+            "rg": rg,
+            "adr_ns_name": adr_ns_name,
+            "adr_rg": rg,
+            "eg_ns_name": eg_ns_name,
+            "eg_rg": eg_rg,
+            "eg_sub": eg_sub,
+            "hostname": hostname,
+            "custom_location_id": custom_location_id,
+            "instance_response": instance_response,
+            "instance_rid": instance_rid,
+            "eg_rid": eg_rid,
+            "resp_name": get_mgmt_actions_resource_name("resp", instance_rid),
+            "graph_name": get_mgmt_actions_resource_name("req", instance_rid),
+            "ep_name": get_mgmt_actions_resource_name("eg", instance_rid),
+            "ts_name": get_mgmt_actions_resource_name("ops", instance_rid),
+            "pub_name": get_mgmt_actions_resource_name("pub", instance_rid),
+            "sub_name": get_mgmt_actions_resource_name("sub", instance_rid),
+            "mgmt_endpoints": mgmt_endpoints,
+        }
+
+    def _register_disable_mocks(
+        self,
+        mocked_responses: responses,
+        f: dict,
+        adr_not_found: bool = False,
+        graph_profile: str = MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE,
+        graph_not_found_in_default: bool = False,
+        graph_not_found_anywhere: bool = False,
+        resp_dataflow_orphaned: bool = False,
+        aio_resources_not_found: bool = False,
+        eg_not_found: bool = False,
+        ep_not_found: bool = False,
+        extra_adr_endpoints: Optional[dict] = None,
+    ) -> None:
+        """Register HTTP mocks for a disable() call.
+
+        Mock insertion order mirrors the exact HTTP call sequence of disable().
+        """
+        # 1. GET instance
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=f["instance_response"],
+            status=200,
+        )
+
+        # 2. GET ADR namespace
+        mgmt_endpoints = dict(f["mgmt_endpoints"])
+        if extra_adr_endpoints:
+            mgmt_endpoints.update(extra_adr_endpoints)
+
+        if adr_not_found:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_adr_endpoint(f["adr_ns_name"], f["adr_rg"]),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+            return
+
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(f["adr_ns_name"], f["adr_rg"]),
+            json=_build_adr_namespace_response(
+                f["adr_ns_name"], f["adr_rg"],
+                identity_type="SystemAssigned",
+                principal_id="00000000-0000-0000-0000-bbbbbbbbbbbb",
+                management_endpoints=mgmt_endpoints,
+            ),
+            status=200,
+        )
+
+        # 3. Profile auto-detection: GET graph under default profile
+        if graph_not_found_anywhere:
+            # Graph not in default profile
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                    f"/dataflowGraphs/{f['graph_name']}",
+                ),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+            # List profiles returns empty
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource="/dataflowProfiles",
+                ),
+                json={"value": []},
+                status=200,
+            )
+        elif graph_not_found_in_default and graph_profile != MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE:
+            # Graph not in default profile
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                    f"/dataflowGraphs/{f['graph_name']}",
+                ),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+            # List profiles returns the custom profile
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource="/dataflowProfiles",
+                ),
+                json={"value": [{"name": graph_profile}]},
+                status=200,
+            )
+            # Graph found in custom profile
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{graph_profile}/dataflowGraphs/{f['graph_name']}",
+                ),
+                json={"name": f["graph_name"]},
+                status=200,
+            )
+        else:
+            # Graph found in default profile (common case)
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{graph_profile}/dataflowGraphs/{f['graph_name']}",
+                ),
+                json={"name": f["graph_name"]},
+                status=200,
+            )
+
+        # 3b. Response dataflow discovery (only when graph not found anywhere)
+        if graph_not_found_anywhere:
+            if resp_dataflow_orphaned:
+                # Orphaned response dataflow found in default profile
+                mocked_responses.add(
+                    method=responses.GET,
+                    url=_build_iotops_endpoint(
+                        f["instance_name"], f["rg"],
+                        sub_resource=f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                        f"/dataflows/{f['resp_name']}",
+                    ),
+                    json={"name": f["resp_name"]},
+                    status=200,
+                )
+            else:
+                # Response dataflow also not found — second discovery pass
+                mocked_responses.add(
+                    method=responses.GET,
+                    url=_build_iotops_endpoint(
+                        f["instance_name"], f["rg"],
+                        sub_resource=f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                        f"/dataflows/{f['resp_name']}",
+                    ),
+                    json={"error": {"code": "ResourceNotFound"}},
+                    status=404,
+                )
+                # list_by_resource_group reuses the existing profiles mock from step 3
+
+        # 3c. Endpoint existence check GET
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                f["instance_name"], f["rg"],
+                sub_resource=f"/dataflowEndpoints/{f['ep_name']}",
+            ),
+            json={"name": f["ep_name"]} if not ep_not_found else {"error": {"code": "ResourceNotFound"}},
+            status=200 if not ep_not_found else 404,
+        )
+
+        # 3d. EG resource existence GETs (topic space + pub + sub)
+        if f["mgmt_endpoints"]:
+            eg_probe_status = 404 if eg_not_found else 200
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(
+                    f["eg_ns_name"], f["eg_rg"],
+                    subscription_id=f["eg_sub"],
+                    sub_resource=f"/topicSpaces/{f['ts_name']}",
+                ),
+                json={"name": f["ts_name"]} if not eg_not_found else {"error": {"code": "ResourceNotFound"}},
+                status=eg_probe_status,
+            )
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(
+                    f["eg_ns_name"], f["eg_rg"],
+                    subscription_id=f["eg_sub"],
+                    sub_resource=f"/permissionBindings/{f['pub_name']}",
+                ),
+                json={"name": f["pub_name"]} if not eg_not_found else {"error": {"code": "ResourceNotFound"}},
+                status=eg_probe_status,
+            )
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(
+                    f["eg_ns_name"], f["eg_rg"],
+                    subscription_id=f["eg_sub"],
+                    sub_resource=f"/permissionBindings/{f['sub_name']}",
+                ),
+                json={"name": f["sub_name"]} if not eg_not_found else {"error": {"code": "ResourceNotFound"}},
+                status=eg_probe_status,
+            )
+
+        # 4. AIO resource deletion (response dataflow, graph, endpoint)
+        # IoT Ops begin_delete accepts only 202/204; use 204 with no body.
+        resp_status = 404 if aio_resources_not_found else 204
+        if not graph_not_found_anywhere:
+            # Response dataflow DELETE
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{graph_profile}/dataflows/{f['resp_name']}",
+                ),
+                status=resp_status,
+                content_type="application/json",
+            )
+            # Dataflow graph DELETE
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{graph_profile}/dataflowGraphs/{f['graph_name']}",
+                ),
+                status=resp_status,
+                content_type="application/json",
+            )
+        elif resp_dataflow_orphaned:
+            # Orphaned response dataflow DELETE (no graph delete)
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                    f"/dataflows/{f['resp_name']}",
+                ),
+                status=resp_status,
+                content_type="application/json",
+            )
+
+        # Dataflow endpoint DELETE (only if endpoint exists)
+        if not ep_not_found:
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowEndpoints/{f['ep_name']}",
+                ),
+                status=resp_status,
+                content_type="application/json",
+            )
+
+        # 5. ADR namespace PUT (remove management endpoint entry)
+        # PATCH deep-merges dicts (can't remove keys) and ADR API rejects null values,
+        # so we use PUT (begin_create_or_replace) to replace the entire resource.
+        if f["mgmt_endpoints"]:
+            mocked_responses.add(
+                method=responses.PUT,
+                url=_build_adr_endpoint(f["adr_ns_name"], f["adr_rg"]),
+                json=_build_adr_namespace_response(
+                    f["adr_ns_name"], f["adr_rg"],
+                    identity_type="SystemAssigned",
+                    principal_id="00000000-0000-0000-0000-bbbbbbbbbbbb",
+                    management_endpoints=extra_adr_endpoints or {},
+                ),
+                status=200,
+            )
+
+        # 6. EG resource deletion (only if EG resources were found during discovery)
+        # EG begin_delete accepts 200/202/204 and uses _stream=True; use 200 with json body.
+        if f["mgmt_endpoints"] and not eg_not_found:
+            # Permission binding pub DELETE
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_eg_endpoint(
+                    f["eg_ns_name"], f["eg_rg"],
+                    subscription_id=f["eg_sub"],
+                    sub_resource=f"/permissionBindings/{f['pub_name']}",
+                ),
+                json={},
+                status=200,
+            )
+            # Permission binding sub DELETE
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_eg_endpoint(
+                    f["eg_ns_name"], f["eg_rg"],
+                    subscription_id=f["eg_sub"],
+                    sub_resource=f"/permissionBindings/{f['sub_name']}",
+                ),
+                json={},
+                status=200,
+            )
+            # Topic space DELETE
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_eg_endpoint(
+                    f["eg_ns_name"], f["eg_rg"],
+                    subscription_id=f["eg_sub"],
+                    sub_resource=f"/topicSpaces/{f['ts_name']}",
+                ),
+                json={},
+                status=200,
+            )
+
+    def _call_disable(self, mocked_cmd, f: dict, **kwargs) -> None:
+        """Invoke provider.disable() with standard arguments."""
         provider = MgmtActions(cmd=mocked_cmd)
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
-            provider.disable(name="inst", resource_group_name="rg")
+        provider.disable(
+            name=f["instance_name"],
+            resource_group_name=f["rg"],
+            confirm_yes=kwargs.pop("confirm_yes", True),
+            wait_sec=0,
+            **kwargs,
+        )
+
+    def test_happy_path(self, mocked_cmd, mocked_responses: responses, mocker):
+        """All resources deleted in correct order with confirm_yes=True."""
+        f = self._make_disable_fixtures()
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f)
+
+        self._call_disable(mocked_cmd, f)
+
+        # instance GET + ADR GET + graph detect GET + ep detect GET +
+        # EG ts GET + EG pub GET + EG sub GET +
+        # resp DELETE + graph DELETE + ep DELETE + ADR PUT +
+        # pub DELETE + sub DELETE + ts DELETE = 14
+        assert len(mocked_responses.calls) == 14
+
+        # Verify full call sequence: discovery GETs → AIO DELETEs → ADR PUT → EG DELETEs
+        call_methods = [c.request.method for c in mocked_responses.calls]
+        assert call_methods == [
+            "GET", "GET", "GET", "GET",     # instance, ADR, graph detect, ep detect
+            "GET", "GET", "GET",             # EG ts, pub, sub existence
+            "DELETE", "DELETE", "DELETE",    # resp dataflow, graph, endpoint
+            "PUT",                           # ADR namespace update (full replace)
+            "DELETE", "DELETE", "DELETE",    # pub binding, sub binding, topic space
+        ]
+
+        # Verify mutation calls target expected resources
+        mut_paths = [
+            c.request.path_url.split("?")[0]
+            for c in mocked_responses.calls
+            if c.request.method in ("DELETE", "PUT")
+        ]
+        assert f"/dataflows/{f['resp_name']}" in mut_paths[0]
+        assert f"/dataflowGraphs/{f['graph_name']}" in mut_paths[1]
+        assert f"/dataflowEndpoints/{f['ep_name']}" in mut_paths[2]
+        assert f"/providers/{DEVICEREGISTRY_RP}/namespaces/{f['adr_ns_name']}" in mut_paths[3]
+        assert f"/permissionBindings/{f['pub_name']}" in mut_paths[4]
+        assert f"/permissionBindings/{f['sub_name']}" in mut_paths[5]
+        assert f"/topicSpaces/{f['ts_name']}" in mut_paths[6]
+
+    def test_confirmation_cancel(self, mocked_cmd, mocked_responses: responses, mocker):
+        """Cancellation via should_continue_prompt stops all deletions."""
+        f = self._make_disable_fixtures()
+        mock_prompt = mocker.patch(self.PROMPT_TARGET, return_value=False)
+        # Register mocks for all calls before the prompt:
+        # instance GET + ADR GET + graph discovery + endpoint existence check.
+        # Any call past the prompt would hit an unregistered mock and fail the test.
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=f["instance_response"],
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(f["adr_ns_name"], f["adr_rg"]),
+            json=_build_adr_namespace_response(
+                f["adr_ns_name"], f["adr_rg"],
+                identity_type="SystemAssigned",
+                principal_id="00000000-0000-0000-0000-bbbbbbbbbbbb",
+                management_endpoints=f["mgmt_endpoints"],
+            ),
+            status=200,
+        )
+        # Graph found in default profile (discovery)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                f["instance_name"], f["rg"],
+                sub_resource=f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                f"/dataflowGraphs/{f['graph_name']}",
+            ),
+            json={"name": f["graph_name"]},
+            status=200,
+        )
+        # Endpoint existence check
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                f["instance_name"], f["rg"],
+                sub_resource=f"/dataflowEndpoints/{f['ep_name']}",
+            ),
+            json={"name": f["ep_name"]},
+            status=200,
+        )
+        # EG resource existence probes (topic space + pub + sub)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_eg_endpoint(
+                f["eg_ns_name"], f["eg_rg"],
+                subscription_id=f["eg_sub"],
+                sub_resource=f"/topicSpaces/{f['ts_name']}",
+            ),
+            json={"name": f["ts_name"]},
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_eg_endpoint(
+                f["eg_ns_name"], f["eg_rg"],
+                subscription_id=f["eg_sub"],
+                sub_resource=f"/permissionBindings/{f['pub_name']}",
+            ),
+            json={"name": f["pub_name"]},
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_eg_endpoint(
+                f["eg_ns_name"], f["eg_rg"],
+                subscription_id=f["eg_sub"],
+                sub_resource=f"/permissionBindings/{f['sub_name']}",
+            ),
+            json={"name": f["sub_name"]},
+            status=200,
+        )
+
+        self._call_disable(mocked_cmd, f, confirm_yes=None)
+
+        mock_prompt.assert_called_once_with(confirm_yes=None)
+        # instance GET + ADR GET + graph discovery GET + ep existence GET +
+        # EG ts GET + EG pub GET + EG sub GET = 7
+        assert len(mocked_responses.calls) == 7
+
+    def test_confirm_yes_flag(self, mocked_cmd, mocked_responses: responses, mocker):
+        """confirm_yes=True is forwarded to should_continue_prompt."""
+        f = self._make_disable_fixtures()
+        mock_prompt = mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f)
+
+        self._call_disable(mocked_cmd, f, confirm_yes=True)
+
+        mock_prompt.assert_called_once_with(confirm_yes=True)
+        assert len(mocked_responses.calls) == 14
+
+    def test_aio_resources_not_found(self, mocked_cmd, mocked_responses: responses, mocker):
+        """AIO resources already deleted (404) — continues to ADR and EG cleanup."""
+        f = self._make_disable_fixtures()
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f, aio_resources_not_found=True)
+
+        self._call_disable(mocked_cmd, f)
+
+        assert len(mocked_responses.calls) == 14
+
+    def test_eg_resources_not_found(self, mocked_cmd, mocked_responses: responses, mocker):
+        """EG resources not found during discovery — EG teardown skipped."""
+        f = self._make_disable_fixtures()
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f, eg_not_found=True)
+
+        self._call_disable(mocked_cmd, f)
+
+        # instance GET + ADR GET + graph detect + ep detect +
+        # EG ts GET(404) + EG pub GET(404) + EG sub GET(404) +
+        # resp DELETE + graph DELETE + ep DELETE + ADR PUT = 11
+        # No EG DELETEs since resources weren't found
+        assert len(mocked_responses.calls) == 11
+
+    def test_no_adr_namespace_ref(self, mocked_cmd, mocked_responses: responses):
+        """Instance missing adrNamespaceRef — returns early with no deletions."""
+        f = self._make_disable_fixtures(include_adr_namespace_ref=False)
+        # Only instance GET is needed — no ADR ref means immediate return.
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=f["instance_response"],
+            status=200,
+        )
+
+        self._call_disable(mocked_cmd, f)
+
+        assert len(mocked_responses.calls) == 1
+
+    def test_adr_namespace_not_found(self, mocked_cmd, mocked_responses: responses):
+        """ADR namespace 404 — returns early with no deletions."""
+        f = self._make_disable_fixtures()
+        self._register_disable_mocks(mocked_responses, f, adr_not_found=True)
+
+        self._call_disable(mocked_cmd, f)
+
+        assert len(mocked_responses.calls) == 2
+
+    def test_management_endpoint_missing(self, mocked_cmd, mocked_responses: responses, mocker):
+        """No management endpoint entry for custom location — AIO deleted, EG skipped."""
+        f = self._make_disable_fixtures(include_mgmt_endpoint=False)
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f)
+
+        self._call_disable(mocked_cmd, f)
+
+        # instance GET + ADR GET + graph detect + ep detect + 3 AIO DELETEs = 7
+        # No ADR PUT (nothing to remove), no EG DELETEs (no EG context)
+        assert len(mocked_responses.calls) == 7
+        methods_paths = [(c.request.method, c.request.path_url) for c in mocked_responses.calls]
+        assert not any("PUT" in m for m, _ in methods_paths)
+        assert not any(f"/providers/{EVENTGRID_RP}/" in p for _, p in methods_paths)
+
+    def test_cross_subscription_eg(self, mocked_cmd, mocked_responses: responses, mocker):
+        """Cross-subscription EG namespace creates correct client and deletes succeed."""
+        cross_sub = "11111111-1111-1111-1111-111111111111"
+        f = self._make_disable_fixtures(eg_subscription_id=cross_sub)
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f)
+
+        self._call_disable(mocked_cmd, f)
+
+        eg_calls = [
+            c for c in mocked_responses.calls
+            if f"/providers/{EVENTGRID_RP}/" in c.request.path_url
+        ]
+        assert len(eg_calls) == 6  # 3 discovery GETs + 3 DELETEs
+        for call in eg_calls:
+            assert f"/subscriptions/{cross_sub}/" in call.request.path_url
+
+    def test_adr_preserves_other_entries(self, mocked_cmd, mocked_responses: responses, mocker):
+        """ADR namespace with multiple management endpoints — only ours is removed."""
+        f = self._make_disable_fixtures()
+        other_cl_id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ExtendedLocation/customLocations/other"
+        extra_endpoints = {
+            other_cl_id: {
+                "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                "address": "other.eventgrid.azure.net",
+                "scopeId": "other-instance",
+                "resourceId": (
+                    "/subscriptions/sub/resourceGroups/rg"
+                    "/providers/Microsoft.EventGrid/namespaces/other-ns"
+                ),
+            },
+        }
+
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f, extra_adr_endpoints=extra_endpoints)
+
+        self._call_disable(mocked_cmd, f)
+
+        put_calls = [c for c in mocked_responses.calls if c.request.method == "PUT"]
+        assert len(put_calls) == 1
+        put_body = json.loads(put_calls[0].request.body)
+        put_endpoints = put_body["properties"]["management"]["endpoints"]
+        # PUT replaces the entire resource — our entry is absent, other entries preserved
+        assert f["custom_location_id"] not in put_endpoints
+        assert put_endpoints[other_cl_id] == extra_endpoints[other_cl_id]
+        # Verify identity and location are preserved
+        assert put_body.get("location") == "eastus"
+        assert put_body.get("identity", {}).get("type") == "SystemAssigned"
+
+    def test_custom_profile_auto_detected(self, mocked_cmd, mocked_responses: responses, mocker):
+        """Graph under a non-default profile is auto-detected and deleted."""
+        f = self._make_disable_fixtures()
+        custom_profile = "custom-profile"
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(
+            mocked_responses, f,
+            graph_profile=custom_profile,
+            graph_not_found_in_default=True,
+        )
+
+        self._call_disable(mocked_cmd, f)
+
+        delete_calls = [c for c in mocked_responses.calls if c.request.method == "DELETE"]
+        resp_delete = [c for c in delete_calls if f"/dataflows/{f['resp_name']}" in c.request.path_url]
+        graph_delete = [c for c in delete_calls if f"/dataflowGraphs/{f['graph_name']}" in c.request.path_url]
+        assert len(resp_delete) == 1
+        assert f"/dataflowProfiles/{custom_profile}/" in resp_delete[0].request.path_url
+        assert len(graph_delete) == 1
+        assert f"/dataflowProfiles/{custom_profile}/" in graph_delete[0].request.path_url
+
+    def test_graph_not_found_anywhere(self, mocked_cmd, mocked_responses: responses, mocker):
+        """Graph not in any profile — graph and response dataflow deletion skipped."""
+        f = self._make_disable_fixtures()
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f, graph_not_found_anywhere=True)
+
+        self._call_disable(mocked_cmd, f)
+
+        delete_paths = [
+            c.request.path_url.split("?")[0]
+            for c in mocked_responses.calls
+            if c.request.method == "DELETE"
+        ]
+        assert not any(f"/dataflows/{f['resp_name']}" in p for p in delete_paths)
+        assert not any(f"/dataflowGraphs/{f['graph_name']}" in p for p in delete_paths)
+        # endpoint + pub + sub + ts = 4 DELETEs
+        assert len(delete_paths) == 4
+        assert any(f"/dataflowEndpoints/{f['ep_name']}" in p for p in delete_paths)
+
+    def test_orphaned_response_dataflow(self, mocked_cmd, mocked_responses: responses, mocker):
+        """Graph gone but response dataflow still exists — orphaned resp is cleaned up."""
+        f = self._make_disable_fixtures()
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(
+            mocked_responses, f,
+            graph_not_found_anywhere=True,
+            resp_dataflow_orphaned=True,
+        )
+
+        self._call_disable(mocked_cmd, f)
+
+        delete_paths = [
+            c.request.path_url.split("?")[0]
+            for c in mocked_responses.calls
+            if c.request.method == "DELETE"
+        ]
+        # Orphaned response dataflow is deleted
+        resp_deletes = [p for p in delete_paths if f"/dataflows/{f['resp_name']}" in p]
+        assert len(resp_deletes) == 1
+        assert f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}/" in resp_deletes[0]
+        # Graph deletion is NOT attempted (already gone)
+        assert not any(f"/dataflowGraphs/{f['graph_name']}" in p for p in delete_paths)
+        # resp + endpoint + pub + sub + ts = 5 DELETEs
+        assert len(delete_paths) == 5
 
 
 # ---------------------------------------------------------------------------
