@@ -246,9 +246,6 @@ class MgmtActions(Queryable):
 
         result: Dict = {
             "instance": {
-                "name": name,
-                "resourceGroup": resource_group_name,
-                "version": instance_version,
                 "dataflowProfile": resolved_profile,
                 "dataflowEndpoint": dataflow_endpoint_result,
                 "requestDataflowGraph": dataflow_graph_result,
@@ -271,6 +268,163 @@ class MgmtActions(Queryable):
             result["roleAssignments"] = role_assignments_result
 
         return result
+
+    def show(
+        self,
+        name: str,
+        resource_group_name: str,
+        **kwargs,
+    ) -> Dict:
+        """Show management actions configuration for an IoT Operations instance.
+
+        Discovers whether mgmt-actions is configured by probing the ADR namespace
+        management endpoint and Event Grid resources. Returns a concise summary
+        of the integration topology or {"enabled": False} if not configured.
+        """
+        # Resolve instance
+        instance = self.iotops_mgmt_client.instance.get(
+            instance_name=name,
+            resource_group_name=resource_group_name,
+        )
+        instance_resource_id: str = instance["id"]
+
+        # Resolve ADR namespace from instance
+        adr_namespace_resource_id = instance.get("properties", {}).get("adrNamespaceRef", {}).get("resourceId")
+        if not adr_namespace_resource_id:
+            return {"enabled": False}
+
+        parsed_adr = parse_resource_id_dict(adr_namespace_resource_id)
+        adr_subscription_id = parsed_adr.get("subscription", "")
+        adr_resource_group = parsed_adr.get("resource_group", "")
+        adr_namespace_name = parsed_adr.get("name", "")
+
+        if not all([adr_subscription_id, adr_resource_group, adr_namespace_name]):
+            return {"enabled": False}
+
+        # GET the ADR namespace and check for management endpoint entry
+        try:
+            adr_namespace = self.registry_mgmt_client.namespaces.get(
+                resource_group_name=adr_resource_group,
+                namespace_name=adr_namespace_name,
+            )
+        except ResourceNotFoundError:
+            return {"enabled": False}
+
+        custom_location_id: str = instance.get("extendedLocation", {}).get("name", "")
+        if not custom_location_id:
+            return {"enabled": False}
+
+        existing_endpoints = adr_namespace.get("properties", {}).get("management", {}).get("endpoints", {})
+        mgmt_endpoint = existing_endpoints.get(custom_location_id)
+
+        if not mgmt_endpoint:
+            return {"enabled": False}
+
+        # Extract EG namespace details from the management endpoint entry
+        eg_resource_id = mgmt_endpoint.get("resourceId", "")
+        if not eg_resource_id:
+            return {"enabled": False}
+
+        parsed_eg = parse_resource_id_dict(eg_resource_id)
+        eg_namespace_name = parsed_eg.get("name", "")
+        eg_resource_group = parsed_eg.get("resource_group", "")
+        eg_subscription_id = parsed_eg.get("subscription", "")
+
+        if not all([eg_namespace_name, eg_resource_group, eg_subscription_id]):
+            return {"enabled": False}
+
+        # Handle cross-subscription EG namespace
+        if eg_subscription_id != self.default_subscription_id:
+            self.eventgrid_mgmt_client = get_eventgrid_mgmt_client(
+                subscription_id=eg_subscription_id,
+            )
+
+        # Probe EG namespace for MQTT hostname
+        mqtt_hostname = ""
+        try:
+            eg_namespace = self.eventgrid_mgmt_client.namespaces.get(
+                resource_group_name=eg_resource_group,
+                namespace_name=eg_namespace_name,
+            )
+            mqtt_hostname = (
+                eg_namespace.get("properties", {})
+                .get("topicSpacesConfiguration", {})
+                .get("hostname", "")
+            )
+        except ResourceNotFoundError:
+            logger.warning("Event Grid namespace '%s' not found.", eg_namespace_name)
+            return {"enabled": False}
+
+        # Reconstruct resource names from instance resource ID
+        topic_space_name = get_mgmt_actions_resource_name("ops", instance_resource_id)
+        pub_binding_name = get_mgmt_actions_resource_name("pub", instance_resource_id)
+        sub_binding_name = get_mgmt_actions_resource_name("sub", instance_resource_id)
+
+        # Probe EG topic space — if missing, mgmt-actions is not configured
+        try:
+            topic_space = self.eventgrid_mgmt_client.topic_spaces.get(
+                resource_group_name=eg_resource_group,
+                namespace_name=eg_namespace_name,
+                topic_space_name=topic_space_name,
+            )
+        except ResourceNotFoundError:
+            return {"enabled": False}
+
+        ts_props = topic_space.get("properties", {})
+        topic_space_result = {
+            "name": topic_space_name,
+            "scopeId": name,
+            "topicTemplates": ts_props.get("topicTemplates", []),
+        }
+
+        # Probe EG permission bindings
+        client_group = ""
+        try:
+            pub_binding = self.eventgrid_mgmt_client.permission_bindings.get(
+                resource_group_name=eg_resource_group,
+                namespace_name=eg_namespace_name,
+                permission_binding_name=pub_binding_name,
+            )
+            client_group = pub_binding.get("properties", {}).get("clientGroupName", "")
+        except ResourceNotFoundError:
+            return {"enabled": False}
+
+        try:
+            self.eventgrid_mgmt_client.permission_bindings.get(
+                resource_group_name=eg_resource_group,
+                namespace_name=eg_namespace_name,
+                permission_binding_name=sub_binding_name,
+            )
+        except ResourceNotFoundError:
+            return {"enabled": False}
+
+        return {
+            "enabled": True,
+            "eventGrid": {
+                "namespace": {
+                    "name": eg_namespace_name,
+                    "resourceGroup": eg_resource_group,
+                    "subscriptionId": eg_subscription_id,
+                    "mqttHostname": mqtt_hostname,
+                },
+                "topicSpace": topic_space_result,
+                "permissionBindings": {
+                    "publisherName": pub_binding_name,
+                    "subscriberName": sub_binding_name,
+                    "clientGroup": client_group,
+                },
+            },
+            "deviceRegistryNamespace": {
+                "name": adr_namespace_name,
+                "resourceGroup": adr_resource_group,
+                "subscriptionId": adr_subscription_id,
+                "managementEndpoint": {
+                    "endpointType": mgmt_endpoint.get("endpointType", ""),
+                    "address": mgmt_endpoint.get("address", ""),
+                    "scopeId": mgmt_endpoint.get("scopeId", ""),
+                },
+            },
+        }
 
     def disable(
         self,
@@ -613,6 +767,7 @@ class MgmtActions(Queryable):
         parsed_adr = parse_resource_id_dict(adr_namespace_resource_id)
         adr_resource_group = parsed_adr.get("resource_group", "")
         adr_namespace_name = parsed_adr.get("name", "")
+        adr_subscription_id = parsed_adr.get("subscription", "")
 
         if not all([adr_resource_group, adr_namespace_name]):
             raise ValidationError(
@@ -654,6 +809,8 @@ class MgmtActions(Queryable):
             )
             return {
                 "name": adr_namespace_name,
+                "resourceGroup": adr_resource_group,
+                "subscriptionId": adr_subscription_id,
                 "identity": {
                     "type": current_identity.get("type", ""),
                     "principalId": principal_id,
@@ -703,6 +860,8 @@ class MgmtActions(Queryable):
 
         return {
             "name": adr_namespace_name,
+            "resourceGroup": adr_resource_group,
+            "subscriptionId": adr_subscription_id,
             "identity": {
                 "type": updated_identity.get("type", ""),
                 "principalId": principal_id,

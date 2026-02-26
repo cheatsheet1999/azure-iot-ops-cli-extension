@@ -2437,10 +2437,10 @@ class TestEnable:
 
         # -- Assert instance section --
         inst = result["instance"]
-        assert inst["name"] == instance_name
-        assert inst["resourceGroup"] == rg
+        assert "name" not in inst  # user-supplied echo field
+        assert "resourceGroup" not in inst  # user-supplied echo field
         assert "resourceId" not in inst
-        assert inst["version"] == MIN_INSTANCE_VERSION_MGMT_ACTIONS
+        assert "version" not in inst  # user-supplied echo field
         assert inst["dataflowProfile"] == MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE
         # dataflowEndpoint is an instance child resource, not under eventGrid
         assert "dataflowEndpoint" in inst
@@ -2468,6 +2468,8 @@ class TestEnable:
         # -- Assert deviceRegistryNamespace section --
         adr = result["deviceRegistryNamespace"]
         assert "principalId" not in adr
+        assert adr["resourceGroup"] == rg
+        assert adr["subscriptionId"] == ZEROED_SUBSCRIPTION
         assert adr["identity"]["type"] == "SystemAssigned"
         assert adr["identity"]["principalId"] == adr_principal_id
 
@@ -3046,3 +3048,348 @@ class TestEnable:
         mock_setup_ra.assert_not_called()
 
         assert len(mocked_responses.calls) == 16
+
+
+# ---------------------------------------------------------------------------
+# show() tests
+# ---------------------------------------------------------------------------
+
+
+class TestShow:
+    """Tests for MgmtActions.show()."""
+
+    def _register_show_mocks(
+        self,
+        mocked_responses: responses,
+        instance_name: str,
+        rg: str,
+        adr_ns_name: str,
+        eg_ns_name: str,
+        eg_rg: str,
+        hostname: str,
+        custom_location_id: str,
+        instance_resource_id: str,
+        eg_subscription_id: Optional[str] = None,
+        include_topic_space: bool = True,
+        include_pub_binding: bool = True,
+        include_sub_binding: bool = True,
+        adr_not_found: bool = False,
+        eg_not_found: bool = False,
+        management_endpoints: Optional[dict] = None,
+        client_group: str = MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP,
+    ) -> None:
+        """Register all HTTP mocks needed for a show() call."""
+        eg_sub = eg_subscription_id or ZEROED_SUBSCRIPTION
+
+        # Instance GET
+        instance_response = _build_instance_response(instance_name, rg, adr_namespace_name=adr_ns_name)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg),
+            json=instance_response,
+            status=200,
+        )
+
+        # ADR namespace GET
+        eg_rid = _build_eg_resource_id(eg_ns_name, eg_rg, subscription_id=eg_sub)
+        if management_endpoints is None:
+            management_endpoints = {
+                custom_location_id: {
+                    "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                    "address": hostname,
+                    "scopeId": instance_name,
+                    "resourceId": eg_rid,
+                },
+            }
+
+        if adr_not_found:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_adr_endpoint(adr_ns_name, rg),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+            return
+        else:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_adr_endpoint(adr_ns_name, rg),
+                json=_build_adr_namespace_response(
+                    adr_ns_name, rg,
+                    identity_type="SystemAssigned",
+                    principal_id="00000000-0000-0000-0000-bbbbbbbbbbbb",
+                    management_endpoints=management_endpoints,
+                ),
+                status=200,
+            )
+
+        # Short-circuit: if no management endpoints, show() won't probe EG
+        if not management_endpoints:
+            return
+
+        # EG namespace GET
+        if eg_not_found:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(eg_ns_name, eg_rg, subscription_id=eg_sub),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+            return
+        else:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(eg_ns_name, eg_rg, subscription_id=eg_sub),
+                json=_build_namespace_response(eg_ns_name, eg_rg, mqtt_hostname=hostname, subscription_id=eg_sub),
+                status=200,
+            )
+
+        # Topic space GET — show() short-circuits on 404, so no binding mocks needed
+        ts_name = get_mgmt_actions_resource_name("ops", instance_resource_id)
+        if include_topic_space:
+            expected_templates = _get_expected_topic_templates(instance_name)
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(
+                    eg_ns_name, eg_rg,
+                    subscription_id=eg_sub,
+                    sub_resource=f"/topicSpaces/{ts_name}",
+                ),
+                json={
+                    "name": ts_name,
+                    "properties": {
+                        "topicTemplates": expected_templates,
+                    },
+                },
+                status=200,
+            )
+        else:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(
+                    eg_ns_name, eg_rg,
+                    subscription_id=eg_sub,
+                    sub_resource=f"/topicSpaces/{ts_name}",
+                ),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+            return
+
+        # Publisher permission binding GET — show() short-circuits on 404
+        pub_name = get_mgmt_actions_resource_name("pub", instance_resource_id)
+        if include_pub_binding:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(
+                    eg_ns_name, eg_rg,
+                    subscription_id=eg_sub,
+                    sub_resource=f"/permissionBindings/{pub_name}",
+                ),
+                json={
+                    "name": pub_name,
+                    "properties": {
+                        "clientGroupName": client_group,
+                        "permission": "Publisher",
+                        "topicSpaceName": ts_name,
+                    },
+                },
+                status=200,
+            )
+        else:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(
+                    eg_ns_name, eg_rg,
+                    subscription_id=eg_sub,
+                    sub_resource=f"/permissionBindings/{pub_name}",
+                ),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+            return
+
+        # Subscriber permission binding GET
+        sub_name = get_mgmt_actions_resource_name("sub", instance_resource_id)
+        if include_sub_binding:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(
+                    eg_ns_name, eg_rg,
+                    subscription_id=eg_sub,
+                    sub_resource=f"/permissionBindings/{sub_name}",
+                ),
+                json={
+                    "name": sub_name,
+                    "properties": {
+                        "clientGroupName": client_group,
+                        "permission": "Subscriber",
+                        "topicSpaceName": ts_name,
+                    },
+                },
+                status=200,
+            )
+        else:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(
+                    eg_ns_name, eg_rg,
+                    subscription_id=eg_sub,
+                    sub_resource=f"/permissionBindings/{sub_name}",
+                ),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+
+    def _make_show_fixtures(self) -> dict:
+        """Build common test fixtures for show tests."""
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+        adr_ns_name = f"{instance_name}-adr-ns"
+        eg_ns_name = generate_random_string()
+        eg_rg = generate_random_string()
+        hostname = f"{eg_ns_name}.eastus-1.ts.eventgrid.azure.net"
+        extended_location = _make_extended_location()
+        custom_location_id = extended_location["name"]
+        instance_resource_id = (
+            f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{rg}"
+            f"/providers/{IOTOPS_RP}/instances/{instance_name}"
+        )
+        return {
+            "instance_name": instance_name,
+            "rg": rg,
+            "adr_ns_name": adr_ns_name,
+            "eg_ns_name": eg_ns_name,
+            "eg_rg": eg_rg,
+            "hostname": hostname,
+            "custom_location_id": custom_location_id,
+            "instance_resource_id": instance_resource_id,
+        }
+
+    def test_fully_enabled(self, mocked_cmd, mocked_responses: responses):
+        """Fully configured instance returns enabled=True with complete topology."""
+        f = self._make_show_fixtures()
+        self._register_show_mocks(mocked_responses, **f)
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
+
+        assert result["enabled"] is True
+        assert result["eventGrid"]["namespace"]["name"] == f["eg_ns_name"]
+        assert result["eventGrid"]["namespace"]["resourceGroup"] == f["eg_rg"]
+        assert result["eventGrid"]["namespace"]["subscriptionId"] == ZEROED_SUBSCRIPTION
+        assert result["eventGrid"]["namespace"]["mqttHostname"] == f["hostname"]
+        assert result["eventGrid"]["topicSpace"]["name"] == get_mgmt_actions_resource_name(
+            "ops", f["instance_resource_id"]
+        )
+        assert result["eventGrid"]["topicSpace"]["scopeId"] == f["instance_name"]
+        assert len(result["eventGrid"]["topicSpace"]["topicTemplates"]) == 2
+        assert result["eventGrid"]["permissionBindings"]["clientGroup"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
+        assert result["deviceRegistryNamespace"]["name"] == f["adr_ns_name"]
+        assert result["deviceRegistryNamespace"]["resourceGroup"] == f["rg"]
+        assert result["deviceRegistryNamespace"]["subscriptionId"] == ZEROED_SUBSCRIPTION
+        assert result["deviceRegistryNamespace"]["managementEndpoint"]["endpointType"] == MGMT_ACTIONS_ADR_ENDPOINT_TYPE
+        assert result["deviceRegistryNamespace"]["managementEndpoint"]["address"] == f["hostname"]
+        assert result["deviceRegistryNamespace"]["managementEndpoint"]["scopeId"] == f["instance_name"]
+        # instance GET + ADR GET + EG namespace GET + topic space GET + pub binding GET + sub binding GET
+        assert len(mocked_responses.calls) == 6
+
+    def test_no_management_endpoint(self, mocked_cmd, mocked_responses: responses):
+        """Instance with no ADR management endpoint entry returns enabled=False."""
+        f = self._make_show_fixtures()
+        self._register_show_mocks(mocked_responses, **f, management_endpoints={})
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
+
+        assert result == {"enabled": False}
+        # instance GET + ADR GET only, no EG calls
+        assert len(mocked_responses.calls) == 2
+
+    def test_adr_namespace_not_found(self, mocked_cmd, mocked_responses: responses):
+        """ADR namespace 404 returns enabled=False."""
+        f = self._make_show_fixtures()
+        self._register_show_mocks(mocked_responses, **f, adr_not_found=True)
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
+
+        assert result == {"enabled": False}
+
+    def test_eg_namespace_not_found(self, mocked_cmd, mocked_responses: responses):
+        """EG namespace 404 returns enabled=False."""
+        f = self._make_show_fixtures()
+        self._register_show_mocks(mocked_responses, **f, eg_not_found=True)
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
+
+        assert result == {"enabled": False}
+
+    @pytest.mark.parametrize(
+        "missing_resource",
+        ["topic_space", "pub_binding", "sub_binding"],
+    )
+    def test_partial_eg_resources(
+        self,
+        mocked_cmd,
+        mocked_responses: responses,
+        missing_resource: str,
+    ):
+        """Missing EG resource returns enabled=False."""
+        f = self._make_show_fixtures()
+        kwargs = {
+            "include_topic_space": missing_resource != "topic_space",
+            "include_pub_binding": missing_resource != "pub_binding",
+            "include_sub_binding": missing_resource != "sub_binding",
+        }
+        self._register_show_mocks(mocked_responses, **f, **kwargs)
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
+
+        assert result == {"enabled": False}
+
+    def test_cross_subscription_eg(self, mocked_cmd, mocked_responses: responses):
+        """EG namespace in a different subscription is handled correctly."""
+        f = self._make_show_fixtures()
+        cross_sub = "11111111-1111-1111-1111-111111111111"
+        self._register_show_mocks(mocked_responses, **f, eg_subscription_id=cross_sub)
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
+
+        assert result["enabled"] is True
+        assert result["eventGrid"]["namespace"]["subscriptionId"] == cross_sub
+
+    def test_no_adr_namespace_ref(self, mocked_cmd, mocked_responses: responses):
+        """Instance without adrNamespaceRef returns enabled=False."""
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+
+        # Build instance without adrNamespaceRef
+        instance_response = {
+            "id": (
+                f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{rg}"
+                f"/providers/{IOTOPS_RP}/instances/{instance_name}"
+            ),
+            "name": instance_name,
+            "location": "eastus",
+            "extendedLocation": _make_extended_location(),
+            "properties": {
+                "version": MIN_INSTANCE_VERSION_MGMT_ACTIONS,
+                "provisioningState": "Succeeded",
+            },
+        }
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg),
+            json=instance_response,
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.show(name=instance_name, resource_group_name=rg)
+
+        assert result == {"enabled": False}
+        assert len(mocked_responses.calls) == 1
