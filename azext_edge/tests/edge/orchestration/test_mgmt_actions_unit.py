@@ -298,12 +298,13 @@ def _make_eg_ctx(
     )
 
 
-def _make_extended_location() -> dict:
-    return {
-        "name": f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/test-rg"
-        f"/providers/Microsoft.ExtendedLocation/customLocations/my-cl",
-        "type": "CustomLocation",
-    }
+MOCK_EXTENDED_LOCATION: dict = {
+    "name": (
+        f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/test-rg"
+        f"/providers/Microsoft.ExtendedLocation/customLocations/my-cl"
+    ),
+    "type": "CustomLocation",
+}
 
 
 def _build_instance_response(
@@ -313,7 +314,7 @@ def _build_instance_response(
     adr_namespace_name: Optional[str] = None,
     include_adr_ref: bool = True,
 ) -> dict:
-    extended_location = _make_extended_location()
+    extended_location = MOCK_EXTENDED_LOCATION
     properties: dict = {
         "version": version,
         "provisioningState": "Succeeded",
@@ -331,6 +332,29 @@ def _build_instance_response(
         "location": "eastus",
         "extendedLocation": extended_location,
         "properties": properties,
+    }
+
+
+def _make_base_fixtures() -> dict:
+    """Build the common fixture core shared by enable, disable, and show tests.
+
+    Returns instance identity fields and the 6 deterministic management-actions
+    resource names derived from the instance resource ID.
+    """
+    instance_name = generate_random_string()
+    rg = generate_random_string()
+    instance_rid = _build_instance_response(instance_name, rg)["id"]
+    return {
+        "instance_name": instance_name,
+        "rg": rg,
+        "adr_ns_name": f"{instance_name}-adr-ns",
+        "instance_rid": instance_rid,
+        "ts_name": get_mgmt_actions_resource_name("ops", instance_rid),
+        "pub_name": get_mgmt_actions_resource_name("pub", instance_rid),
+        "sub_name": get_mgmt_actions_resource_name("sub", instance_rid),
+        "ep_name": get_mgmt_actions_resource_name("eg", instance_rid),
+        "graph_name": get_mgmt_actions_resource_name("req", instance_rid),
+        "resp_name": get_mgmt_actions_resource_name("resp", instance_rid),
     }
 
 
@@ -835,7 +859,7 @@ class TestSetupEgDataflowEndpoint:
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
         eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
 
         ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
 
@@ -887,7 +911,7 @@ class TestSetupEgDataflowEndpoint:
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
         eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
 
         ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
         uami_name = generate_random_string()
@@ -939,14 +963,14 @@ class TestSetupEgDataflowEndpoint:
         assert uami_settings["tenantId"] == uami_tenant_id
         assert uami_settings["scope"] == f"{MGMT_ACTIONS_EG_AUDIENCE}/.default"
 
-    def test_existing_endpoint(self, mocked_cmd, mocked_responses: responses):
-        """When endpoint already exists, returns status 'Exists' without PUT."""
+    def test_existing_endpoint_same_config(self, mocked_cmd, mocked_responses: responses):
+        """When endpoint already exists with matching host and auth, returns without PUT."""
         ns_name = generate_random_string()
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
         eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
 
         ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
 
@@ -954,14 +978,19 @@ class TestSetupEgDataflowEndpoint:
             "method": "SystemAssignedManagedIdentity",
             "systemAssignedManagedIdentitySettings": {"audience": MGMT_ACTIONS_EG_AUDIENCE},
         }
-        # GET returns 200 (already exists)
+        # GET returns 200 with matching host and auth
         mocked_responses.add(
             method=responses.GET,
             url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
             json={
                 "id": f"/fake/path/dataflowEndpoints/{ep_name}",
                 "name": ep_name,
-                "properties": {"mqttSettings": {"authentication": existing_auth}},
+                "properties": {
+                    "mqttSettings": {
+                        "host": eg_ctx.mqtt_hostname,
+                        "authentication": existing_auth,
+                    },
+                },
             },
             status=200,
         )
@@ -978,8 +1007,258 @@ class TestSetupEgDataflowEndpoint:
 
         assert result["name"] == ep_name
         assert result["authentication"] == existing_auth
+        assert result["exists"] is True
+        assert "updated" not in result
         # Only the GET call, no PUT
         assert len(mocked_responses.calls) == 1
+
+    def test_existing_endpoint_different_host(self, mocked_cmd, mocked_responses: responses):
+        """When endpoint exists with a different host, updates via PUT."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        new_hostname = "new-ns.westus2-1.ts.eventgrid.azure.net"
+        eg_ctx = _make_eg_ctx(resource_group_name=rg, mqtt_hostname=new_hostname)
+        extended_location = MOCK_EXTENDED_LOCATION
+
+        ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
+
+        existing_auth = {
+            "method": "SystemAssignedManagedIdentity",
+            "systemAssignedManagedIdentitySettings": {"audience": MGMT_ACTIONS_EG_AUDIENCE},
+        }
+        # GET returns 200 with OLD host but matching auth
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={
+                "id": f"/fake/path/dataflowEndpoints/{ep_name}",
+                "name": ep_name,
+                "properties": {
+                    "mqttSettings": {
+                        "host": "old-ns.eastus-1.ts.eventgrid.azure.net",
+                        "authentication": existing_auth,
+                    },
+                },
+            },
+            status=200,
+        )
+        # PUT updates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            wait_sec=0,
+        )
+
+        assert result["name"] == ep_name
+        assert result["exists"] is True
+        assert result["updated"] is True
+        assert result["authentication"]["method"] == "SystemAssignedManagedIdentity"
+        assert len(mocked_responses.calls) == 2
+
+        # Verify the PUT payload has the new host
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        assert put_body["properties"]["mqttSettings"]["host"] == new_hostname
+
+    def test_existing_endpoint_sami_to_uami(self, mocked_cmd, mocked_responses: responses):
+        """When endpoint exists with SAMI but UAMI is now provided, updates auth via PUT."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        eg_ctx = _make_eg_ctx(resource_group_name=rg)
+        extended_location = MOCK_EXTENDED_LOCATION
+
+        ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
+
+        uami_client_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        uami_tenant_id = "tttttttt-tttt-tttt-tttt-tttttttttttt"
+        uami_resource = _build_uami_response(
+            _build_uami_resource_id("my-uami", rg), uami_client_id, uami_tenant_id
+        )
+
+        existing_auth = {
+            "method": "SystemAssignedManagedIdentity",
+            "systemAssignedManagedIdentitySettings": {"audience": MGMT_ACTIONS_EG_AUDIENCE},
+        }
+        # GET returns 200 with matching host but SAMI auth
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={
+                "id": f"/fake/path/dataflowEndpoints/{ep_name}",
+                "name": ep_name,
+                "properties": {
+                    "mqttSettings": {
+                        "host": eg_ctx.mqtt_hostname,
+                        "authentication": existing_auth,
+                    },
+                },
+            },
+            status=200,
+        )
+        # PUT updates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            mi_resource=uami_resource,
+            wait_sec=0,
+        )
+
+        assert result["exists"] is True
+        assert result["updated"] is True
+        assert result["authentication"]["method"] == "UserAssignedManagedIdentity"
+        assert result["authentication"]["userAssignedManagedIdentitySettings"]["clientId"] == uami_client_id
+        assert len(mocked_responses.calls) == 2
+
+    def test_existing_endpoint_uami_to_sami(self, mocked_cmd, mocked_responses: responses):
+        """When endpoint exists with UAMI but no mi_resource provided, updates to SAMI via PUT."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        eg_ctx = _make_eg_ctx(resource_group_name=rg)
+        extended_location = MOCK_EXTENDED_LOCATION
+
+        ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
+
+        existing_auth = {
+            "method": "UserAssignedManagedIdentity",
+            "userAssignedManagedIdentitySettings": {
+                "clientId": "old-client-id",
+                "tenantId": "old-tenant-id",
+                "scope": f"{MGMT_ACTIONS_EG_AUDIENCE}/.default",
+            },
+        }
+        # GET returns 200 with matching host but UAMI auth
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={
+                "id": f"/fake/path/dataflowEndpoints/{ep_name}",
+                "name": ep_name,
+                "properties": {
+                    "mqttSettings": {
+                        "host": eg_ctx.mqtt_hostname,
+                        "authentication": existing_auth,
+                    },
+                },
+            },
+            status=200,
+        )
+        # PUT updates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            wait_sec=0,
+        )
+
+        assert result["exists"] is True
+        assert result["updated"] is True
+        assert result["authentication"]["method"] == "SystemAssignedManagedIdentity"
+        assert len(mocked_responses.calls) == 2
+
+        # Verify the PUT payload has SAMI auth
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        auth = put_body["properties"]["mqttSettings"]["authentication"]
+        assert auth["method"] == "SystemAssignedManagedIdentity"
+
+    def test_existing_endpoint_host_and_auth_mismatch(self, mocked_cmd, mocked_responses: responses):
+        """When both host and auth differ, updates both via PUT."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        new_hostname = "new-ns.westus2-1.ts.eventgrid.azure.net"
+        eg_ctx = _make_eg_ctx(resource_group_name=rg, mqtt_hostname=new_hostname)
+        extended_location = MOCK_EXTENDED_LOCATION
+
+        ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
+
+        uami_client_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        uami_tenant_id = "tttttttt-tttt-tttt-tttt-tttttttttttt"
+        uami_resource = _build_uami_response(
+            _build_uami_resource_id("my-uami", rg), uami_client_id, uami_tenant_id
+        )
+
+        # Existing has OLD host + SAMI auth
+        existing_auth = {
+            "method": "SystemAssignedManagedIdentity",
+            "systemAssignedManagedIdentitySettings": {"audience": MGMT_ACTIONS_EG_AUDIENCE},
+        }
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={
+                "id": f"/fake/path/dataflowEndpoints/{ep_name}",
+                "name": ep_name,
+                "properties": {
+                    "mqttSettings": {
+                        "host": "old-ns.eastus-1.ts.eventgrid.azure.net",
+                        "authentication": existing_auth,
+                    },
+                },
+            },
+            status=200,
+        )
+        # PUT updates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            mi_resource=uami_resource,
+            wait_sec=0,
+        )
+
+        assert result["exists"] is True
+        assert result["updated"] is True
+        assert result["authentication"]["method"] == "UserAssignedManagedIdentity"
+        assert len(mocked_responses.calls) == 2
+
+        # Verify the PUT payload has both new host and new auth
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        assert put_body["properties"]["mqttSettings"]["host"] == new_hostname
+        assert put_body["properties"]["mqttSettings"]["authentication"]["method"] == "UserAssignedManagedIdentity"
 
     def _create_endpoint_and_get_put_body(
         self,
@@ -993,7 +1272,7 @@ class TestSetupEgDataflowEndpoint:
         instance_rid = _build_eg_resource_id(instance_name, rg)
         if eg_ctx is None:
             eg_ctx = _make_eg_ctx(resource_group_name=rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
 
         mocked_responses.add(
@@ -1458,7 +1737,7 @@ class TestSetupDataflowGraph:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         profile_name = "default"
         eg_ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
         graph_name = get_mgmt_actions_resource_name("req", instance_rid)
@@ -1552,7 +1831,7 @@ class TestSetupDataflowGraph:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         profile_name = "default"
         graph_name = get_mgmt_actions_resource_name("req", instance_rid)
         eg_ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
@@ -1589,7 +1868,7 @@ class TestSetupDataflowGraph:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         custom_profile = "my-custom-profile"
         graph_name = get_mgmt_actions_resource_name("req", instance_rid)
         eg_ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
@@ -1637,7 +1916,7 @@ class TestSetupDataflowGraph:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         profile_name = "default"
         custom_registry_ep = "my-custom-registry-ep"
         graph_name = get_mgmt_actions_resource_name("req", instance_rid)
@@ -1740,7 +2019,7 @@ class TestSetupResponseDataflow:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         profile_name = "default"
         eg_ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
         dataflow_name = get_mgmt_actions_resource_name("resp", instance_rid)
@@ -1810,7 +2089,7 @@ class TestSetupResponseDataflow:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         profile_name = "default"
         dataflow_name = get_mgmt_actions_resource_name("resp", instance_rid)
 
@@ -1845,7 +2124,7 @@ class TestSetupResponseDataflow:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         custom_profile = "my-custom-profile"
         dataflow_name = get_mgmt_actions_resource_name("resp", instance_rid)
         eg_ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
@@ -2253,52 +2532,25 @@ class TestEnable:
 
     def _make_enable_fixtures(self, dataflow_profile: str = "default") -> dict:
         """Build common test fixtures for enable tests."""
-        instance_name = generate_random_string()
-        rg = generate_random_string()
+        base = _make_base_fixtures()
         ns_name = generate_random_string()
-        hostname = f"{ns_name}.eastus-1.ts.eventgrid.azure.net"
-        instance_response = _build_instance_response(instance_name, rg)
-        instance_rid = instance_response["id"]
+        instance_response = _build_instance_response(base["instance_name"], base["rg"])
         return {
-            "instance_name": instance_name,
-            "rg": rg,
+            **base,
             "ns_name": ns_name,
-            "hostname": hostname,
+            "hostname": f"{ns_name}.eastus-1.ts.eventgrid.azure.net",
             "instance_response": instance_response,
-            "instance_rid": instance_rid,
             "cl_id": instance_response["extendedLocation"]["name"],
-            "eg_rid": _build_eg_resource_id(ns_name, rg),
-            "adr_ns_name": f"{instance_name}-adr-ns",
+            "eg_rid": _build_eg_resource_id(ns_name, base["rg"]),
             "adr_principal_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             "dataflow_profile": dataflow_profile,
-            "ts_name": get_mgmt_actions_resource_name("ops", instance_rid),
-            "pub_name": get_mgmt_actions_resource_name("pub", instance_rid),
-            "sub_name": get_mgmt_actions_resource_name("sub", instance_rid),
-            "ep_name": get_mgmt_actions_resource_name("eg", instance_rid),
-            "graph_name": get_mgmt_actions_resource_name("req", instance_rid),
-            "resp_name": get_mgmt_actions_resource_name("resp", instance_rid),
         }
 
     def _register_enable_mocks(
         self,
         mocked_responses: responses,
-        instance_name: str,
-        rg: str,
-        ns_name: str,
-        hostname: str,
-        instance_response: dict,
-        instance_rid: str,
-        cl_id: str,
-        eg_rid: str,
-        adr_ns_name: str,
-        adr_principal_id: str,
-        dataflow_profile: str,
-        ts_name: str,
-        pub_name: str,
-        sub_name: str,
-        ep_name: str,
-        graph_name: str,
-        resp_name: str,
+        f: dict,
+        *,
         mi_response: Optional[dict] = None,
     ) -> None:
         """Register HTTP mocks for an enable() call.
@@ -2308,6 +2560,14 @@ class TestEnable:
           Instance GET → EG namespace GET → (UAMI GET) → topic space → permission bindings
           → ADR namespace GET/PATCH → dataflow endpoint → dataflow graph → response dataflow.
         """
+        instance_name, rg = f["instance_name"], f["rg"]
+        ns_name, hostname = f["ns_name"], f["hostname"]
+        instance_response = f["instance_response"]
+        cl_id, eg_rid = f["cl_id"], f["eg_rid"]
+        adr_ns_name, adr_principal_id = f["adr_ns_name"], f["adr_principal_id"]
+        dataflow_profile = f["dataflow_profile"]
+        ts_name, pub_name, sub_name = f["ts_name"], f["pub_name"], f["sub_name"]
+        ep_name, graph_name, resp_name = f["ep_name"], f["graph_name"], f["resp_name"]
         # 1. GET instance
         mocked_responses.add(
             method=responses.GET,
@@ -2445,7 +2705,7 @@ class TestEnable:
         }
         mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity", return_value=df_auth_pid)
         mocker.patch.object(MgmtActions, "_setup_role_assignments", return_value=mock_role_result)
-        self._register_enable_mocks(mocked_responses, **f)
+        self._register_enable_mocks(mocked_responses, f)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.enable(
@@ -2470,8 +2730,9 @@ class TestEnable:
         assert inst["dataflowEndpoint"]["name"] == f["ep_name"]
         assert inst["requestDataflowGraph"]["name"] == f["graph_name"]
         assert inst["responseDataflow"]["name"] == f["resp_name"]
-        # Internal `exists` flags must be stripped from consumer-facing return (desired-state semantics)
+        # Internal `exists` and `updated` flags must be stripped from consumer-facing return (desired-state semantics)
         assert "exists" not in inst["dataflowEndpoint"]
+        assert "updated" not in inst["dataflowEndpoint"]
         assert "exists" not in inst["requestDataflowGraph"]
         assert "exists" not in inst["responseDataflow"]
 
@@ -2543,7 +2804,7 @@ class TestEnable:
         f = self._make_enable_fixtures(dataflow_profile=custom_profile)
         mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity", return_value="df-pid")
         mocker.patch.object(MgmtActions, "_setup_role_assignments", return_value={})
-        self._register_enable_mocks(mocked_responses, **f)
+        self._register_enable_mocks(mocked_responses, f)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.enable(
@@ -2575,7 +2836,7 @@ class TestEnable:
 
         mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity", return_value="df-pid")
         mocker.patch.object(MgmtActions, "_setup_role_assignments", return_value={})
-        self._register_enable_mocks(mocked_responses, **f, mi_response=mi_response)
+        self._register_enable_mocks(mocked_responses, f, mi_response=mi_response)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.enable(
@@ -2606,7 +2867,7 @@ class TestEnable:
         f = self._make_enable_fixtures()
         mock_resolve = mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity")
         mock_setup_ra = mocker.patch.object(MgmtActions, "_setup_role_assignments")
-        self._register_enable_mocks(mocked_responses, **f)
+        self._register_enable_mocks(mocked_responses, f)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.enable(
@@ -2650,23 +2911,20 @@ class TestDisable:
         include_adr_namespace_ref: bool = True,
     ) -> dict:
         """Build common test fixtures for disable tests."""
-        instance_name = generate_random_string()
-        rg = generate_random_string()
-        adr_ns_name = f"{instance_name}-adr-ns"
+        base = _make_base_fixtures()
+        instance_name, rg = base["instance_name"], base["rg"]
         eg_ns_name = generate_random_string()
         eg_rg = generate_random_string()
         eg_sub = eg_subscription_id or ZEROED_SUBSCRIPTION
         hostname = f"{eg_ns_name}.eastus-1.ts.eventgrid.azure.net"
-        extended_location = _make_extended_location()
-        custom_location_id = extended_location["name"]
+        custom_location_id = MOCK_EXTENDED_LOCATION["name"]
 
         instance_response = _build_instance_response(
-            instance_name, rg, adr_namespace_name=adr_ns_name
+            instance_name, rg, adr_namespace_name=base["adr_ns_name"]
         )
         if not include_adr_namespace_ref:
             instance_response["properties"].pop("adrNamespaceRef", None)
 
-        instance_rid = instance_response["id"]
         eg_rid = _build_eg_resource_id(eg_ns_name, eg_rg, subscription_id=eg_sub)
 
         mgmt_endpoints = {}
@@ -2679,9 +2937,7 @@ class TestDisable:
             }
 
         return {
-            "instance_name": instance_name,
-            "rg": rg,
-            "adr_ns_name": adr_ns_name,
+            **base,
             "adr_rg": rg,
             "eg_ns_name": eg_ns_name,
             "eg_rg": eg_rg,
@@ -2689,14 +2945,7 @@ class TestDisable:
             "hostname": hostname,
             "custom_location_id": custom_location_id,
             "instance_response": instance_response,
-            "instance_rid": instance_rid,
             "eg_rid": eg_rid,
-            "resp_name": get_mgmt_actions_resource_name("resp", instance_rid),
-            "graph_name": get_mgmt_actions_resource_name("req", instance_rid),
-            "ep_name": get_mgmt_actions_resource_name("eg", instance_rid),
-            "ts_name": get_mgmt_actions_resource_name("ops", instance_rid),
-            "pub_name": get_mgmt_actions_resource_name("pub", instance_rid),
-            "sub_name": get_mgmt_actions_resource_name("sub", instance_rid),
             "mgmt_endpoints": mgmt_endpoints,
         }
 
@@ -3637,34 +3886,15 @@ class TestShow:
 
     def _make_show_fixtures(self) -> dict:
         """Build common test fixtures for show tests."""
-        instance_name = generate_random_string()
-        rg = generate_random_string()
-        adr_ns_name = f"{instance_name}-adr-ns"
+        base = _make_base_fixtures()
         eg_ns_name = generate_random_string()
         eg_rg = generate_random_string()
-        hostname = f"{eg_ns_name}.eastus-1.ts.eventgrid.azure.net"
-        extended_location = _make_extended_location()
-        custom_location_id = extended_location["name"]
-        instance_resource_id = (
-            f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{rg}"
-            f"/providers/{IOTOPS_RP}/instances/{instance_name}"
-        )
         return {
-            "instance_name": instance_name,
-            "rg": rg,
-            "adr_ns_name": adr_ns_name,
+            **base,
             "eg_ns_name": eg_ns_name,
             "eg_rg": eg_rg,
-            "hostname": hostname,
-            "custom_location_id": custom_location_id,
-            "instance_resource_id": instance_resource_id,
-            # Computed deterministic resource names
-            "ep_name": get_mgmt_actions_resource_name("eg", instance_resource_id),
-            "graph_name": get_mgmt_actions_resource_name("req", instance_resource_id),
-            "resp_name": get_mgmt_actions_resource_name("resp", instance_resource_id),
-            "ts_name": get_mgmt_actions_resource_name("ops", instance_resource_id),
-            "pub_name": get_mgmt_actions_resource_name("pub", instance_resource_id),
-            "sub_name": get_mgmt_actions_resource_name("sub", instance_resource_id),
+            "hostname": f"{eg_ns_name}.eastus-1.ts.eventgrid.azure.net",
+            "custom_location_id": MOCK_EXTENDED_LOCATION["name"],
         }
 
     def _assert_4_key_shape(self, result: dict) -> None:
@@ -4097,7 +4327,7 @@ class TestExecute:
             ),
             "name": instance_name,
             "location": "eastus",
-            "extendedLocation": _make_extended_location(),
+            "extendedLocation": MOCK_EXTENDED_LOCATION,
             "properties": {
                 "provisioningState": "Succeeded",
             },
