@@ -354,7 +354,7 @@ def load_iotops_commands(self, _):
             cmd_group.command("update", f"update_namespace_{asset_type}_asset_event_group")
 
     # event group event
-    for asset_type in ["custom", "sse"]:
+    for asset_type in ["custom", "onvif", "sse", "opcua"]:
         with self.command_group(
             f"iot ops ns asset {asset_type} event",
             command_type=namespace_resource_ops,
