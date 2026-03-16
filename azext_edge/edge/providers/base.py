@@ -101,6 +101,7 @@ def get_namespaced_pods_by_prefix(
         _namespaced_pods_cache[target_pods_key] = pods_list.items
     except ApiException as ae:
         logger.debug(str(ae))
+        return []
     else:
         return filter_pods_from_cache(target_pods_key)
 
