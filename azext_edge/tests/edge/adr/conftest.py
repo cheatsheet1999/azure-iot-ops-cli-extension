@@ -13,6 +13,22 @@ from ...generators import generate_random_string, get_zeroed_subscription
 
 
 @pytest.fixture()
+def require_namespace_init(require_init):
+    """Extends require_init to ensure the instance has an ADR namespace reference.
+
+    If the instance does not have one, the test is skipped. Set up a namespace
+    manually before running these tests — see README or conftest docstring.
+    """
+    if not require_init.get("adrNamespaceRef"):
+        pytest.skip(
+            "Instance does not have an ADR namespace reference (adrNamespaceRef). "
+            "Create one and link it to the instance before running namespace tests. "
+            "See: az iot ops ns create / az iot ops update"
+        )
+    yield require_init
+
+
+@pytest.fixture()
 def asset_helpers_fixture(mocker, request):
     request_params = getattr(request, "param", {})
     patched_sp = mocker.patch(f"{ASSETS_PATH}._process_asset_sub_points")
@@ -96,6 +112,26 @@ def mocked_get_namespace_for_instance(mocker):
         mocker.patch(target, mock)
 
     yield mock
+
+
+@pytest.fixture()
+def mocked_connector_metadata_validator(mocker):
+    """Mock the ConnectorMetadataValidator to avoid actual validation during tests."""
+    mock_validator_instance = mocker.Mock()
+    mock_validator_instance.validate_dataset = mocker.Mock(return_value=None)
+    mock_validator_instance.validate_datapoint = mocker.Mock(return_value=None)
+    mock_validator_instance.validate_event = mocker.Mock(return_value=None)
+    mock_validator_instance.validate_event_group = mocker.Mock(return_value=None)
+
+    mock_validator_class = mocker.Mock(return_value=mock_validator_instance)
+    mock_validator_class.from_asset = mocker.Mock(return_value=mock_validator_instance)
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.ConnectorMetadataValidator",
+        mock_validator_class
+    )
+
+    yield mock_validator_instance
 
 
 @pytest.fixture()

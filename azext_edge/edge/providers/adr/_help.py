@@ -3445,3 +3445,169 @@ def load_iotops_adr_help():
             -g myInstanceResourceGroup --name sensorData
             --dest topic="updated/mqtt/topic" retain=Never qos=Qos0 ttl=1800
     """
+
+    for asset_type in ["custom", "opcua", "rest", "sse", "mqtt"]:
+        helps[
+            f"iot ops ns asset {asset_type} dataset export"
+        ] = """
+            type: command
+            short-summary: Export datasets to file.
+            long-summary: Export all datasets from an asset to JSON or YAML format.
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} dataset import"
+        ] = """
+            type: command
+            short-summary: Import datasets from file.
+            long-summary: Import datasets from JSON or YAML file. Use --replace to merge with overwrite.
+        """
+
+    for asset_type in ["custom", "opcua"]:
+        helps[
+            f"iot ops ns asset {asset_type} datapoint export"
+        ] = """
+            type: command
+            short-summary: Export datapoints to file.
+            long-summary: Export datapoints from a dataset to JSON, YAML, or CSV format.
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} datapoint import"
+        ] = """
+            type: command
+            short-summary: Import datapoints from file.
+            long-summary: Import datapoints from JSON, YAML, or CSV file. Use --replace to merge with overwrite.
+        """
+
+    for asset_type in ["custom", "opcua", "onvif", "sse"]:
+        helps[
+            f"iot ops ns asset {asset_type} event-group export"
+        ] = """
+            type: command
+            short-summary: Export event-groups to file.
+            long-summary: Export all event-groups from an asset to JSON or YAML format.
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} event-group import"
+        ] = """
+            type: command
+            short-summary: Import event-groups from file.
+            long-summary: Import event-groups from JSON or YAML file. Use --replace to merge with overwrite.
+        """
+
+    for asset_type in ["custom", "opcua", "onvif", "sse"]:
+        helps[
+            f"iot ops ns asset {asset_type} event export"
+        ] = """
+            type: command
+            short-summary: Export events to file.
+            long-summary: Export events from an event-group to JSON, YAML, or CSV format.
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} event import"
+        ] = """
+            type: command
+            short-summary: Import events from file.
+            long-summary: Import events from JSON, YAML, or CSV file. Use --replace to merge with overwrite.
+        """
+
+    for asset_type in ["custom", "media"]:
+        helps[
+            f"iot ops ns asset {asset_type} stream export"
+        ] = f"""
+            type: command
+            short-summary: Export streams to file.
+            long-summary: Export all streams from an asset to JSON or YAML format.
+                Destinations are stripped on export and auto-assigned on import.
+            examples:
+            - name: Export streams to JSON.
+              text: >
+                az iot ops ns asset {asset_type} stream export -a myasset --instance myinstance -g myresourcegroup
+            - name: Export streams to YAML in a specific directory.
+              text: >
+                az iot ops ns asset {asset_type} stream export -a myasset --instance myinstance -g myresourcegroup -f yaml --od /path/to/output
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} stream import"
+        ] = f"""
+            type: command
+            short-summary: Import streams from file.
+            long-summary: Import streams from JSON or YAML file. Use --replace to merge with overwrite.
+                Destinations are auto-assigned from asset defaults if not specified in the file.
+            examples:
+            - name: Import streams from JSON file.
+              text: >
+                az iot ops ns asset {asset_type} stream import -a myasset --instance myinstance -g myresourcegroup --if /path/to/streams.json
+            - name: Import streams with replace mode.
+              text: >
+                az iot ops ns asset {asset_type} stream import -a myasset --instance myinstance -g myresourcegroup --if /path/to/streams.json --replace
+        """
+
+    for asset_type in ["custom", "opcua", "onvif"]:
+        helps[
+            f"iot ops ns asset {asset_type} mgmt-group export"
+        ] = f"""
+            type: command
+            short-summary: Export management groups to file.
+            long-summary: Export all management groups from an asset to JSON or YAML format.
+                Actions are not included in the export (use mgmt-action export separately).
+            examples:
+            - name: Export management groups to JSON.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-group export -a myasset --instance myinstance -g myresourcegroup
+            - name: Export management groups to YAML.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-group export -a myasset --instance myinstance -g myresourcegroup -f yaml
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} mgmt-group import"
+        ] = f"""
+            type: command
+            short-summary: Import management groups from file.
+            long-summary: Import management groups from JSON or YAML file. Use --replace to merge with overwrite.
+                Existing actions are preserved when merging management groups.
+            examples:
+            - name: Import management groups from JSON file.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-group import -a myasset --instance myinstance -g myresourcegroup --if /path/to/mgmt_groups.json
+            - name: Import management groups with replace mode.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-group import -a myasset --instance myinstance -g myresourcegroup --if /path/to/mgmt_groups.yaml --replace
+        """
+
+    for asset_type in ["custom", "opcua"]:
+        helps[
+            f"iot ops ns asset {asset_type} mgmt-action export"
+        ] = f"""
+            type: command
+            short-summary: Export management actions to file.
+            long-summary: Export actions from a management group to JSON, YAML, or CSV format.
+            examples:
+            - name: Export actions to CSV.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-action export -a myasset --instance myinstance -g myresourcegroup --group mygroup -f csv
+            - name: Export actions to JSON.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-action export -a myasset --instance myinstance -g myresourcegroup --group mygroup
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} mgmt-action import"
+        ] = f"""
+            type: command
+            short-summary: Import management actions from file.
+            long-summary: Import actions from JSON, YAML, or CSV file. Use --replace to merge with overwrite.
+                Default actionType is 'Call' if not specified.
+            examples:
+            - name: Import actions from CSV file.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-action import -a myasset --instance myinstance -g myresourcegroup --group mygroup --if /path/to/actions.csv
+            - name: Import actions with replace mode.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-action import -a myasset --instance myinstance -g myresourcegroup --group mygroup --if /path/to/actions.json --replace
+        """

@@ -29,10 +29,49 @@ from .user_strings import (
 )
 
 
+def _get_output_dir_arg() -> dict:
+    return {"options_list": ["--output-dir", "--od"], "help": "Output directory for export."}
+
+
+def _get_format_arg(json_yaml_only: bool = False) -> dict:
+    choices = [FileType.json.value, FileType.yaml.value] if json_yaml_only else FileType
+    help_text = "Export file format (JSON or YAML)." if json_yaml_only else "Export file format."
+    return {
+        "options_list": ["--format", "-f"],
+        "arg_type": get_enum_type(choices, default=FileType.json.value),
+        "help": help_text,
+    }
+
+
+def _get_input_file_arg(supports_csv: bool = False) -> dict:
+    fmt = "JSON, YAML, or CSV" if supports_csv else "JSON or YAML"
+    return {"options_list": ["--input-file", "--if"], "help": f"Path to import file ({fmt})."}
+
+
 def load_adr_arguments(self, _):
     """
     Load ADR (Asset + Asset Endpoint Profile) CLI Args for Knack parser
     """
+
+    def _register_export_import_args(
+        asset_types: list,
+        resource: str,
+        json_yaml_only: bool = False,
+        supports_csv: bool = False,
+        extra_args: dict = None,
+    ):
+        """Register export/import arguments for iot ops ns asset commands."""
+        for asset_type in asset_types:
+            with self.argument_context(f"iot ops ns asset {asset_type} {resource} export") as ctx:
+                ctx.argument("extension", **_get_format_arg(json_yaml_only))
+                ctx.argument("output_dir", **_get_output_dir_arg())
+                for name, kwargs in (extra_args or {}).items():
+                    ctx.argument(name, **kwargs)
+
+            with self.argument_context(f"iot ops ns asset {asset_type} {resource} import") as ctx:
+                ctx.argument("file_path", **_get_input_file_arg(supports_csv))
+                for name, kwargs in (extra_args or {}).items():
+                    ctx.argument(name, **kwargs)
 
     with self.argument_context("iot ops asset") as context:
         context.argument(
@@ -1963,3 +2002,26 @@ def load_adr_arguments(self, _):
             options_list=["--config"],
             help="Custom action configuration as a JSON string or file path. ",
         )
+
+    # Register export/import arguments for ns asset commands
+    _register_export_import_args(["custom", "opcua", "rest", "sse", "mqtt"], "dataset")
+    _register_export_import_args(["custom", "opcua"], "datapoint", supports_csv=True)
+    _register_export_import_args(["custom", "opcua", "onvif", "sse"], "event-group")
+    _register_export_import_args(
+        ["custom", "opcua", "onvif", "sse"], "event", supports_csv=True,
+        extra_args={"event_group_name": {"options_list": ["--event-group", "--eg"], "help": "Event-group name."}},
+    )
+
+    with self.argument_context("iot ops ns asset opcua event add") as context:
+        context.argument("queue_size", options_list=["--queue-size", "--qs"], help="Queue size.", type=int)
+        context.argument(
+            "sampling_interval", options_list=["--sampling-interval", "--si"],
+            help="Sampling interval in milliseconds.", type=int,
+        )
+
+    _register_export_import_args(["custom", "media"], "stream", json_yaml_only=True)
+    _register_export_import_args(["custom", "opcua", "onvif"], "mgmt-group", json_yaml_only=True)
+    _register_export_import_args(
+        ["custom", "opcua"], "mgmt-action", supports_csv=True,
+        extra_args={"group_name": {"options_list": ["--group"], "help": "Management group name."}},
+    )
