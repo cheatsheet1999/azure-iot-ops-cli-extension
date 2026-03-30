@@ -12,7 +12,7 @@ name = "azure-iot-ops"
 dynamic = ["version"]
 description = "The Azure IoT Operations extension for Azure CLI."
 readme = { text = "The Azure IoT Operations extension for Azure CLI. Intended for power users and/or automation of Azure IoT Operations solutions at scale.", content-type = "text/plain" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Microsoft", email = "iotupx@microsoft.com" }]
 classifiers = [
@@ -22,7 +22,6 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
