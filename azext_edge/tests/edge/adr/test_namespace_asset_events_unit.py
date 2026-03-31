@@ -24,6 +24,7 @@ from azext_edge.edge.commands_namespaces import (
     update_namespace_opcua_asset_event_group,
     update_namespace_sse_asset_event_group,
     add_namespace_custom_asset_event_group_event,
+    add_namespace_onvif_asset_event_group_event,
     add_namespace_opcua_asset_event_group_event,
     add_namespace_sse_asset_event_group_event,
     list_namespace_asset_event_group_events,
@@ -160,10 +161,12 @@ def test_add_namespace_asset_event_group(
     # Add optional configuration parameters based on test case
     if config_params:
         if asset_type == "opcua":
-            expected_group["eventGroupConfiguration"] = json.dumps({
-                "publishingInterval": config_params["opcua_event_publishing_interval"],
-                "queueSize": config_params["opcua_event_queue_size"],
-            })
+            opcua_config = {}
+            if "opcua_event_publishing_interval" in config_params:
+                opcua_config["publishingInterval"] = config_params["opcua_event_publishing_interval"]
+            if "opcua_event_queue_size" in config_params:
+                opcua_config["queueSize"] = config_params["opcua_event_queue_size"]
+            expected_group["eventGroupConfiguration"] = json.dumps(opcua_config)
         elif asset_type == "custom":
             expected_group["eventGroupConfiguration"] = config_params.get("event_custom_configuration")
 
@@ -770,10 +773,12 @@ def test_update_namespace_asset_event_group(
             expected_group["eventGroupConfiguration"] = unique_reqs["event_custom_configuration"]
             expected_group["typeRef"] = unique_reqs.get("type_ref")
         elif asset_type == "opcua":
-            expected_group["eventGroupConfiguration"] = json.dumps({
-                "publishingInterval": unique_reqs.get("opcua_event_publishing_interval"),
-                "queueSize": unique_reqs.get("opcua_event_queue_size")
-            })
+            opcua_config = {}
+            if "opcua_event_publishing_interval" in unique_reqs:
+                opcua_config["publishingInterval"] = unique_reqs.get("opcua_event_publishing_interval")
+            if "opcua_event_queue_size" in unique_reqs:
+                opcua_config["queueSize"] = unique_reqs.get("opcua_event_queue_size")
+            expected_group["eventGroupConfiguration"] = json.dumps(opcua_config)
 
     # Update destinations if specified
     if "event_destinations" in common_reqs:
@@ -901,6 +906,18 @@ def test_update_namespace_asset_event_group(
         add_namespace_opcua_asset_event_group_event,
         {}
     ),
+    # ONVIF asset event with minimal parameters
+    (
+        "onvif",
+        add_namespace_onvif_asset_event_group_event,
+        {}
+    ),
+    # ONVIF asset event with data source and type_ref
+    (
+        "onvif",
+        add_namespace_onvif_asset_event_group_event,
+        {"type_ref": f"onvif{randint(0, 100)}"}
+    ),
     # SSE asset event point with event destinations (event-driven, no sampling intervals)
     (
         "sse",
@@ -1018,6 +1035,10 @@ def test_add_namespace_asset_event_group_event(
             config["samplingInterval"] = config_params["sampling_interval"]
         if config:
             expected_event["eventConfiguration"] = json.dumps(config)
+    elif asset_type == "onvif":
+        # ONVIF events support type_ref; no configuration schema
+        expected_event["typeRef"] = config_params.get("type_ref")
+        expected_event["eventConfiguration"] = "{}"
     elif asset_type == "sse":
         # SSE events support type_ref and event destinations
         expected_event["typeRef"] = config_params.get("type_ref")

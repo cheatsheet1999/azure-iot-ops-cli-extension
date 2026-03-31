@@ -177,7 +177,7 @@ class DeviceRegistryMgmtApiVersion(Enum):
     V20240901_preview = "2024-09-01-preview"
 
 
-DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION = DeviceRegistryMgmtApiVersion.V20260201_preview
+DEFAULT_DEVICEREGISTRY_MGMT_API_VERSION = DeviceRegistryMgmtApiVersion.V20260401
 
 
 def get_registry_mgmt_client(
@@ -300,10 +300,10 @@ def wait_for_terminal_state(poller: "LROPoller", wait_sec: int = POLL_WAIT_SEC, 
     # resource client does not handle sigint well
     counter = 0
     while counter < POLL_RETRIES:
-        sleep(wait_sec)
-        counter = counter + 1
         if poller.done():
             break
+        sleep(wait_sec)
+        counter = counter + 1
     return poller.result()
 
 
@@ -312,11 +312,11 @@ def wait_for_terminal_states(
 ) -> Tuple["LROPoller"]:
     counter = 0
     while counter < retries:
-        sleep(wait_sec)
-        counter = counter + 1
         batch_done = all(poller.done() for poller in pollers)
         if batch_done:
             break
+        sleep(wait_sec)
+        counter = counter + 1
 
     return pollers
 

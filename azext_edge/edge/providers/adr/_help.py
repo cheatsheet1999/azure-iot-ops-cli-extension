@@ -515,6 +515,45 @@ def load_iotops_adr_help():
     """
 
     helps[
+        "iot ops ns mgmt-endpoint"
+    ] = """
+        type: group
+        short-summary: Manage management endpoints on Device Registry namespaces.
+        long-summary: |
+          Management endpoints are configured by `az iot ops mgmt-actions enable` and
+          associate an Event Grid namespace with a custom location scope.
+    """
+
+    helps[
+        "iot ops ns mgmt-endpoint remove"
+    ] = """
+        type: command
+        short-summary: Remove a management endpoint entry from a Device Registry namespace.
+        long-summary: |
+          Removes a single management endpoint entry from the ADR namespace.
+          This is useful for targeted cleanup when full `mgmt-actions disable` teardown
+          is not appropriate — for example, when switching Event Grid namespaces,
+          cleaning up after an externally deleted Event Grid namespace, or removing
+          management actions configuration for a specific custom location scope without
+          tearing down the full infrastructure.
+
+          Use `az iot ops ns show` to inspect available endpoint keys under
+          properties.management.endpoints.
+
+        examples:
+        - name: Remove a management endpoint entry by key.
+          text: >
+            az iot ops ns mgmt-endpoint remove -n mynamespace -g myResourceGroup
+            --endpoint-key $CUSTOM_LOCATION_RESOURCE_ID
+
+        - name: Remove a management endpoint entry without confirmation prompt.
+          text: >
+            az iot ops ns mgmt-endpoint remove -n mynamespace -g myResourceGroup
+            --endpoint-key $CUSTOM_LOCATION_RESOURCE_ID
+            -y
+    """
+
+    helps[
         "iot ops ns device"
     ] = """
         type: group
@@ -809,6 +848,10 @@ def load_iotops_adr_help():
         - name: Add an OPC UA endpoint with security settings and asset discovery enabled
           text: >
             az iot ops ns device endpoint inbound add opcua --device mydevice --instance myInstance -g myInstanceResourceGroup --name myOPCUAEndpoint --endpoint-address "opc.tcp://192.168.1.100:4840" --security-policy "Basic256Sha256" --security-mode "SignAndEncrypt" --run-asset-discovery
+
+        - name: Add an OPC UA endpoint with asset discovery and property sync to state store enabled
+          text: >
+            az iot ops ns device endpoint inbound add opcua --device mydevice --instance myInstance -g myInstanceResourceGroup --name myOPCUAEndpoint --endpoint-address "opc.tcp://192.168.1.100:4840" --run-asset-discovery --sync-props-into-dss
     """
 
     helps[
@@ -1963,6 +2006,64 @@ def load_iotops_adr_help():
     """
 
     helps[
+        "iot ops ns asset onvif event"
+    ] = """
+        type: group
+        short-summary: Manage individual events for ONVIF asset event groups in Device Registry namespaces.
+    """
+
+    helps[
+        "iot ops ns asset onvif event add"
+    ] = """
+        type: command
+        short-summary: Add an event to an ONVIF asset event group in a Device Registry namespace.
+
+        examples:
+        - name: Add a basic ONVIF event
+          text: >
+            az iot ops ns asset onvif event add --asset myonvifasset --instance myInstance
+            -g myInstanceResourceGroup --event-group motionEvents --name motion --data-source "camera.motion"
+
+        - name: Add an ONVIF event with MQTT destination
+          text: >
+            az iot ops ns asset onvif event add --asset myonvifasset --instance myInstance
+            -g myInstanceResourceGroup --event-group motionEvents --name intrusion --data-source "camera.intrusion"
+            --dest topic="factory/onvif/events" retain=Keep qos=Qos1 ttl=3600
+
+        - name: Replace an ONVIF event with same name (all properties must be re-specified)
+          text: >
+            az iot ops ns asset onvif event add --asset myonvifasset --instance myInstance
+            -g myInstanceResourceGroup --event-group motionEvents --name intrusion --data-source "camera.intrusion.v2"
+            --dest topic="factory/onvif/events" retain=Keep qos=Qos1 ttl=3600 --replace
+    """
+
+    helps[
+        "iot ops ns asset onvif event list"
+    ] = """
+        type: command
+        short-summary: List events for an ONVIF asset event group in a Device Registry namespace.
+
+        examples:
+        - name: List all events for an event group
+          text: >
+            az iot ops ns asset onvif event list --asset myonvifasset --instance myInstance
+            -g myInstanceResourceGroup --event-group motionEvents
+    """
+
+    helps[
+        "iot ops ns asset onvif event remove"
+    ] = """
+        type: command
+        short-summary: Remove an event from an ONVIF asset event group in a Device Registry namespace.
+
+        examples:
+        - name: Remove an event from an event group
+          text: >
+            az iot ops ns asset onvif event remove --asset myonvifasset --instance myInstance
+            -g myInstanceResourceGroup --event-group motionEvents --name motion
+    """
+
+    helps[
         "iot ops ns asset onvif mgmt-group"
     ] = """
         type: group
@@ -2092,6 +2193,18 @@ def load_iotops_adr_help():
             --device myOpcuaDevice --endpoint myOpcuaEndpoint
             --dataset-dest topic="factory/opcua/data" retain=Keep qos=Qos1 ttl=3600
             --event-dest topic="factory/opcua/events" retain=Never qos=Qos1 ttl=3600
+
+        - name: Create an OPC UA asset with start instances for datasets and events
+          text: >
+            az iot ops ns asset opcua create --name myopcuaasset --instance myInstance -g myInstanceResourceGroup
+            --device myOpcuaDevice --endpoint myOpcuaEndpoint --dataset-start-inst "ns=2;i=1001"
+            --event-start-inst "ns=3;i=3001"
+
+        - name: Create an OPC UA asset with event filter configuration
+          text: >
+            az iot ops ns asset opcua create --name myopcuaasset --instance myInstance -g myInstanceResourceGroup
+            --device myOpcuaDevice --endpoint myOpcuaEndpoint --event-filter-type "ns=2;i=5001"
+            --event-filter-clause path="/EventType" type="ns=2;i=5001"
     """
 
     helps[
@@ -2129,6 +2242,11 @@ def load_iotops_adr_help():
             az iot ops ns asset opcua update --name myopcuaasset --instance myInstance -g myInstanceResourceGroup
             --manufacturer "Automation Corp" --model "PLC-2000" --serial-number "PLC87654"
             --attribute location=factory-floor zone="production line"
+
+        - name: Update an OPC UA asset's start instances for datasets and events
+          text: >
+            az iot ops ns asset opcua update --name myopcuaasset --instance myInstance -g myInstanceResourceGroup
+            --dataset-start-inst "ns=2;i=1001" --event-start-inst "ns=3;i=3001"
     """
 
     helps[
@@ -2174,6 +2292,12 @@ def load_iotops_adr_help():
             az iot ops ns asset opcua dataset add --asset myopcuaasset --instance myInstance
             -g myInstanceResourceGroup --name temperatureData --data-source "ns=3;s=NewTemperature"
             --replace
+
+        - name: Add an OPC UA dataset with a start instance
+          text: >
+            az iot ops ns asset opcua dataset add --asset myopcuaasset --instance myInstance
+            -g myInstanceResourceGroup --name temperatureData --data-source "ns=2;s=Temperature"
+            --start-inst "ns=2;i=1001"
     """
 
     helps[
@@ -2238,6 +2362,11 @@ def load_iotops_adr_help():
             az iot ops ns asset opcua dataset update --asset myopcuaasset --instance myInstance
             -g myInstanceResourceGroup --name temperatureData
             --dest topic="factory/opcua/updated/temperature" retain=Never qos=Qos0 ttl=7200
+
+        - name: Update the start instance for a dataset
+          text: >
+            az iot ops ns asset opcua dataset update --asset myopcuaasset --instance myInstance
+            -g myInstanceResourceGroup --name temperatureData --start-inst "ns=2;i=2001"
     """
 
     helps[
@@ -2334,6 +2463,18 @@ def load_iotops_adr_help():
             az iot ops ns asset opcua event-group add --asset myopcuaasset --instance myInstance
             -g myInstanceResourceGroup --name alarmEvent --data-source "ns=3;i=1000"
             --replace
+
+        - name: Add an OPC UA event group with a start instance
+          text: >
+            az iot ops ns asset opcua event-group add --asset myopcuaasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmEvent --data-source "ns=2;i=1000"
+            --start-inst "ns=3;i=3001"
+
+        - name: Add an OPC UA event group with filter type and filter clauses
+          text: >
+            az iot ops ns asset opcua event-group add --asset myopcuaasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmEvent --data-source "ns=2;i=1000"
+            --filter-type "ns=2;i=5001" --filter-clause path="/EventType" type="ns=2;i=5001"
     """
 
     helps[
@@ -2392,6 +2533,76 @@ def load_iotops_adr_help():
             az iot ops ns asset opcua event-group update --asset myopcuaasset --instance myInstance
             -g myInstanceResourceGroup --name systemEvent
             --dest topic="factory/opcua/system/updated" retain=Never qos=Qos1 ttl=3600
+
+        - name: Update event group start instance and filter configuration
+          text: >
+            az iot ops ns asset opcua event-group update --asset myopcuaasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmEvent --start-inst "ns=3;i=4001"
+            --filter-type "ns=2;i=5002" --filter-clause path="/Severity" type="ns=2;i=5002"
+    """
+
+    helps[
+        "iot ops ns asset opcua event"
+    ] = """
+        type: group
+        short-summary: Manage individual events for OPC UA asset event groups in Device Registry namespaces.
+    """
+
+    helps[
+        "iot ops ns asset opcua event add"
+    ] = """
+        type: command
+        short-summary: Add an event to an OPC UA asset event group in a Device Registry namespace.
+
+        examples:
+        - name: Add a basic OPC UA event
+          text: >
+            az iot ops ns asset opcua event add --asset myopcuaasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --name severity --data-source "alarm.severity"
+
+        - name: Add an OPC UA event with sampling interval and queue size
+          text: >
+            az iot ops ns asset opcua event add --asset myopcuaasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --name pressure --data-source "alarm.pressure"
+            --sampling-int 500 --queue-size 5
+
+        - name: Replace an OPC UA event with same name
+          text: >
+            az iot ops ns asset opcua event add --asset myopcuaasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --name severity --data-source "alarm.severity.updated"
+            --replace
+
+        - name: Add an OPC UA event with filter type and filter clauses
+          text: >
+            az iot ops ns asset opcua event add --asset myopcuaasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --name criticalAlarm --data-source "alarm.critical"
+            --filter-type "ns=2;i=5001" --filter-clause path="/EventType" type="ns=2;i=5001"
+    """
+
+    helps[
+        "iot ops ns asset opcua event list"
+    ] = """
+        type: command
+        short-summary: List events for an OPC UA asset event group in a Device Registry namespace.
+
+        examples:
+        - name: List all events for an event group
+          text: >
+            az iot ops ns asset opcua event list --asset myopcuaasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup
+    """
+
+    helps[
+        "iot ops ns asset opcua event remove"
+    ] = """
+        type: command
+        short-summary: Remove an event from an OPC UA asset event group in a Device Registry namespace.
+
+        examples:
+        - name: Remove an event from an event group
+          text: >
+            az iot ops ns asset opcua event remove --asset myopcuaasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --name severity
     """
 
     helps[
@@ -3234,3 +3445,169 @@ def load_iotops_adr_help():
             -g myInstanceResourceGroup --name sensorData
             --dest topic="updated/mqtt/topic" retain=Never qos=Qos0 ttl=1800
     """
+
+    for asset_type in ["custom", "opcua", "rest", "sse", "mqtt"]:
+        helps[
+            f"iot ops ns asset {asset_type} dataset export"
+        ] = """
+            type: command
+            short-summary: Export datasets to file.
+            long-summary: Export all datasets from an asset to JSON or YAML format.
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} dataset import"
+        ] = """
+            type: command
+            short-summary: Import datasets from file.
+            long-summary: Import datasets from JSON or YAML file. Use --replace to merge with overwrite.
+        """
+
+    for asset_type in ["custom", "opcua"]:
+        helps[
+            f"iot ops ns asset {asset_type} datapoint export"
+        ] = """
+            type: command
+            short-summary: Export datapoints to file.
+            long-summary: Export datapoints from a dataset to JSON, YAML, or CSV format.
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} datapoint import"
+        ] = """
+            type: command
+            short-summary: Import datapoints from file.
+            long-summary: Import datapoints from JSON, YAML, or CSV file. Use --replace to merge with overwrite.
+        """
+
+    for asset_type in ["custom", "opcua", "onvif", "sse"]:
+        helps[
+            f"iot ops ns asset {asset_type} event-group export"
+        ] = """
+            type: command
+            short-summary: Export event-groups to file.
+            long-summary: Export all event-groups from an asset to JSON or YAML format.
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} event-group import"
+        ] = """
+            type: command
+            short-summary: Import event-groups from file.
+            long-summary: Import event-groups from JSON or YAML file. Use --replace to merge with overwrite.
+        """
+
+    for asset_type in ["custom", "opcua", "onvif", "sse"]:
+        helps[
+            f"iot ops ns asset {asset_type} event export"
+        ] = """
+            type: command
+            short-summary: Export events to file.
+            long-summary: Export events from an event-group to JSON, YAML, or CSV format.
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} event import"
+        ] = """
+            type: command
+            short-summary: Import events from file.
+            long-summary: Import events from JSON, YAML, or CSV file. Use --replace to merge with overwrite.
+        """
+
+    for asset_type in ["custom", "media"]:
+        helps[
+            f"iot ops ns asset {asset_type} stream export"
+        ] = f"""
+            type: command
+            short-summary: Export streams to file.
+            long-summary: Export all streams from an asset to JSON or YAML format.
+                Destinations are stripped on export and auto-assigned on import.
+            examples:
+            - name: Export streams to JSON.
+              text: >
+                az iot ops ns asset {asset_type} stream export -a myasset --instance myinstance -g myresourcegroup
+            - name: Export streams to YAML in a specific directory.
+              text: >
+                az iot ops ns asset {asset_type} stream export -a myasset --instance myinstance -g myresourcegroup -f yaml --od /path/to/output
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} stream import"
+        ] = f"""
+            type: command
+            short-summary: Import streams from file.
+            long-summary: Import streams from JSON or YAML file. Use --replace to merge with overwrite.
+                Destinations are auto-assigned from asset defaults if not specified in the file.
+            examples:
+            - name: Import streams from JSON file.
+              text: >
+                az iot ops ns asset {asset_type} stream import -a myasset --instance myinstance -g myresourcegroup --if /path/to/streams.json
+            - name: Import streams with replace mode.
+              text: >
+                az iot ops ns asset {asset_type} stream import -a myasset --instance myinstance -g myresourcegroup --if /path/to/streams.json --replace
+        """
+
+    for asset_type in ["custom", "opcua", "onvif"]:
+        helps[
+            f"iot ops ns asset {asset_type} mgmt-group export"
+        ] = f"""
+            type: command
+            short-summary: Export management groups to file.
+            long-summary: Export all management groups from an asset to JSON or YAML format.
+                Actions are not included in the export (use mgmt-action export separately).
+            examples:
+            - name: Export management groups to JSON.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-group export -a myasset --instance myinstance -g myresourcegroup
+            - name: Export management groups to YAML.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-group export -a myasset --instance myinstance -g myresourcegroup -f yaml
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} mgmt-group import"
+        ] = f"""
+            type: command
+            short-summary: Import management groups from file.
+            long-summary: Import management groups from JSON or YAML file. Use --replace to merge with overwrite.
+                Existing actions are preserved when merging management groups.
+            examples:
+            - name: Import management groups from JSON file.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-group import -a myasset --instance myinstance -g myresourcegroup --if /path/to/mgmt_groups.json
+            - name: Import management groups with replace mode.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-group import -a myasset --instance myinstance -g myresourcegroup --if /path/to/mgmt_groups.yaml --replace
+        """
+
+    for asset_type in ["custom", "opcua"]:
+        helps[
+            f"iot ops ns asset {asset_type} mgmt-action export"
+        ] = f"""
+            type: command
+            short-summary: Export management actions to file.
+            long-summary: Export actions from a management group to JSON, YAML, or CSV format.
+            examples:
+            - name: Export actions to CSV.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-action export -a myasset --instance myinstance -g myresourcegroup --group mygroup -f csv
+            - name: Export actions to JSON.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-action export -a myasset --instance myinstance -g myresourcegroup --group mygroup
+        """
+
+        helps[
+            f"iot ops ns asset {asset_type} mgmt-action import"
+        ] = f"""
+            type: command
+            short-summary: Import management actions from file.
+            long-summary: Import actions from JSON, YAML, or CSV file. Use --replace to merge with overwrite.
+                Default actionType is 'Call' if not specified.
+            examples:
+            - name: Import actions from CSV file.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-action import -a myasset --instance myinstance -g myresourcegroup --group mygroup --if /path/to/actions.csv
+            - name: Import actions with replace mode.
+              text: >
+                az iot ops ns asset {asset_type} mgmt-action import -a myasset --instance myinstance -g myresourcegroup --group mygroup --if /path/to/actions.json --replace
+        """

@@ -30,6 +30,7 @@ class ConnectorMetadataValidator:
     _CONFIG_KEY_DATASET = "datasetConfiguration"
     _CONFIG_KEY_DATAPOINT = "dataPointConfiguration"
     _CONFIG_KEY_EVENT = "eventConfiguration"
+    _CONFIG_KEY_EVENT_GROUP = "eventGroupConfiguration"
 
     _SCHEMA_KEY_DATASET = "datasetConfigurationSchema"
     _SCHEMA_KEY_DATAPOINT = "dataPointConfigurationSchema"
@@ -42,9 +43,9 @@ class ConnectorMetadataValidator:
     _RESOURCE_KIND_DATASETS = "datasets"
     _RESOURCE_KIND_DATAPOINTS = "datapoints"
     _RESOURCE_KIND_EVENTS = "events"
+    _RESOURCE_KIND_EVENT_GROUPS = "event_groups"
 
     _ENDPOINT_TYPE_OPCUA = "microsoft.opcua"
-    _DEFAULT_DESTINATION_MQTT = "Mqtt"
 
     _SCHEMA_PATHS: Dict[str, Tuple[str, ...]] = {}
 
@@ -365,7 +366,7 @@ class ConnectorMetadataValidator:
     ) -> Optional[Dict[str, Any]]:
         """Parse JSON configuration from a resource payload. Returns None to skip validation."""
         if config_key not in data:
-            return default_if_empty if default_if_empty is not None else data
+            return default_if_empty or {}
 
         config_str = data.get(config_key)
         if not config_str:
@@ -432,7 +433,131 @@ class ConnectorMetadataValidator:
 
         schema = self._get_schema(self._SCHEMA_KEY_EVENT)
         self._validate(config, schema, "Event")
-        self._validate_and_apply_destination(config, self._RESOURCE_KIND_EVENTS)
+        self._validate_and_apply_destination(event, self._RESOURCE_KIND_EVENTS)
+
+    def validate_event_group(self, event_group: Dict[str, Any]) -> None:
+        """Validate an event-group configuration against the connector schema."""
+        if self.metadata is None:
+            logger.info("Skipping event-group validation: no connector metadata available.")
+            return
+
+        event_group_name = event_group.get('name', 'unnamed')
+
+        config = self._parse_config(
+            data=event_group,
+            config_key=self._CONFIG_KEY_EVENT_GROUP,
+            resource_name=f"event-group '{event_group_name}'",
+        )
+        if config is None:
+            return
+
+        schema = self._get_schema(self._SCHEMA_KEY_EVENT_GROUP)
+        self._validate(config, schema, "Event-group")
+
+    def validate_stream(self, stream: Dict[str, Any]) -> None:
+        """Validate a stream against field constraints.
+
+        Validates:
+        - name: required, 1-128 characters
+        """
+        name = stream.get("name", "")
+
+        if not name:
+            raise ValidationError("Stream name is required.")
+        if len(name) > 128:
+            raise ValidationError(
+                f"Stream name must be at most 128 characters. Got {len(name)} characters."
+            )
+
+        logger.debug(f"Stream '{name}' field validation passed.")
+
+    def validate_management_group(self, mgmt_group: Dict[str, Any]) -> None:
+        """Validate a management group against field constraints.
+
+        Validates:
+        - name: required, 1-128 characters
+        - defaultTopic: optional, max 128 characters
+        - defaultTimeoutInSeconds: optional, non-negative integer
+        """
+        name = mgmt_group.get("name", "")
+
+        if not name:
+            raise ValidationError("Management group name is required.")
+        if len(name) > 128:
+            raise ValidationError(
+                f"Management group name must be at most 128 characters. Got {len(name)} characters."
+            )
+
+        default_topic = mgmt_group.get("defaultTopic")
+        if default_topic and len(default_topic) > 128:
+            raise ValidationError(
+                f"Management group defaultTopic must be at most 128 characters. "
+                f"Got {len(default_topic)} characters."
+            )
+
+        timeout = mgmt_group.get("defaultTimeoutInSeconds")
+        if timeout is not None:
+            if not isinstance(timeout, int) or timeout < 0:
+                raise ValidationError(
+                    f"Management group defaultTimeoutInSeconds must be a non-negative integer. "
+                    f"Got: {timeout}"
+                )
+
+        logger.debug(f"Management group '{name}' field validation passed.")
+
+    def validate_action(self, action: Dict[str, Any]) -> None:
+        """Validate a management action against field constraints.
+
+        Validates:
+        - name: required, 1-128 characters
+        - targetUri: required, 1-512 characters
+        - topic: optional, max 128 characters
+        - timeoutInSeconds: optional, non-negative integer
+        - actionType: optional, must be 'Call', 'Read', or 'Write'
+        """
+        name = action.get("name", "")
+        target_uri = action.get("targetUri", "")
+
+        # Required field: name
+        if not name:
+            raise ValidationError("Action name is required.")
+        if len(name) > 128:
+            raise ValidationError(
+                f"Action name must be at most 128 characters. Got {len(name)} characters."
+            )
+
+        # Required field: targetUri
+        if not target_uri:
+            raise ValidationError("Action targetUri is required.")
+        if len(target_uri) > 512:
+            raise ValidationError(
+                f"Action targetUri must be at most 512 characters. Got {len(target_uri)} characters."
+            )
+
+        # Optional field: topic
+        topic = action.get("topic")
+        if topic and len(topic) > 128:
+            raise ValidationError(
+                f"Action topic must be at most 128 characters. Got {len(topic)} characters."
+            )
+
+        # Optional field: timeoutInSeconds
+        timeout = action.get("timeoutInSeconds")
+        if timeout is not None:
+            if not isinstance(timeout, int) or timeout < 0:
+                raise ValidationError(
+                    f"Action timeoutInSeconds must be a non-negative integer. Got: {timeout}"
+                )
+
+        # Optional field: actionType
+        action_type = action.get("actionType")
+        valid_action_types = ["Call", "Read", "Write"]
+        if action_type and action_type not in valid_action_types:
+            raise ValidationError(
+                f"Action actionType must be one of {valid_action_types}. Got: '{action_type}'"
+            )
+
+        logger.debug(f"Action '{name}' field validation passed.")
 
     def _get_schema(self, schema_key: str) -> Dict[str, Any]:
         """Extract a schema from endpoint metadata by key."""
@@ -492,8 +617,12 @@ class ConnectorMetadataValidator:
             f"Available inbound endpoints: {available or 'none found'}"
         )
 
-    def _validate_and_apply_destination(self, config: Dict[str, Any], resource_kind: str) -> None:
-        """Validate destination and auto-fill if not specified. Modifies config in-place."""
+    def _validate_and_apply_destination(self, resource: Dict[str, Any], resource_kind: str) -> None:
+        """Validate existing destinations against connector metadata.
+
+        If destinations are present, validates that each target is in the
+        supported list.  If destinations are absent, leaves them unset so
+        that callers (e.g. import fallback) can apply proper defaults."""
         endpoint = self._get_endpoint_metadata()
 
         if resource_kind == self._RESOURCE_KIND_DATASETS:
@@ -511,31 +640,34 @@ class ConnectorMetadataValidator:
         supported = dest_meta.get("supportedDestinations")
         default_dest = dest_meta.get("defaultDestination")
 
-        if supported is not None and not isinstance(supported, list):
+        # If no supportedDestinations in metadata, do nothing
+        if not supported:
+            return
+
+        if not isinstance(supported, list):
             raise ValidationError("supportedDestinations must be an array if specified in connector metadata.")
-        if supported and default_dest is not None and default_dest not in supported:
+        if default_dest is not None and default_dest not in supported:
             raise ValidationError(
                 f"defaultDestination '{default_dest}' is not listed in supportedDestinations: {supported}"
             )
 
-        destination_value = config.get("destination")
+        # Check if resource already has destinations
+        existing_destinations = resource.get("destinations")
 
-        if destination_value is None:
-            if default_dest is not None:
-                config["destination"] = default_dest
-                return
-            if supported:
-                if self._DEFAULT_DESTINATION_MQTT in supported:
-                    config["destination"] = self._DEFAULT_DESTINATION_MQTT
-                    return
-                config["destination"] = supported[0]
-                return
+        if existing_destinations is not None:
+            # Validate existing destinations
+            if not isinstance(existing_destinations, list):
+                raise ValidationError("destinations must be an array.")
+            for dest in existing_destinations:
+                target = dest.get("target") if isinstance(dest, dict) else None
+                if target and target not in supported:
+                    raise ValidationError(
+                        f"Destination target '{target}' is not supported. Supported: {supported}"
+                    )
             return
 
-        if supported and destination_value not in supported:
-            raise ValidationError(
-                f"Destination '{destination_value}' is not supported. Supported: {supported}"
-            )
+        # No destinations specified — leave absent.
+        # Downstream logic (import fallback or API defaults) will handle assignment.
 
     def _validate(self, instance: Dict[str, Any], schema: Dict[str, Any], resource_name: str) -> None:
         import jsonschema

@@ -8,7 +8,7 @@ import pytest
 from typing import List
 
 from ...generators import generate_random_string
-from ...helpers import run
+from ...helpers import run, wait_for_expected_count
 from .namespace_helpers import create_config_file, assert_point_properties, assert_dataset_properties
 
 
@@ -16,43 +16,18 @@ pytestmark = [pytest.mark.rpsaas, pytest.mark.long_running]
 
 
 def test_namespace_custom_asset_dataset_lifecycle_operations(
-    require_init, tracked_resources: List[str], tracked_files: List[str]
+    asset_factory, tracked_files: List[str]
 ):
     """Test complete lifecycle of custom asset dataset and datapoint operations."""
-    # Setup test variables
-    instance_name = require_init["instanceName"]
-    resource_group = require_init["resourceGroup"]
-    device_name = f"dev-{generate_random_string(8, force_lower=True)}"
-    endpoint_name = f"custom-{generate_random_string(8)}"
-    asset_name = f"custom-{generate_random_string(8, force_lower=True)}"
+    # Setup from shared fixtures
+    info = asset_factory("custom")
+    asset_name = info["name"]
+    instance_name = info["instanceName"]
+    resource_group = info["resourceGroup"]
     dataset_name_1 = f"dataset{generate_random_string(6, force_lower=True)}"
     dataset_name_2 = f"dataset2{generate_random_string(6, force_lower=True)}"
     datapoint_name_1 = f"dp1-{generate_random_string(6, force_lower=True)}"
     datapoint_name_2 = f"dp2-{generate_random_string(6, force_lower=True)}"
-
-    # Create Device
-    result = run(
-        f"az iot ops ns device create --name {device_name} --instance {instance_name} "
-        f"-g {resource_group}"
-    )
-    tracked_resources.append(result["id"])
-
-    # Create device endpoint
-    run(
-        f"az iot ops ns device endpoint inbound add custom --name {endpoint_name} "
-        f"--instance {instance_name} -g {resource_group} --device {device_name} "
-        f"--endpoint-address 'http://192.168.1.100:8000/custom/service' "
-        "--endpoint-type custom"
-    )
-
-    # Create Custom asset
-    asset_custom = run(
-        f"az iot ops ns asset custom create --name {asset_name} --instance {instance_name} "
-        f"-g {resource_group} --device {device_name} --endpoint {endpoint_name} "
-        f"--description \"Custom Device for Dataset Testing\" --display \"Multi-Sensor Dataset\" "
-        f"--model \"Custom-DS100\" --manufacturer \"CustomDevices\""
-    )
-    tracked_resources.append(asset_custom["id"])
 
     # 1. CREATE DATASET
     dataset_destinations = "topic=factory/temperature qos=Qos1 retain=Keep ttl=3600"
@@ -189,14 +164,27 @@ def test_namespace_custom_asset_dataset_lifecycle_operations(
     )
 
     # 7. LIST DATASET DATAPOINTS
-    datapoints_list = run(
-        f"az iot ops ns asset custom datapoint list --asset {asset_name} "
-        f"--instance {instance_name} -g {resource_group} --dataset {dataset_name_1}"
+    datapoints_list = wait_for_expected_count(
+        list_cmd=(
+            f"az iot ops ns asset custom datapoint list --asset {asset_name} "
+            f"--instance {instance_name} -g {resource_group} --dataset {dataset_name_1}"
+        ),
+        expected_count=2,
+        expected_names=[datapoint_name_1, datapoint_name_2],
+        reissue_cmds={
+            datapoint_name_1: (
+                f"az iot ops ns asset custom datapoint add --asset {asset_name} "
+                f"--instance {instance_name} -g {resource_group} --dataset {dataset_name_1} "
+                f"--name {datapoint_name_1} --data-source {datapoint_data_source_1}"
+            ),
+            datapoint_name_2: (
+                f"az iot ops ns asset custom datapoint add --asset {asset_name} "
+                f"--instance {instance_name} -g {resource_group} --dataset {dataset_name_1} "
+                f"--name {datapoint_name_2} --data-source {datapoint_data_source_2}"
+            ),
+        },
     )
 
-    datapoint_names = [dp["name"] for dp in datapoints_list]
-    assert datapoint_name_1 in datapoint_names
-    assert datapoint_name_2 in datapoint_names
     assert len(datapoints_list) >= 2
 
     # 8. TEST DATAPOINT REPLACE FUNCTIONALITY
@@ -250,46 +238,23 @@ def test_namespace_custom_asset_dataset_lifecycle_operations(
     assert dataset_name_1 not in remaining_dataset_names
 
 
-def test_namespace_opcua_asset_dataset_lifecycle_operations(require_init, tracked_resources: List[str]):
+def test_namespace_opcua_asset_dataset_lifecycle_operations(asset_factory):
     """Test complete lifecycle of OPCUA asset dataset and datapoint operations."""
-    # Setup test variables
-    instance_name = require_init["instanceName"]
-    resource_group = require_init["resourceGroup"]
-    device_name = f"dev-{generate_random_string(8, force_lower=True)}"
-    endpoint_name = f"opcua-{generate_random_string(8)}"
-    asset_name = f"opcua-{generate_random_string(8, force_lower=True)}"
+    # Setup from shared fixtures
+    info = asset_factory("opcua")
+    asset_name = info["name"]
+    instance_name = info["instanceName"]
+    resource_group = info["resourceGroup"]
     dataset_name_1 = f"dataset{generate_random_string(6, force_lower=True)}"
     dataset_name_2 = f"dataset2{generate_random_string(6, force_lower=True)}"
     datapoint_name_1 = f"dp1-{generate_random_string(6, force_lower=True)}"
     datapoint_name_2 = f"dp2-{generate_random_string(6, force_lower=True)}"
 
-    # Create Device
-    result = run(
-        f"az iot ops ns device create --name {device_name} --instance {instance_name} "
-        f"-g {resource_group}"
-    )
-    tracked_resources.append(result["id"])
-
-    # Create device endpoint
-    run(
-        f"az iot ops ns device endpoint inbound add opcua --name {endpoint_name} "
-        f"--instance {instance_name} -g {resource_group} --device {device_name} "
-        f"--endpoint-address 'opc.tcp://192.168.1.200:4840/OPCUA/Server'"
-    )
-
-    # Create OPCUA asset
-    asset_opcua = run(
-        f"az iot ops ns asset opcua create --name {asset_name} --instance {instance_name} "
-        f"-g {resource_group} --device {device_name} --endpoint {endpoint_name} "
-        f"--description \"OPCUA Device for Dataset Testing\" --display \"OPC Temperature Sensor\" "
-        f"--model \"OPC-DS200\" --manufacturer \"OPCDevices\""
-    )
-    tracked_resources.append(asset_opcua["id"])
-
     # 1. CREATE DATASET
     dataset_destinations = "topic=factory/opcua/temperature qos=Qos1 retain=Keep ttl=3600"
 
     # Add OPCUA asset dataset with specific OPCUA parameters
+    start_instance = "ns=2;i=1001"
     dataset_result = run(
         f"az iot ops ns asset opcua dataset add --asset {asset_name} "
         f"--instance {instance_name} -g {resource_group} --name {dataset_name_1} "
@@ -298,6 +263,7 @@ def test_namespace_opcua_asset_dataset_lifecycle_operations(require_init, tracke
         f"--sampling-int 500 "
         f"--queue-size 10 "
         f"--key-frame-count 5 "
+        f"--start-inst \"{start_instance}\" "
     )
 
     assert_dataset_properties(
@@ -305,6 +271,7 @@ def test_namespace_opcua_asset_dataset_lifecycle_operations(require_init, tracke
         name=dataset_name_1,
         asset_type="opcua",
         publishing_interval=1000,
+        opcua_configuration={"startInstance": start_instance},
     )
 
     # 2. LIST DATASETS
@@ -423,14 +390,27 @@ def test_namespace_opcua_asset_dataset_lifecycle_operations(require_init, tracke
     )
 
     # 7. LIST DATASET DATAPOINTS
-    datapoints_list = run(
-        f"az iot ops ns asset opcua datapoint list --asset {asset_name} "
-        f"--instance {instance_name} -g {resource_group} --dataset {dataset_name_1}"
+    datapoints_list = wait_for_expected_count(
+        list_cmd=(
+            f"az iot ops ns asset opcua datapoint list --asset {asset_name} "
+            f"--instance {instance_name} -g {resource_group} --dataset {dataset_name_1}"
+        ),
+        expected_count=2,
+        expected_names=[datapoint_name_1, datapoint_name_2],
+        reissue_cmds={
+            datapoint_name_1: (
+                f'az iot ops ns asset opcua datapoint add --asset {asset_name} '
+                f'--instance {instance_name} -g {resource_group} --dataset {dataset_name_1} '
+                f'--name {datapoint_name_1} --data-source "{datapoint_data_source_1}"'
+            ),
+            datapoint_name_2: (
+                f'az iot ops ns asset opcua datapoint add --asset {asset_name} '
+                f'--instance {instance_name} -g {resource_group} --dataset {dataset_name_1} '
+                f'--name {datapoint_name_2} --data-source "{datapoint_data_source_2}"'
+            ),
+        },
     )
 
-    datapoint_names = [dp["name"] for dp in datapoints_list]
-    assert datapoint_name_1 in datapoint_names
-    assert datapoint_name_2 in datapoint_names
     assert len(datapoints_list) >= 2
 
     # 8. TEST DATAPOINT REPLACE FUNCTIONALITY
@@ -483,38 +463,14 @@ def test_namespace_opcua_asset_dataset_lifecycle_operations(require_init, tracke
     assert dataset_name_1 not in remaining_dataset_names
 
 
-def test_namespace_rest_asset_dataset_lifecycle_operations(require_init, tracked_resources: List[str]):
+def test_namespace_rest_asset_dataset_lifecycle_operations(asset_factory):
     """Test complete lifecycle of REST asset dataset operations."""
-    # Setup test variables
-    instance_name = require_init["instanceName"]
-    resource_group = require_init["resourceGroup"]
-    device_name = f"dev-{generate_random_string(8, force_lower=True)}"
-    endpoint_name = f"rest-{generate_random_string(8)}"
-    asset_name = f"rest-{generate_random_string(8, force_lower=True)}"
+    # Setup from shared fixtures
+    info = asset_factory("rest")
+    asset_name = info["name"]
+    instance_name = info["instanceName"]
+    resource_group = info["resourceGroup"]
     dataset_name_1 = f"dataset{generate_random_string(6, force_lower=True)}"
-
-    # Create Device
-    result = run(
-        f"az iot ops ns device create --name {device_name} --instance {instance_name} "
-        f"-g {resource_group}"
-    )
-    tracked_resources.append(result["id"])
-
-    # Create device endpoint
-    run(
-        f"az iot ops ns device endpoint inbound add rest --name {endpoint_name} "
-        f"--instance {instance_name} -g {resource_group} --device {device_name} "
-        f"--endpoint-address 'https://api.example.com/sensors/data'"
-    )
-
-    # Create REST asset
-    asset_rest = run(
-        f"az iot ops ns asset rest create --name {asset_name} --instance {instance_name} "
-        f"-g {resource_group} --device {device_name} --endpoint {endpoint_name} "
-        f"--description \"REST API for Dataset Testing\" --display \"Temperature API\" "
-        f"--model \"REST-API-v1\" --manufacturer \"APIDevices\""
-    )
-    tracked_resources.append(asset_rest["id"])
 
     # 1. CREATE DATASET
     dataset_destinations = "topic=factory/rest/temperature qos=Qos1 retain=Keep ttl=3600"
@@ -635,36 +591,14 @@ def test_namespace_rest_asset_dataset_lifecycle_operations(require_init, tracked
     assert dataset_name_1 not in remaining_dataset_names
 
 
-def test_namespace_sse_asset_dataset_lifecycle_operations(require_init, tracked_resources: List[str]):
+def test_namespace_sse_asset_dataset_lifecycle_operations(asset_factory):
     """Test complete lifecycle of SSE asset dataset operations."""
-    # Setup test variables
-    instance_name = require_init["instanceName"]
-    resource_group = require_init["resourceGroup"]
-    device_name = f"dev-{generate_random_string(8, force_lower=True)}"
-    endpoint_name = f"sse-{generate_random_string(8)}"
-    asset_name = f"sse-{generate_random_string(8, force_lower=True)}"
+    # Setup from shared fixtures
+    info = asset_factory("sse")
+    asset_name = info["name"]
+    instance_name = info["instanceName"]
+    resource_group = info["resourceGroup"]
     dataset_name_1 = f"dataset{generate_random_string(6, force_lower=True)}"
-
-    # Create Device
-    result = run(
-        f"az iot ops ns device create --name {device_name} --instance {instance_name} "
-        f"-g {resource_group}"
-    )
-    tracked_resources.append(result["id"])
-
-    # Create device endpoint
-    run(
-        f"az iot ops ns device endpoint inbound add sse --name {endpoint_name} "
-        f"--instance {instance_name} -g {resource_group} --device {device_name} "
-        f"--endpoint-address 'https://events.example.com/stream'"
-    )
-
-    # Create SSE asset
-    asset_sse = run(
-        f"az iot ops ns asset sse create --name {asset_name} --instance {instance_name} "
-        f"-g {resource_group} --device {device_name} --endpoint {endpoint_name}"
-    )
-    tracked_resources.append(asset_sse["id"])
 
     # 1. CREATE DATASET
     dataset_destinations = "topic=factory/sse/temperature qos=Qos1 retain=Keep ttl=3600"
@@ -784,36 +718,14 @@ def test_namespace_sse_asset_dataset_lifecycle_operations(require_init, tracked_
     assert dataset_name_1 not in remaining_dataset_names
 
 
-def test_namespace_mqtt_asset_dataset_lifecycle_operations(require_init, tracked_resources: List[str]):
+def test_namespace_mqtt_asset_dataset_lifecycle_operations(asset_factory):
     """Test complete lifecycle of MQTT asset dataset operations."""
-    # Setup test variables
-    instance_name = require_init["instanceName"]
-    resource_group = require_init["resourceGroup"]
-    device_name = f"dev-{generate_random_string(8, force_lower=True)}"
-    endpoint_name = f"mqtt-{generate_random_string(8)}"
-    asset_name = f"mqtt-{generate_random_string(8, force_lower=True)}"
+    # Setup from shared fixtures
+    info = asset_factory("mqtt")
+    asset_name = info["name"]
+    instance_name = info["instanceName"]
+    resource_group = info["resourceGroup"]
     dataset_name_1 = f"dataset{generate_random_string(6, force_lower=True)}"
-
-    # Create Device
-    result = run(
-        f"az iot ops ns device create --name {device_name} --instance {instance_name} "
-        f"-g {resource_group}"
-    )
-    tracked_resources.append(result["id"])
-
-    # Create device endpoint
-    run(
-        f"az iot ops ns device endpoint inbound add mqtt --name {endpoint_name} "
-        f"--instance {instance_name} -g {resource_group} --device {device_name} "
-        f"--endpoint-address 'aio-broker:18883'"
-    )
-
-    # Create MQTT asset
-    asset_mqtt = run(
-        f"az iot ops ns asset mqtt create --name {asset_name} --instance {instance_name} "
-        f"-g {resource_group} --device {device_name} --endpoint {endpoint_name}"
-    )
-    tracked_resources.append(asset_mqtt["id"])
 
     # 1. CREATE DATASET
     dataset_destinations = "topic=telemetry/mqtt/temperature qos=Qos1 retain=Keep ttl=3600"

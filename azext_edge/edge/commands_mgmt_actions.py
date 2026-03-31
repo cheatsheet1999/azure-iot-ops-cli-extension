@@ -13,11 +13,13 @@ def mgmt_actions_show(
     cmd,
     instance_name: str,
     resource_group_name: str,
+    no_progress: Optional[bool] = None,
     **kwargs,
 ) -> Dict:
     return MgmtActions(cmd).show(
         name=instance_name,
         resource_group_name=resource_group_name,
+        no_progress=no_progress,
         **kwargs,
     )
 
@@ -33,6 +35,8 @@ def mgmt_actions_enable(
     ops_role_ids: Optional[List[str]] = None,
     skip_role_assignments: Optional[bool] = None,
     dataflow_profile: Optional[str] = None,
+    registry_endpoint: Optional[str] = None,
+    no_progress: Optional[bool] = None,
     **kwargs,
 ) -> Dict:
     return MgmtActions(cmd).enable(
@@ -45,6 +49,8 @@ def mgmt_actions_enable(
         ops_role_ids=ops_role_ids,
         skip_role_assignments=skip_role_assignments,
         dataflow_profile=dataflow_profile,
+        registry_endpoint=registry_endpoint,
+        no_progress=no_progress,
         **kwargs,
     )
 
@@ -54,11 +60,55 @@ def mgmt_actions_disable(
     instance_name: str,
     resource_group_name: str,
     confirm_yes: Optional[bool] = None,
+    no_progress: Optional[bool] = None,
     **kwargs,
 ) -> None:
     return MgmtActions(cmd).disable(
         name=instance_name,
         resource_group_name=resource_group_name,
+        confirm_yes=confirm_yes,
+        no_progress=no_progress,
+        **kwargs,
+    )
+
+
+def mgmt_actions_execute(
+    cmd,
+    instance_name: str,
+    resource_group_name: str,
+    asset_name: str,
+    group_name: str,
+    action_name: str,
+    payload: Optional[str] = None,
+    no_validate: bool = False,
+    show_schema: bool = False,
+    **kwargs,
+) -> Dict:
+    return MgmtActions(cmd).execute(
+        instance_name=instance_name,
+        resource_group_name=resource_group_name,
+        asset_name=asset_name,
+        group_name=group_name,
+        action_name=action_name,
+        payload=payload,
+        no_validate=no_validate,
+        show_schema=show_schema,
+        **kwargs,
+    )
+
+
+def mgmt_actions_remove_ns_mgmt_endpoint(
+    cmd,
+    namespace_name: str,
+    resource_group_name: str,
+    endpoint_key: str,
+    confirm_yes: Optional[bool] = None,
+    **kwargs,
+) -> None:
+    return MgmtActions(cmd).remove_management_endpoint(
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        endpoint_key=endpoint_key,
         confirm_yes=confirm_yes,
         **kwargs,
     )

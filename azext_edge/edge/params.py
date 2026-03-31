@@ -1423,6 +1423,23 @@ def load_iotops_arguments(self, _):
                 arg_type=get_three_state_flag(),
                 help="Disable pre-flight checks such as resource provider registration and cluster health validation.",
             )
+            context.argument(
+                "health_checks_max",
+                options_list=["--health-checks-max"],
+                type=int,
+                help="Maximum number of cluster health checks to perform before blocking deployment. "
+                "If the cluster is reported as unavailable, it will be rechecked up to this many times "
+                "with a wait between each check. Set to 0 to skip the health check entirely.",
+                arg_group="Cluster Health",
+            )
+            context.argument(
+                "health_checks_interval",
+                options_list=["--health-checks-int"],
+                type=int,
+                help="Seconds to wait between consecutive cluster health checks when the cluster "
+                "is reported as unavailable.",
+                arg_group="Cluster Health",
+            )
 
     for cmd_space in ["iot ops create", "iot ops update"]:
         with self.argument_context(cmd_space) as context:
@@ -1500,13 +1517,22 @@ def load_iotops_arguments(self, _):
             "include_dependencies",
             options_list=["--include-deps"],
             arg_type=get_three_state_flag(),
-            help="Indicates the command should remove IoT Operations dependencies. "
-            "This option is intended to reverse the application of init.",
+            help="Include dependency extensions in deletion "
+            "(cert manager, secret store, and container "
+            "storage when deployed by init).",
         )
         context.argument(
             "cluster_name",
             options_list=["--cluster"],
-            help="Target cluster name for IoT Operations deletion.",
+            help="Target cluster name for IoT Operations deletion. "
+            "Use as an alternative to --name when the instance "
+            "has already been deleted or is unknown.",
+        )
+        context.argument(
+            "force",
+            arg_type=get_three_state_flag(),
+            help="Force deletion even when the cluster "
+            "is disconnected.",
         )
 
     with self.argument_context("iot ops secretsync") as context:
@@ -1557,6 +1583,7 @@ def load_iotops_arguments(self, _):
             nargs="+",
             help="Custom role Ids for ADR namespace managed identity role assignments against the EG namespace. "
             "Default: 'Event Grid TopicSpaces Publisher' and 'Event Grid TopicSpaces Subscriber'.",
+            arg_group="Role Assignment",
         )
         context.argument(
             "ops_role_ids",
@@ -1564,11 +1591,51 @@ def load_iotops_arguments(self, _):
             nargs="+",
             help="Custom role Ids for AIO extension managed identity role assignments against the EG namespace. "
             "Default: 'Event Grid TopicSpaces Publisher' and 'Event Grid TopicSpaces Subscriber'.",
+            arg_group="Role Assignment",
         )
         context.argument(
             "dataflow_profile",
             options_list=["--dataflow-profile"],
             help="Dataflow profile name for graph and dataflow resources. Default: 'default'.",
+        )
+        context.argument(
+            "registry_endpoint",
+            options_list=["--registry-endpoint"],
+            help="Registry endpoint name for the dataflow graph. Default: 'default'.",
+        )
+
+    with self.argument_context("iot ops mgmt-actions execute") as context:
+        context.argument(
+            "asset_name",
+            options_list=["--asset"],
+            help="Name of the namespace asset to execute the management action on.",
+        )
+        context.argument(
+            "group_name",
+            options_list=["--group"],
+            help="Management group name under which the action is defined.",
+        )
+        context.argument(
+            "action_name",
+            options_list=["--action"],
+            help="Management action name to execute.",
+        )
+        context.argument(
+            "payload",
+            options_list=["--payload", "-p"],
+            help="JSON payload for the management action. Inline JSON string or file path (e.g., payload.json).",
+        )
+        context.argument(
+            "no_validate",
+            options_list=["--no-validate"],
+            help="Skip client-side payload validation against the action's request schema.",
+            action="store_true",
+        )
+        context.argument(
+            "show_schema",
+            options_list=["--show-schema"],
+            help="Resolve and display the action's request schema. No action is executed.",
+            action="store_true",
         )
 
     with self.argument_context("iot ops schema") as context:
@@ -1734,8 +1801,8 @@ def load_iotops_arguments(self, _):
             "                3rd-party connectors:\n"
             "                - `REGISTRY.azurecr.io/PATH-metadata:VERSION`\n\n"
             "                To list available versions for 1st-party connectors:\n"
-            "                `curl https://mcr.microsoft.com/v2/azureiotoperations/"
-            "akri-connectors/TYPE-metadata/tags/list`",
+            "                `curl https://mcr.microsoft.com/v2/"
+            "azureiotoperations/akri-connectors/TYPE-metadata/tags/list`",
         )
         context.argument(
             "replicas",

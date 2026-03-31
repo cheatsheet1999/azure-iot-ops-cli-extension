@@ -1877,28 +1877,38 @@ def load_iotops_help():
         type: command
         short-summary: Delete IoT Operations from the cluster.
         long-summary: |
-            The name of either the instance or cluster must be provided.
+            Either --name (instance) or --cluster must be provided.
 
-            The operation uses Azure Resource Graph to determine correlated resources.
-            Resource Graph being eventually consistent does not guarantee a synchronized state at the
-            time of execution.
+            By default the command deletes the IoT Operations instance
+            (cascading to all child resources), the custom location,
+            resource sync rules, and the IoT Operations arc extension.
+
+            Use --include-deps to also remove dependency extensions
+            such as cert manager, secret store, and container
+            storage (when deployed by init).
+
+            Use --cluster when the instance has already been deleted
+            and residual resources need cleanup.
 
         examples:
-        - name: Minimum input for complete deletion.
+        - name: Delete an IoT Operations instance by name.
           text: >
             az iot ops delete -n myinstance -g myresourcegroup
-        - name: Skip confirmation prompt and continue to deletion process. Useful for CI scenarios.
+        - name: Skip the confirmation prompt. Useful for CI.
           text: >
             az iot ops delete -n myinstance -g myresourcegroup -y
-        - name: Force deletion regardless of warnings. May lead to errors.
+        - name: Force deletion when the cluster is disconnected.
           text: >
             az iot ops delete -n myinstance -g myresourcegroup --force
-        - name: Use cluster name instead of instance for lookup.
+        - name: Discover resources via cluster name instead of instance name.
           text: >
             az iot ops delete --cluster mycluster -g myresourcegroup
-        - name: Reverse application of init.
+        - name: Delete instance and dependency extensions.
           text: >
             az iot ops delete -n myinstance -g myresourcegroup --include-deps
+        - name: Full cleanup via cluster name with dependency removal. Recommended for CI teardown.
+          text: >
+            az iot ops delete --cluster mycluster -g myresourcegroup --include-deps --force -y
     """
 
     helps[
@@ -2122,20 +2132,21 @@ def load_iotops_help():
         type: command
         short-summary: Enable management actions for an IoT Operations instance.
         long-summary: |
-            Bootstraps the outer loop infrastructure enabling cloud-based invocation of management
+            Bootstraps the infrastructure enabling cloud-based invocation of management
             actions on assets through Event Grid MQTT broker integration.
 
             The operation configures resources across three domains:
             - Event Grid Namespace: topic space, topic templates, and permission bindings.
-            - Device Registry Namespace: managed identity enablement and management endpoint configuration.
+            - Device Registry Namespace: managed identity enablement and management endpoint config.
             - IoT Operations Instance: EG dataflow endpoint, dataflow graph, and response dataflow.
 
             The command is idempotent. If a resource already exists, it is skipped. On partial failure,
             re-run the command to reach the desired state.
 
-            By default, role assignments (Event Grid TopicSpaces Publisher and Subscriber) are created for
-            both the ADR namespace MI and the AIO extension MI against the EG namespace. Use --skip-ra to
-            skip role assignment creation, or --adr-role-ids / --ops-role-ids to provide custom role Ids.
+            By default, role assignments (Event Grid TopicSpaces Publisher and Subscriber) are created
+            for both the ADR namespace MI and the AIO extension MI against the EG namespace.
+            Use --skip-ra to skip role assignment creation, or --adr-role-ids / --ops-role-ids to
+            provide custom role Ids.
 
         examples:
         - name: Enable management actions for an instance using system managed identity.
@@ -2158,14 +2169,15 @@ def load_iotops_help():
         type: command
         short-summary: Disable management actions for an IoT Operations instance.
         long-summary: |
-            Removes the outer loop resources associated with the instance including the dataflow graph,
-            response dataflow, EG dataflow endpoint, EG topic space and permission bindings, and the
-            ADR namespace management endpoint entry.
+            Removes management actions resources associated with the instance including
+            the dataflow graph, response dataflow, EG dataflow endpoint, EG topic space,
+            permission bindings, and the ADR namespace management endpoint entry.
 
             Role assignments are not removed as they may be shared with other resources.
 
-            The Event Grid namespace is discovered from the ADR namespace management endpoint configuration.
-            If the management endpoint entry has already been removed, Event Grid cleanup is skipped gracefully.
+            The Event Grid namespace is discovered from the ADR namespace management
+            endpoint config. If the management endpoint entry has already been removed,
+            Event Grid cleanup is skipped gracefully.
 
         examples:
         - name: Disable management actions for an instance.
@@ -2182,17 +2194,84 @@ def load_iotops_help():
         type: command
         short-summary: Show management actions configuration for an IoT Operations instance.
         long-summary: |
-            Displays the current management actions configuration by probing the ADR namespace
-            management endpoint and Event Grid resources.
+            Checks the status of management actions resources across three areas:
+            Device Registry (ADR) namespace, Event Grid resources, and AIO dataflow resources.
 
-            Returns a structured summary showing whether management actions are enabled and,
-            if so, the Event Grid namespace, topic space, permission bindings, and ADR namespace
-            management endpoint details.
+            Returns a structured summary with an overall enabled flag and per-domain detail
+            sections. A domain that cannot be probed (e.g. missing ADR namespace ref) returns
+            null for that section without blocking other domains from being checked.
 
         examples:
         - name: Show management actions configuration for an instance.
           text: >
             az iot ops mgmt-actions show --instance myinstance -g myresourcegroup
+    """
+
+    helps[
+        "iot ops mgmt-actions execute"
+    ] = """
+        type: command
+        short-summary: Execute a management action on a namespace asset.
+        long-summary: |
+            Invokes a management action defined on a namespace asset via the Device Registry
+            executeAction operation. The management actions infrastructure must be enabled
+            (`az iot ops mgmt-actions enable`) before actions can be executed.
+
+            The command resolves the ADR namespace from the IoT Operations instance and
+            submits the action as a long-running operation. The result includes the action
+            status, any response from the asset, and error details if the action failed.
+
+            When a payload is provided, the CLI validates it against the action's request
+            schema (if available) before sending the request. Use --no-validate to skip
+            this check. Use --show-schema to view the action's request schema without
+            executing.
+
+        examples:
+        - name: Execute a management action with no payload.
+          text: >
+            az iot ops mgmt-actions execute
+            --instance myinstance
+            -g myresourcegroup
+            --asset myasset
+            --group mygroup
+            --action reboot
+        - name: Execute a management action with inline JSON payload.
+          text: >
+            az iot ops mgmt-actions execute
+            --instance myinstance
+            -g myresourcegroup
+            --asset myasset
+            --group mygroup
+            --action configure
+            -p '{"temperature": {"setpoint": 72}}'
+        - name: Execute a management action with payload from file.
+          text: >
+            az iot ops mgmt-actions execute
+            --instance myinstance
+            -g myresourcegroup
+            --asset myasset
+            --group mygroup
+            --action configure
+            -p payload.json
+        - name: Show the request schema for a management action.
+          text: >
+            az iot ops mgmt-actions execute
+            --instance myinstance
+            -g myresourcegroup
+            --asset myasset
+            --group mygroup
+            --action configure
+            --show-schema
+        - name: Execute with payload, skipping schema validation.
+          text: >
+            az iot ops mgmt-actions execute
+            --instance myinstance
+            -g myresourcegroup
+            --asset myasset
+            --group mygroup
+            --action configure
+            -p '{"temperature": {"setpoint": 72}}'
+            --no-validate
     """
 
     helps[

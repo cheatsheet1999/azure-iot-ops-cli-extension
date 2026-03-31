@@ -5,11 +5,12 @@
 # ----------------------------------------------------------------------------------------------
 
 import json
-from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from azure.cli.core.azclierror import InvalidArgumentValueError, ValidationError
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 from knack.log import get_logger
+from rich.console import Console
 
 from ...util.az_client import (
     get_eventgrid_mgmt_client,
@@ -17,8 +18,10 @@ from ...util.az_client import (
     get_registry_mgmt_client,
     wait_for_terminal_state,
 )
+from ...util.common import should_continue_prompt
 from ...util.id_tools import parse_resource_id as parse_resource_id_dict
 from ...util.queryable import Queryable
+from ...util.workflow_display import StepState, WorkflowDisplay, render_summary
 from .common import (
     CUSTOM_LOCATIONS_API_VERSION,
     EG_TOPICSPACES_PUBLISHER_ROLE_ID,
@@ -44,10 +47,13 @@ from .connected_cluster import ConnectedCluster
 from .permissions import ROLE_DEF_FORMAT_STR, PermissionManager, PrincipalType
 
 if TYPE_CHECKING:
-    from ...vendor.clients.deviceregistrymgmt import MicrosoftDeviceRegistryManagementService
+    from ...vendor.clients.deviceregistrymgmt import (
+        MicrosoftDeviceRegistryManagementService,
+    )
     from ...vendor.clients.eventgridmgmt import EventGridManagementClient
 
 logger = get_logger(__name__)
+console = Console()
 
 
 def get_mgmt_actions_resource_name(purpose: str, instance_resource_id: str) -> str:
@@ -95,6 +101,112 @@ def _build_graph_rules_config(topic_prefix_regex: str) -> List[Dict]:
     ]
 
 
+def _graceful_delete(begin_delete_fn: Callable, resource_desc: str, **kwargs) -> None:
+    """Execute a begin_delete LRO, catching ResourceNotFoundError for idempotent teardown."""
+    try:
+        poller = begin_delete_fn()
+        wait_for_terminal_state(poller, **kwargs)
+        logger.info("Deleted %s.", resource_desc)
+    except ResourceNotFoundError:
+        logger.info("%s already deleted — skipping.", resource_desc.capitalize())
+
+
+def _build_adr_put_payload(adr_namespace: Dict, endpoint_key_to_remove: str) -> Dict:
+    """Build the ADR namespace PUT payload with one management endpoint entry removed.
+
+    ARM PATCH deep-merges dicts (omitting a key preserves it) and the ADR API
+    rejects null endpoint values, so we use PUT to replace the entire resource.
+    Preserves identity, tags, and messaging configuration from the original namespace.
+    """
+    existing_endpoints = adr_namespace.get("properties", {}).get("management", {}).get("endpoints", {})
+    updated_endpoints = {k: v for k, v in existing_endpoints.items() if k != endpoint_key_to_remove}
+
+    payload: Dict = {
+        "location": adr_namespace.get("location", ""),
+        "properties": {
+            "management": {"endpoints": updated_endpoints},
+        },
+    }
+    # Preserve identity, tags, and messaging from the original namespace
+    if adr_namespace.get("identity"):
+        payload["identity"] = adr_namespace["identity"]
+    if adr_namespace.get("tags"):
+        payload["tags"] = adr_namespace["tags"]
+    messaging = adr_namespace.get("properties", {}).get("messaging")
+    if messaging:
+        payload["properties"]["messaging"] = messaging
+    return payload
+
+
+def _log_disable_summary(
+    instance_resource_id: str,
+    dataflow_profile_name: Optional[str],
+    resp_profile_name: Optional[str],
+    ep_exists: bool,
+    has_adr_entry: bool,
+    adr_namespace_name: str,
+    instance_name: str,
+    ts_exists: bool,
+    pub_exists: bool,
+    sub_exists: bool,
+    eg_ctx: Optional["EgNamespaceContext"],
+) -> None:
+    """Render a Rich summary of resources that will be removed by disable().
+
+    Only lists resources confirmed to exist during the discovery phase.
+    Printed to stderr via render_summary() alongside the confirmation prompt.
+    Resource names are logged at info level for debugging — they are deterministic
+    hashes that don't aid the confirmation decision.
+    """
+    aio_pairs: List[Tuple[str, str]] = []  # (display_label, purpose_code)
+    if dataflow_profile_name:
+        aio_pairs.append(("Response dataflow", "resp"))
+        aio_pairs.append(("Dataflow graph", "req"))
+    elif resp_profile_name:
+        aio_pairs.append(("Response dataflow (orphaned)", "resp"))
+    if ep_exists:
+        aio_pairs.append(("EG dataflow endpoint", "eg"))
+
+    adr_pairs: List[Tuple[str, str]] = []
+    if has_adr_entry:
+        adr_pairs.append(("Management endpoint", ""))
+
+    eg_pairs: List[Tuple[str, str]] = []
+    if pub_exists:
+        eg_pairs.append(("Permission binding (publisher)", "pub"))
+    if sub_exists:
+        eg_pairs.append(("Permission binding (subscriber)", "sub"))
+    if ts_exists:
+        eg_pairs.append(("Topic space", "ops"))
+
+    eg_ns_label = f"Event Grid Namespace ({eg_ctx.namespace_name})" if eg_ctx else "Event Grid Namespace"
+
+    sections: Dict[str, List[str]] = {
+        f"IoT Operations Instance ({instance_name})": [label for label, _ in aio_pairs],
+        f"Device Registry Namespace ({adr_namespace_name})": [label for label, _ in adr_pairs],
+        eg_ns_label: [label for label, _ in eg_pairs],
+    }
+
+    total = sum(len(items) for items in sections.values())
+
+    render_summary(
+        title=f"Resources to remove ({total})",
+        sections=sections,
+        footer="Note: Role assignments are NOT removed.",
+    )
+
+    # Log resource names at info level for debugging / portal cross-reference
+    logger.info("Resource names targeted for removal:")
+    for label, purpose in aio_pairs:
+        if purpose:
+            logger.info("  %s: %s", label, get_mgmt_actions_resource_name(purpose, instance_resource_id))
+    if adr_pairs:
+        logger.info("  Management endpoint: (ADR namespace '%s')", adr_namespace_name)
+    for label, purpose in eg_pairs:
+        if purpose:
+            logger.info("  %s: %s", label, get_mgmt_actions_resource_name(purpose, instance_resource_id))
+
+
 class EgNamespaceContext(NamedTuple):
     """Validated Event Grid namespace context, produced by _validate_eg_namespace().
 
@@ -110,19 +222,19 @@ class EgNamespaceContext(NamedTuple):
 
 
 class MgmtActions(Queryable):
-    """Provider for management actions (outer loop) enable/disable operations."""
+    """Provider for management actions enable/disable/show operations."""
 
     def __init__(self, cmd, subscription_id: Optional[str] = None):
         super().__init__(cmd=cmd, subscription_id=subscription_id)
         self.iotops_mgmt_client = get_iotops_mgmt_client(
-            subscription_id=self.default_subscription_id,
+            **self._get_client_kwargs()
         )
         self.registry_mgmt_client: "MicrosoftDeviceRegistryManagementService" = get_registry_mgmt_client(
-            subscription_id=self.default_subscription_id,
+            **self._get_client_kwargs()
         )
         # May be replaced with a cross-subscription client by _validate_eg_namespace
         self.eventgrid_mgmt_client: "EventGridManagementClient" = get_eventgrid_mgmt_client(
-            subscription_id=self.default_subscription_id,
+            **self._get_client_kwargs()
         )
         self.permission_manager = PermissionManager(self.default_subscription_id)
 
@@ -137,112 +249,215 @@ class MgmtActions(Queryable):
         ops_role_ids: Optional[List[str]] = None,
         skip_role_assignments: Optional[bool] = None,
         dataflow_profile: Optional[str] = None,
+        registry_endpoint: Optional[str] = None,
+        no_progress: Optional[bool] = None,
         **kwargs,
     ) -> Dict:
         """Enable management actions for an IoT Operations instance.
 
-        Bootstraps the outer loop infrastructure across Event Grid, ADR, and AIO domains.
+        Bootstraps the management actions infrastructure across Event Grid, ADR, and AIO domains.
         """
         from ...util.machinery import scoped_semver_import
 
         semver = scoped_semver_import()
 
-        # Resolve instance
-        instance = self.iotops_mgmt_client.instance.get(
-            instance_name=name,
-            resource_group_name=resource_group_name,
-        )
-        instance_resource_id: str = instance["id"]
+        # --- Phase 1: Analyzing (transient — vanishes before configuring phase) ---
+        analyzing_cats = {"Analyzing": ["Instance & version check", "EG namespace validation", "UAMI resolution"]}
+        with WorkflowDisplay(
+            "Management Actions Enablement", analyzing_cats, no_progress=no_progress,
+        ) as display:
+            with display.step_scope("Analyzing", "Instance & version check"):
+                # Resolve instance
+                instance = self.iotops_mgmt_client.instance.get(
+                    instance_name=name,
+                    resource_group_name=resource_group_name,
+                )
+                instance_resource_id: str = instance["id"]
 
-        # Validate instance version
-        instance_version = instance.get("properties", {}).get("version", "")
-        if not instance_version or (semver.parse(instance_version) < semver.parse(MIN_INSTANCE_VERSION_MGMT_ACTIONS)):
-            raise ValidationError(
-                f"Instance '{name}' version '{instance_version}' does not meet the minimum "
-                f"required version '{MIN_INSTANCE_VERSION_MGMT_ACTIONS}' for management actions."
-            )
+                # Validate instance version
+                instance_version = instance.get("properties", {}).get("version", "")
+                parsed_version = semver.parse(instance_version) if instance_version else None
+                if not parsed_version or (
+                    not parsed_version.prerelease
+                    and parsed_version < semver.parse(MIN_INSTANCE_VERSION_MGMT_ACTIONS)
+                ):
+                    raise ValidationError(
+                        f"Instance '{name}' version '{instance_version}' does not meet the minimum "
+                        f"required version '{MIN_INSTANCE_VERSION_MGMT_ACTIONS}' for management actions."
+                    )
+                display.update_step("Analyzing", "Instance & version check", StepState.COMPLETE, "done")
 
-        # Validate EG namespace (format, existence, topic spaces, MQTT hostname)
-        eg_ctx = self._validate_eg_namespace(eg_resource_id)
+            # Validate EG namespace (format, existence, topic spaces, MQTT hostname)
+            with display.step_scope("Analyzing", "EG namespace validation"):
+                eg_ctx = self._validate_eg_namespace(eg_resource_id)
+                display.update_step("Analyzing", "EG namespace validation", StepState.COMPLETE, "done")
 
-        # Extract extendedLocation from instance (needed for AIO child resources)
-        extended_location: Dict = instance["extendedLocation"]
+            # Extract extendedLocation from instance (needed for AIO child resources)
+            extended_location: Dict = instance["extendedLocation"]
 
-        # Resolve UAMI once (used by EG dataflow endpoint + identity resolution)
-        mi_resource = self._resolve_user_assigned_mi(mi_user_assigned) if mi_user_assigned else None
+            # Resolve UAMI once (used by EG dataflow endpoint + identity resolution)
+            with display.step_scope("Analyzing", "UAMI resolution"):
+                mi_resource = self._resolve_user_assigned_mi(mi_user_assigned) if mi_user_assigned else None
+                if mi_resource:
+                    display.update_step("Analyzing", "UAMI resolution", StepState.COMPLETE, "done")
+                else:
+                    display.update_step("Analyzing", "UAMI resolution", StepState.SKIPPED, "not needed")
 
-        # Event Grid infrastructure setup
-        topic_space_result = self._setup_eg_topic_space(
-            eg_ctx=eg_ctx,
-            instance_name=name,
-            instance_resource_id=instance_resource_id,
-            **kwargs,
-        )
+        # --- Phase 2: Configuring (persistent — display remains with elapsed time) ---
+        adr_ns_ref = instance.get("properties", {}).get("adrNamespaceRef", {}).get("resourceId", "")
+        adr_ns_display = parse_resource_id_dict(adr_ns_ref).get("name", "") if adr_ns_ref else ""
 
-        permission_bindings_result = self._setup_eg_permission_bindings(
-            eg_ctx=eg_ctx,
-            instance_resource_id=instance_resource_id,
-            topic_space_name=topic_space_result["name"],
-            eg_client_group=eg_client_group,
-            **kwargs,
-        )
+        cat_eg = f"Event Grid Namespace ({eg_ctx.namespace_name})"
+        cat_adr = f"Device Registry Namespace ({adr_ns_display})" if adr_ns_display else "Device Registry Namespace"
+        cat_aio = f"IoT Operations Instance ({name})"
+        cat_roles = "Role Assignments"
 
-        # EG dataflow endpoint
-        dataflow_endpoint_result = self._setup_eg_dataflow_endpoint(
-            eg_ctx=eg_ctx,
-            instance_name=name,
-            instance_resource_id=instance_resource_id,
-            resource_group_name=resource_group_name,
-            extended_location=extended_location,
-            mi_resource=mi_resource,
-            **kwargs,
-        )
-
-        # ADR namespace — enable system MI + configure management endpoint
-        adr_result = self._setup_adr_management_endpoint(
-            instance=instance,
-            eg_ctx=eg_ctx,
-            **kwargs,
-        )
-
-        # Dataflow graph (uses default registry endpoint provisioned with instance)
-        resolved_profile = dataflow_profile or MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE
-
-        dataflow_graph_result = self._setup_dataflow_graph(
-            instance_name=name,
-            instance_resource_id=instance_resource_id,
-            resource_group_name=resource_group_name,
-            extended_location=extended_location,
-            eg_dataflow_endpoint_name=dataflow_endpoint_result["name"],
-            dataflow_profile_name=resolved_profile,
-            **kwargs,
-        )
-
-        # Response dataflow (edge→cloud: local MQTT → EG)
-        response_dataflow_result = self._setup_response_dataflow(
-            instance_name=name,
-            instance_resource_id=instance_resource_id,
-            resource_group_name=resource_group_name,
-            extended_location=extended_location,
-            eg_dataflow_endpoint_name=dataflow_endpoint_result["name"],
-            dataflow_profile_name=resolved_profile,
-            **kwargs,
-        )
-
-        # Role assignments — ADR namespace MI + dataflow auth identity → EG namespace
-        role_assignments_result = None
+        config_cats: Dict[str, List[str]] = {
+            cat_eg: ["Topic space", "Permission bindings"],
+            cat_adr: ["Managed identity", "Management endpoint"],
+            cat_aio: ["EG dataflow endpoint", "Dataflow graph", "Response dataflow"],
+        }
         if not skip_role_assignments:
-            dataflow_auth_principal_id = self._resolve_dataflow_auth_identity(
-                instance=instance,
-                mi_resource=mi_resource,
-            )
-            role_assignments_result = self._setup_role_assignments(
-                eg_ctx=eg_ctx,
-                adr_principal_id=adr_result["identity"]["principalId"],
-                dataflow_auth_principal_id=dataflow_auth_principal_id,
-                adr_role_ids=adr_role_ids,
-                ops_role_ids=ops_role_ids,
-            )
+            config_cats[cat_roles] = ["ADR namespace roles", "Dataflow identity roles"]
+
+        with WorkflowDisplay(
+            "Management Actions Enablement", config_cats, transient=False, no_progress=no_progress,
+        ) as display:
+            with display.step_scope(cat_eg, "Topic space"):
+                topic_space_result = self._setup_eg_topic_space(
+                    eg_ctx=eg_ctx,
+                    instance_name=name,
+                    instance_resource_id=instance_resource_id,
+                    **kwargs,
+                )
+                if topic_space_result.get("exists"):
+                    display.update_step(cat_eg, "Topic space", StepState.SKIPPED, "exists")
+                else:
+                    display.update_step(cat_eg, "Topic space", StepState.COMPLETE, "created")
+
+            with display.step_scope(cat_eg, "Permission bindings"):
+                permission_bindings_result = self._setup_eg_permission_bindings(
+                    eg_ctx=eg_ctx,
+                    instance_resource_id=instance_resource_id,
+                    topic_space_name=topic_space_result["name"],
+                    eg_client_group=eg_client_group,
+                    **kwargs,
+                )
+                if permission_bindings_result.get("exists"):
+                    display.update_step(cat_eg, "Permission bindings", StepState.SKIPPED, "exists")
+                else:
+                    display.update_step(cat_eg, "Permission bindings", StepState.COMPLETE, "created")
+
+            # ADR namespace — enable system MI + configure management endpoint
+            display.update_step(cat_adr, "Managed identity", StepState.ACTIVE)
+            display.update_step(cat_adr, "Management endpoint", StepState.ACTIVE)
+            try:
+                adr_result = self._setup_adr_management_endpoint(
+                    instance=instance,
+                    eg_ctx=eg_ctx,
+                    **kwargs,
+                )
+                if adr_result.get("identity_exists"):
+                    display.update_step(cat_adr, "Managed identity", StepState.SKIPPED, "exists")
+                else:
+                    display.update_step(cat_adr, "Managed identity", StepState.COMPLETE, "enabled")
+                if adr_result.get("endpoint_exists"):
+                    display.update_step(cat_adr, "Management endpoint", StepState.SKIPPED, "exists")
+                else:
+                    display.update_step(cat_adr, "Management endpoint", StepState.COMPLETE, "created")
+            except Exception as exc:
+                display.update_step(cat_adr, "Managed identity", StepState.FAILED, str(exc)[:40])
+                display.update_step(cat_adr, "Management endpoint", StepState.FAILED, str(exc)[:40])
+                raise
+
+            with display.step_scope(cat_aio, "EG dataflow endpoint"):
+                dataflow_endpoint_result = self._setup_eg_dataflow_endpoint(
+                    eg_ctx=eg_ctx,
+                    instance_name=name,
+                    instance_resource_id=instance_resource_id,
+                    resource_group_name=resource_group_name,
+                    extended_location=extended_location,
+                    mi_resource=mi_resource,
+                    **kwargs,
+                )
+                if dataflow_endpoint_result.get("updated"):
+                    display.update_step(cat_aio, "EG dataflow endpoint", StepState.COMPLETE, "updated")
+                elif dataflow_endpoint_result.get("exists"):
+                    display.update_step(cat_aio, "EG dataflow endpoint", StepState.SKIPPED, "exists")
+                else:
+                    display.update_step(cat_aio, "EG dataflow endpoint", StepState.COMPLETE, "created")
+
+            # Dataflow graph (uses default registry endpoint provisioned with instance)
+            resolved_profile = dataflow_profile or MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE
+            resolved_registry_endpoint = registry_endpoint or MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT
+
+            with display.step_scope(cat_aio, "Dataflow graph"):
+                dataflow_graph_result = self._setup_dataflow_graph(
+                    instance_name=name,
+                    instance_resource_id=instance_resource_id,
+                    resource_group_name=resource_group_name,
+                    extended_location=extended_location,
+                    eg_dataflow_endpoint_name=dataflow_endpoint_result["name"],
+                    dataflow_profile_name=resolved_profile,
+                    registry_endpoint_name=resolved_registry_endpoint,
+                    **kwargs,
+                )
+                if dataflow_graph_result.get("exists"):
+                    display.update_step(cat_aio, "Dataflow graph", StepState.SKIPPED, "exists")
+                else:
+                    display.update_step(cat_aio, "Dataflow graph", StepState.COMPLETE, "created")
+
+            # Response dataflow (edge→cloud: local MQTT → EG)
+            with display.step_scope(cat_aio, "Response dataflow"):
+                response_dataflow_result = self._setup_response_dataflow(
+                    instance_name=name,
+                    instance_resource_id=instance_resource_id,
+                    resource_group_name=resource_group_name,
+                    extended_location=extended_location,
+                    eg_dataflow_endpoint_name=dataflow_endpoint_result["name"],
+                    dataflow_profile_name=resolved_profile,
+                    **kwargs,
+                )
+                if response_dataflow_result.get("exists"):
+                    display.update_step(cat_aio, "Response dataflow", StepState.SKIPPED, "exists")
+                else:
+                    display.update_step(cat_aio, "Response dataflow", StepState.COMPLETE, "created")
+
+            # Role assignments — ADR namespace MI + dataflow auth identity → EG namespace
+            role_assignments_result = None
+            if not skip_role_assignments:
+                display.update_step(cat_roles, "ADR namespace roles", StepState.ACTIVE)
+                display.update_step(cat_roles, "Dataflow identity roles", StepState.ACTIVE)
+                try:
+                    dataflow_auth_principal_id = self._resolve_dataflow_auth_identity(
+                        instance=instance,
+                        mi_resource=mi_resource,
+                    )
+                    role_assignments_result = self._setup_role_assignments(
+                        eg_ctx=eg_ctx,
+                        adr_principal_id=adr_result["identity"]["principalId"],
+                        dataflow_auth_principal_id=dataflow_auth_principal_id,
+                        adr_role_ids=adr_role_ids,
+                        ops_role_ids=ops_role_ids,
+                    )
+                    display.update_step(cat_roles, "ADR namespace roles", StepState.COMPLETE, "done")
+                    display.update_step(cat_roles, "Dataflow identity roles", StepState.COMPLETE, "done")
+                except Exception as exc:
+                    display.update_step(cat_roles, "ADR namespace roles", StepState.FAILED, str(exc)[:40])
+                    display.update_step(cat_roles, "Dataflow identity roles", StepState.FAILED, str(exc)[:40])
+                    raise
+
+        # Strip internal `exists` and `updated` flags before building consumer-facing return (desired-state semantics)
+        for sub_result in [
+            topic_space_result, dataflow_endpoint_result, dataflow_graph_result, response_dataflow_result,
+        ]:
+            sub_result.pop("exists", None)
+            sub_result.pop("updated", None)
+
+        # Extract our custom location's endpoint for the consumer-facing return
+        our_endpoint = adr_result.get("managementEndpoints", {}).get(
+            instance["extendedLocation"]["name"], {}
+        )
 
         result: Dict = {
             "instance": {
@@ -259,9 +474,22 @@ class MgmtActions(Queryable):
                     "mqttHostname": eg_ctx.mqtt_hostname,
                 },
                 "topicSpace": topic_space_result,
-                "permissionBindings": permission_bindings_result,
+                "permissionBindings": {
+                    "publisher": permission_bindings_result["publisher"],
+                    "subscriber": permission_bindings_result["subscriber"],
+                },
             },
-            "deviceRegistryNamespace": adr_result,
+            "deviceRegistryNamespace": {
+                "name": adr_result["name"],
+                "resourceGroup": adr_result["resourceGroup"],
+                "subscriptionId": adr_result["subscriptionId"],
+                "identity": adr_result.get("identity"),
+                "managementEndpoint": {
+                    "endpointType": our_endpoint.get("endpointType", ""),
+                    "address": our_endpoint.get("address", ""),
+                    "scopeId": our_endpoint.get("scopeId", ""),
+                },
+            },
         }
 
         if role_assignments_result is not None:
@@ -273,157 +501,275 @@ class MgmtActions(Queryable):
         self,
         name: str,
         resource_group_name: str,
+        no_progress: Optional[bool] = None,
         **kwargs,
     ) -> Dict:
         """Show management actions configuration for an IoT Operations instance.
 
-        Discovers whether mgmt-actions is configured by probing the ADR namespace
-        management endpoint and Event Grid resources. Returns a concise summary
-        of the integration topology or {"enabled": False} if not configured.
+        Checks ADR namespace, Event Grid, and AIO dataflow resources independently.
+        Returns a consistent 4-key dict (`enabled`, `instance`, `eventGrid`,
+        `deviceRegistryNamespace`) with per-sub-resource `exists` flags.
+
+        `instance` is never null (names are deterministic from instance resource ID).
+        `eventGrid` is null when the management endpoint address is not discoverable.
+        `deviceRegistryNamespace` is null when the instance has no ADR namespace ref.
+        `enabled` is True only when all sub-resources exist across all three areas.
         """
-        # Resolve instance
-        instance = self.iotops_mgmt_client.instance.get(
-            instance_name=name,
-            resource_group_name=resource_group_name,
-        )
-        instance_resource_id: str = instance["id"]
 
-        # Resolve ADR namespace from instance
-        adr_namespace_resource_id = instance.get("properties", {}).get("adrNamespaceRef", {}).get("resourceId")
-        if not adr_namespace_resource_id:
-            return {"enabled": False}
-
-        parsed_adr = parse_resource_id_dict(adr_namespace_resource_id)
-        adr_subscription_id = parsed_adr.get("subscription", "")
-        adr_resource_group = parsed_adr.get("resource_group", "")
-        adr_namespace_name = parsed_adr.get("name", "")
-
-        if not all([adr_subscription_id, adr_resource_group, adr_namespace_name]):
-            return {"enabled": False}
-
-        # GET the ADR namespace and check for management endpoint entry
-        try:
-            adr_namespace = self.registry_mgmt_client.namespaces.get(
-                resource_group_name=adr_resource_group,
-                namespace_name=adr_namespace_name,
-            )
-        except ResourceNotFoundError:
-            return {"enabled": False}
-
-        custom_location_id: str = instance.get("extendedLocation", {}).get("name", "")
-        if not custom_location_id:
-            return {"enabled": False}
-
-        existing_endpoints = adr_namespace.get("properties", {}).get("management", {}).get("endpoints", {})
-        mgmt_endpoint = existing_endpoints.get(custom_location_id)
-
-        if not mgmt_endpoint:
-            return {"enabled": False}
-
-        # Extract EG namespace details from the management endpoint entry
-        eg_resource_id = mgmt_endpoint.get("resourceId", "")
-        if not eg_resource_id:
-            return {"enabled": False}
-
-        parsed_eg = parse_resource_id_dict(eg_resource_id)
-        eg_namespace_name = parsed_eg.get("name", "")
-        eg_resource_group = parsed_eg.get("resource_group", "")
-        eg_subscription_id = parsed_eg.get("subscription", "")
-
-        if not all([eg_namespace_name, eg_resource_group, eg_subscription_id]):
-            return {"enabled": False}
-
-        # Handle cross-subscription EG namespace
-        if eg_subscription_id != self.default_subscription_id:
-            self.eventgrid_mgmt_client = get_eventgrid_mgmt_client(
-                subscription_id=eg_subscription_id,
-            )
-
-        # Probe EG namespace for MQTT hostname
-        mqtt_hostname = ""
-        try:
-            eg_namespace = self.eventgrid_mgmt_client.namespaces.get(
-                resource_group_name=eg_resource_group,
-                namespace_name=eg_namespace_name,
-            )
-            mqtt_hostname = (
-                eg_namespace.get("properties", {})
-                .get("topicSpacesConfiguration", {})
-                .get("hostname", "")
-            )
-        except ResourceNotFoundError:
-            logger.warning("Event Grid namespace '%s' not found.", eg_namespace_name)
-            return {"enabled": False}
-
-        # Reconstruct resource names from instance resource ID
-        topic_space_name = get_mgmt_actions_resource_name("ops", instance_resource_id)
-        pub_binding_name = get_mgmt_actions_resource_name("pub", instance_resource_id)
-        sub_binding_name = get_mgmt_actions_resource_name("sub", instance_resource_id)
-
-        # Probe EG topic space — if missing, mgmt-actions is not configured
-        try:
-            topic_space = self.eventgrid_mgmt_client.topic_spaces.get(
-                resource_group_name=eg_resource_group,
-                namespace_name=eg_namespace_name,
-                topic_space_name=topic_space_name,
-            )
-        except ResourceNotFoundError:
-            return {"enabled": False}
-
-        ts_props = topic_space.get("properties", {})
-        topic_space_result = {
-            "name": topic_space_name,
-            "scopeId": name,
-            "topicTemplates": ts_props.get("topicTemplates", []),
+        analyzing_cats = {
+            "Analyzing": [
+                "Instance & ADR namespace",
+                "Event Grid resources",
+                "Instance dataflow resources",
+            ],
         }
 
-        # Probe EG permission bindings
-        client_group = ""
-        try:
-            pub_binding = self.eventgrid_mgmt_client.permission_bindings.get(
-                resource_group_name=eg_resource_group,
-                namespace_name=eg_namespace_name,
-                permission_binding_name=pub_binding_name,
-            )
-            client_group = pub_binding.get("properties", {}).get("clientGroupName", "")
-        except ResourceNotFoundError:
-            return {"enabled": False}
+        adr_section: Optional[Dict] = None
+        eg_section: Optional[Dict] = None
+        mgmt_endpoint: Optional[Dict] = None
+        mgmt_endpoint_exists = False
+        eg_all_exist = False
 
-        try:
-            self.eventgrid_mgmt_client.permission_bindings.get(
-                resource_group_name=eg_resource_group,
-                namespace_name=eg_namespace_name,
-                permission_binding_name=sub_binding_name,
-            )
-        except ResourceNotFoundError:
-            return {"enabled": False}
+        with WorkflowDisplay(
+            title="Management Actions Status",
+            categories=analyzing_cats,
+            transient=True,
+            no_progress=no_progress,
+        ) as display:
+            # --- ADR namespace ---
+            with display.step_scope("Analyzing", "Instance & ADR namespace"):
+                instance = self.iotops_mgmt_client.instance.get(
+                    instance_name=name,
+                    resource_group_name=resource_group_name,
+                )
+                instance_resource_id: str = instance["id"]
+                custom_location_id: str = instance.get("extendedLocation", {}).get("name", "")
+
+                adr_namespace_resource_id = (
+                    instance.get("properties", {}).get("adrNamespaceRef", {}).get("resourceId")
+                )
+
+                if adr_namespace_resource_id:
+                    parsed_adr = parse_resource_id_dict(adr_namespace_resource_id)
+                    adr_subscription_id = parsed_adr.get("subscription", "")
+                    adr_resource_group = parsed_adr.get("resource_group", "")
+                    adr_namespace_name = parsed_adr.get("name", "")
+
+                    if adr_subscription_id and adr_resource_group and adr_namespace_name:
+                        try:
+                            adr_namespace = self.registry_mgmt_client.namespaces.get(
+                                resource_group_name=adr_resource_group,
+                                namespace_name=adr_namespace_name,
+                            )
+                            existing_endpoints = (
+                                adr_namespace.get("properties", {})
+                                .get("management", {})
+                                .get("endpoints", {})
+                            )
+                            mgmt_endpoint = existing_endpoints.get(custom_location_id) if custom_location_id else None
+                            mgmt_endpoint_exists = bool(mgmt_endpoint)
+
+                            adr_section = {
+                                "name": adr_namespace_name,
+                                "resourceGroup": adr_resource_group,
+                                "subscriptionId": adr_subscription_id,
+                                "managementEndpoint": {
+                                    "endpointType": mgmt_endpoint.get("endpointType", ""),
+                                    "address": mgmt_endpoint.get("address", ""),
+                                    "scopeId": mgmt_endpoint.get("scopeId", ""),
+                                } if mgmt_endpoint else None,
+                            }
+                        except ResourceNotFoundError:
+                            logger.warning(
+                                "ADR namespace '%s' not found.", adr_namespace_name,
+                            )
+
+                display.update_step("Analyzing", "Instance & ADR namespace", StepState.COMPLETE, "done")
+
+            # --- Event Grid ---
+            with display.step_scope("Analyzing", "Event Grid resources"):
+                eg_ctx = self._discover_eg_context(mgmt_endpoint)
+
+                if eg_ctx:
+                    # Verify namespace is reachable
+                    try:
+                        eg_namespace = self.eventgrid_mgmt_client.namespaces.get(
+                            resource_group_name=eg_ctx.resource_group_name,
+                            namespace_name=eg_ctx.namespace_name,
+                        )
+                        mqtt_hostname = (
+                            eg_namespace.get("properties", {})
+                            .get("topicSpacesConfiguration", {})
+                            .get("hostname", "")
+                        )
+
+                        # Reconstruct deterministic resource names
+                        ts_name = get_mgmt_actions_resource_name("ops", instance_resource_id)
+                        pub_name = get_mgmt_actions_resource_name("pub", instance_resource_id)
+                        sub_name = get_mgmt_actions_resource_name("sub", instance_resource_id)
+
+                        rg = eg_ctx.resource_group_name
+                        ns = eg_ctx.namespace_name
+
+                        # Probe topic space — single GET captures both existence and content
+                        ts_exists = False
+                        topic_space_section: Dict[str, Any] = {"name": ts_name, "exists": False}
+                        try:
+                            ts_resource = self.eventgrid_mgmt_client.topic_spaces.get(
+                                resource_group_name=rg, namespace_name=ns, topic_space_name=ts_name,
+                            )
+                            ts_exists = True
+                            topic_space_section = {
+                                "name": ts_name,
+                                "scopeId": name,
+                                "topicTemplates": ts_resource.get("properties", {}).get("topicTemplates", []),
+                                "exists": True,
+                            }
+                        except ResourceNotFoundError:
+                            pass
+
+                        # Probe permission bindings — single GET each
+                        pub_exists = False
+                        pub_section: Dict[str, Any] = {"name": pub_name}
+                        try:
+                            pub_resource = self.eventgrid_mgmt_client.permission_bindings.get(
+                                resource_group_name=rg, namespace_name=ns, permission_binding_name=pub_name,
+                            )
+                            pub_exists = True
+                            pub_section["clientGroup"] = (
+                                pub_resource.get("properties", {}).get("clientGroupName", "")
+                            )
+                        except ResourceNotFoundError:
+                            pass
+
+                        sub_exists = False
+                        sub_section: Dict[str, Any] = {"name": sub_name}
+                        try:
+                            sub_resource = self.eventgrid_mgmt_client.permission_bindings.get(
+                                resource_group_name=rg, namespace_name=ns, permission_binding_name=sub_name,
+                            )
+                            sub_exists = True
+                            sub_section["clientGroup"] = (
+                                sub_resource.get("properties", {}).get("clientGroupName", "")
+                            )
+                        except ResourceNotFoundError:
+                            pass
+
+                        bindings_exist = pub_exists and sub_exists
+                        eg_all_exist = ts_exists and bindings_exist
+                        eg_section = {
+                            "namespace": {
+                                "name": eg_ctx.namespace_name,
+                                "resourceGroup": eg_ctx.resource_group_name,
+                                "subscriptionId": eg_ctx.subscription_id,
+                                "mqttHostname": mqtt_hostname,
+                            },
+                            "topicSpace": topic_space_section,
+                            "permissionBindings": {
+                                "publisher": pub_section,
+                                "subscriber": sub_section,
+                                "exists": bindings_exist,
+                            },
+                        }
+                    except ResourceNotFoundError:
+                        logger.warning(
+                            "Event Grid namespace '%s' not found.", eg_ctx.namespace_name,
+                        )
+
+                eg_detail = "done" if eg_section else ("not reachable" if eg_ctx else "skipped")
+                display.update_step("Analyzing", "Event Grid resources", StepState.COMPLETE, eg_detail)
+
+            # --- AIO dataflow resources ---
+            with display.step_scope("Analyzing", "Instance dataflow resources"):
+                ep_name = get_mgmt_actions_resource_name("eg", instance_resource_id)
+                graph_name = get_mgmt_actions_resource_name("req", instance_resource_id)
+                resp_name = get_mgmt_actions_resource_name("resp", instance_resource_id)
+
+                # Probe dataflow endpoint
+                ep_exists = False
+                ep_authentication: Optional[Dict] = None
+                try:
+                    ep_resource = self.iotops_mgmt_client.dataflow_endpoint.get(
+                        resource_group_name=resource_group_name,
+                        instance_name=name,
+                        dataflow_endpoint_name=ep_name,
+                    )
+                    ep_exists = True
+                    ep_authentication = (
+                        ep_resource.get("properties", {})
+                        .get("mqttSettings", {})
+                        .get("authentication")
+                    )
+                except ResourceNotFoundError:
+                    pass
+
+                # Discover dataflow graph profile
+                graph_profile = self._discover_dataflow_profile(
+                    instance_name=name,
+                    resource_group_name=resource_group_name,
+                    get_resource=lambda profile: self.iotops_mgmt_client.dataflow_graph.get(
+                        resource_group_name=resource_group_name,
+                        instance_name=name,
+                        dataflow_profile_name=profile,
+                        dataflow_graph_name=graph_name,
+                    ),
+                )
+                graph_exists = bool(graph_profile)
+
+                # Discover response dataflow profile.
+                # If graph was found under a specific profile, check there first.
+                resp_profile: Optional[str] = None
+                if graph_profile:
+                    try:
+                        self.iotops_mgmt_client.dataflow.get(
+                            resource_group_name=resource_group_name,
+                            instance_name=name,
+                            dataflow_profile_name=graph_profile,
+                            dataflow_name=resp_name,
+                        )
+                        resp_profile = graph_profile
+                    except ResourceNotFoundError:
+                        pass  # Fall through to independent discovery
+
+                if not resp_profile:
+                    resp_profile = self._discover_dataflow_profile(
+                        instance_name=name,
+                        resource_group_name=resource_group_name,
+                        get_resource=lambda profile: self.iotops_mgmt_client.dataflow.get(
+                            resource_group_name=resource_group_name,
+                            instance_name=name,
+                            dataflow_profile_name=profile,
+                            dataflow_name=resp_name,
+                        ),
+                    )
+                resp_exists = bool(resp_profile)
+
+                # Reported profile: graph's profile takes priority
+                reported_profile = graph_profile or resp_profile
+
+                aio_all_exist = ep_exists and graph_exists and resp_exists
+
+                display.update_step("Analyzing", "Instance dataflow resources", StepState.COMPLETE, "done")
+
+        # --- Build result ---
+        instance_section = {
+            "dataflowProfile": reported_profile,
+            "dataflowEndpoint": {
+                "name": ep_name,
+                "authentication": ep_authentication,
+                "exists": ep_exists,
+            },
+            "requestDataflowGraph": {"name": graph_name, "exists": graph_exists},
+            "responseDataflow": {"name": resp_name, "exists": resp_exists},
+        }
+
+        enabled = mgmt_endpoint_exists and eg_all_exist and aio_all_exist
 
         return {
-            "enabled": True,
-            "eventGrid": {
-                "namespace": {
-                    "name": eg_namespace_name,
-                    "resourceGroup": eg_resource_group,
-                    "subscriptionId": eg_subscription_id,
-                    "mqttHostname": mqtt_hostname,
-                },
-                "topicSpace": topic_space_result,
-                "permissionBindings": {
-                    "publisherName": pub_binding_name,
-                    "subscriberName": sub_binding_name,
-                    "clientGroup": client_group,
-                },
-            },
-            "deviceRegistryNamespace": {
-                "name": adr_namespace_name,
-                "resourceGroup": adr_resource_group,
-                "subscriptionId": adr_subscription_id,
-                "managementEndpoint": {
-                    "endpointType": mgmt_endpoint.get("endpointType", ""),
-                    "address": mgmt_endpoint.get("address", ""),
-                    "scopeId": mgmt_endpoint.get("scopeId", ""),
-                },
-            },
+            "enabled": enabled,
+            "instance": instance_section,
+            "eventGrid": eg_section,
+            "deviceRegistryNamespace": adr_section,
         }
 
     def disable(
@@ -431,14 +777,570 @@ class MgmtActions(Queryable):
         name: str,
         resource_group_name: str,
         confirm_yes: Optional[bool] = None,
+        no_progress: Optional[bool] = None,
         **kwargs,
     ) -> None:
         """Disable management actions for an IoT Operations instance.
 
-        Tears down outer loop resources: dataflow graph, response dataflow, EG dataflow endpoint,
+        Tears down management actions resources: dataflow graph, response dataflow, EG dataflow endpoint,
         EG topic space/permission bindings, and ADR namespace management endpoint entry.
+        Role assignments are NOT removed — they may be shared with other resources.
         """
-        raise NotImplementedError("mgmt-actions disable is not yet implemented")
+
+        # --- Phase 1: Discovery (transient — vanishes before prompt) ---
+        analyzing_cats = {
+            "Analyzing": ["Instance & ADR namespace", "Dataflow profile detection", "EG resource probing"],
+        }
+        with WorkflowDisplay(
+            "Management Actions Disablement", analyzing_cats, no_progress=no_progress,
+        ) as display:
+            with display.step_scope("Analyzing", "Instance & ADR namespace"):
+                # Resolve instance
+                instance = self.iotops_mgmt_client.instance.get(
+                    instance_name=name,
+                    resource_group_name=resource_group_name,
+                )
+                instance_resource_id: str = instance["id"]
+
+                # Derive deterministic resource names
+                resp_name = get_mgmt_actions_resource_name("resp", instance_resource_id)
+                graph_name = get_mgmt_actions_resource_name("req", instance_resource_id)
+                ep_name = get_mgmt_actions_resource_name("eg", instance_resource_id)
+                ts_name = get_mgmt_actions_resource_name("ops", instance_resource_id)
+                pub_name = get_mgmt_actions_resource_name("pub", instance_resource_id)
+                sub_name = get_mgmt_actions_resource_name("sub", instance_resource_id)
+
+                # Discover EG namespace from ADR namespace management endpoint
+                adr_namespace_resource_id = instance.get("properties", {}).get(
+                    "adrNamespaceRef", {},
+                ).get("resourceId")
+                if not adr_namespace_resource_id:
+                    logger.warning(
+                        "Instance '%s' does not have an ADR namespace reference. "
+                        "Management actions may not have been enabled.",
+                        name,
+                    )
+                    display.update_step("Analyzing", "Instance & ADR namespace", StepState.SKIPPED, "no ref")
+                    return
+
+                parsed_adr = parse_resource_id_dict(adr_namespace_resource_id)
+                adr_resource_group = parsed_adr.get("resource_group", "")
+                adr_namespace_name = parsed_adr.get("name", "")
+
+                try:
+                    adr_namespace = self.registry_mgmt_client.namespaces.get(
+                        resource_group_name=adr_resource_group,
+                        namespace_name=adr_namespace_name,
+                    )
+                except ResourceNotFoundError:
+                    logger.warning(
+                        "ADR namespace '%s' not found. Management actions may not have been enabled.",
+                        adr_namespace_name,
+                    )
+                    display.update_step("Analyzing", "Instance & ADR namespace", StepState.SKIPPED, "not found")
+                    return
+
+                custom_location_id: str = instance.get("extendedLocation", {}).get("name", "")
+                existing_endpoints = adr_namespace.get("properties", {}).get(
+                    "management", {},
+                ).get("endpoints", {})
+                mgmt_endpoint = existing_endpoints.get(custom_location_id)
+
+                eg_ctx = self._discover_eg_context(mgmt_endpoint)
+                display.update_step("Analyzing", "Instance & ADR namespace", StepState.COMPLETE, "found")
+
+            # --- Discovery phase: probe AIO resources before prompting ---
+            with display.step_scope("Analyzing", "Dataflow profile detection"):
+                # Auto-detect the dataflow profile containing our graph
+                dataflow_profile_name = self._discover_dataflow_profile(
+                    instance_name=name,
+                    resource_group_name=resource_group_name,
+                    get_resource=lambda profile: self.iotops_mgmt_client.dataflow_graph.get(
+                        resource_group_name=resource_group_name,
+                        instance_name=name,
+                        dataflow_profile_name=profile,
+                        dataflow_graph_name=graph_name,
+                    ),
+                )
+
+                # If graph gone, check for orphaned response dataflow
+                resp_profile_name: Optional[str] = None
+                if not dataflow_profile_name:
+                    resp_profile_name = self._discover_dataflow_profile(
+                        instance_name=name,
+                        resource_group_name=resource_group_name,
+                        get_resource=lambda profile: self.iotops_mgmt_client.dataflow.get(
+                            resource_group_name=resource_group_name,
+                            instance_name=name,
+                            dataflow_profile_name=profile,
+                            dataflow_name=resp_name,
+                        ),
+                    )
+
+                # Check dataflow endpoint existence
+                ep_exists = True
+                try:
+                    self.iotops_mgmt_client.dataflow_endpoint.get(
+                        resource_group_name=resource_group_name,
+                        instance_name=name,
+                        dataflow_endpoint_name=ep_name,
+                    )
+                except ResourceNotFoundError:
+                    ep_exists = False
+
+                if dataflow_profile_name:
+                    profile_detail = "found"
+                elif resp_profile_name:
+                    profile_detail = "orphaned"
+                else:
+                    profile_detail = "not found"
+                display.update_step("Analyzing", "Dataflow profile detection", StepState.COMPLETE, profile_detail)
+
+            # Check EG resource existence (topic space + permission bindings)
+            with display.step_scope("Analyzing", "EG resource probing"):
+                ts_exists, pub_exists, sub_exists = self._probe_eg_resources(
+                    eg_ctx=eg_ctx, ts_name=ts_name, pub_name=pub_name, sub_name=sub_name,
+                )
+                eg_found_count = sum([ts_exists, pub_exists, sub_exists])
+                eg_probe_detail = f"{eg_found_count} found" if eg_found_count else "none found"
+                display.update_step("Analyzing", "EG resource probing", StepState.COMPLETE, eg_probe_detail)
+
+        # --- Phase 2: Summary + prompt (no display active) ---
+        # Print summary of what will be removed (skip when --yes bypasses the prompt)
+        if not confirm_yes:
+            _log_disable_summary(
+                instance_resource_id=instance_resource_id,
+                dataflow_profile_name=dataflow_profile_name,
+                resp_profile_name=resp_profile_name,
+                ep_exists=ep_exists,
+                has_adr_entry=custom_location_id in existing_endpoints,
+                adr_namespace_name=adr_namespace_name,
+                instance_name=name,
+                ts_exists=ts_exists,
+                pub_exists=pub_exists,
+                sub_exists=sub_exists,
+                eg_ctx=eg_ctx,
+            )
+
+        if not should_continue_prompt(confirm_yes=confirm_yes):
+            return
+
+        # --- Phase 3: Teardown (persistent — display remains as evidence) ---
+        self._execute_disable_teardown(
+            name=name,
+            resource_group_name=resource_group_name,
+            dataflow_profile_name=dataflow_profile_name,
+            resp_profile_name=resp_profile_name,
+            resp_name=resp_name,
+            graph_name=graph_name,
+            ep_name=ep_name,
+            ep_exists=ep_exists,
+            adr_namespace=adr_namespace,
+            adr_resource_group=adr_resource_group,
+            adr_namespace_name=adr_namespace_name,
+            custom_location_id=custom_location_id,
+            existing_endpoints=existing_endpoints,
+            eg_ctx=eg_ctx,
+            pub_name=pub_name,
+            sub_name=sub_name,
+            pub_exists=pub_exists,
+            sub_exists=sub_exists,
+            ts_name=ts_name,
+            ts_exists=ts_exists,
+            no_progress=no_progress,
+            **kwargs,
+        )
+
+    def _execute_disable_teardown(
+        self,
+        name: str,
+        resource_group_name: str,
+        dataflow_profile_name: Optional[str],
+        resp_profile_name: Optional[str],
+        resp_name: str,
+        graph_name: str,
+        ep_name: str,
+        ep_exists: bool,
+        adr_namespace: Dict,
+        adr_resource_group: str,
+        adr_namespace_name: str,
+        custom_location_id: str,
+        existing_endpoints: Dict,
+        eg_ctx: Optional["EgNamespaceContext"],
+        pub_name: str,
+        sub_name: str,
+        pub_exists: bool,
+        sub_exists: bool,
+        ts_name: str,
+        ts_exists: bool,
+        no_progress: Optional[bool] = None,
+        **kwargs,
+    ) -> None:
+        """Execute the Phase 3 teardown of disable(), deleting discovered resources.
+
+        Orchestrates three domain-specific teardown helpers (AIO, ADR, EG) under a
+        single persistent WorkflowDisplay. All parameters are pre-resolved during
+        discovery (Phase 1).
+        """
+        eg_ns_label = f"Event Grid Namespace ({eg_ctx.namespace_name})" if eg_ctx else "Event Grid Namespace"
+        cat_aio = f"IoT Operations Instance ({name})"
+        cat_adr = f"Device Registry Namespace ({adr_namespace_name})"
+
+        teardown_cats: Dict[str, List[str]] = {
+            cat_aio: ["Response dataflow", "Dataflow graph", "EG dataflow endpoint"],
+            cat_adr: ["Management endpoint"],
+            eg_ns_label: ["Permission bindings", "Topic space"],
+        }
+        with WorkflowDisplay(
+            "Management Actions Disablement", teardown_cats, transient=False, no_progress=no_progress,
+        ) as display:
+            self._teardown_aio_resources(
+                display=display,
+                category=cat_aio,
+                name=name,
+                resource_group_name=resource_group_name,
+                dataflow_profile_name=dataflow_profile_name,
+                resp_profile_name=resp_profile_name,
+                resp_name=resp_name,
+                graph_name=graph_name,
+                ep_name=ep_name,
+                ep_exists=ep_exists,
+                **kwargs,
+            )
+            self._teardown_adr_endpoint(
+                display=display,
+                category=cat_adr,
+                adr_namespace=adr_namespace,
+                adr_resource_group=adr_resource_group,
+                adr_namespace_name=adr_namespace_name,
+                custom_location_id=custom_location_id,
+                existing_endpoints=existing_endpoints,
+                **kwargs,
+            )
+            self._teardown_eg_resources(
+                display=display,
+                category=eg_ns_label,
+                eg_ctx=eg_ctx,
+                pub_name=pub_name,
+                sub_name=sub_name,
+                pub_exists=pub_exists,
+                sub_exists=sub_exists,
+                ts_name=ts_name,
+                ts_exists=ts_exists,
+                **kwargs,
+            )
+
+    def _teardown_aio_resources(
+        self,
+        display: WorkflowDisplay,
+        category: str,
+        name: str,
+        resource_group_name: str,
+        dataflow_profile_name: Optional[str],
+        resp_profile_name: Optional[str],
+        resp_name: str,
+        graph_name: str,
+        ep_name: str,
+        ep_exists: bool,
+        **kwargs,
+    ) -> None:
+        """Delete AIO dataflow resources (response dataflow, graph, EG endpoint).
+
+        Handles three scenarios: both graph+response exist under one profile,
+        only an orphaned response dataflow exists, or neither is found.
+        """
+        if dataflow_profile_name:
+            with display.step_scope(category, "Response dataflow"):
+                _graceful_delete(
+                    lambda: self.iotops_mgmt_client.dataflow.begin_delete(
+                        resource_group_name=resource_group_name,
+                        instance_name=name,
+                        dataflow_profile_name=dataflow_profile_name,
+                        dataflow_name=resp_name,
+                    ),
+                    resource_desc=f"response dataflow '{resp_name}'",
+                    **kwargs,
+                )
+                display.update_step(category, "Response dataflow", StepState.COMPLETE, "removed")
+
+            with display.step_scope(category, "Dataflow graph"):
+                _graceful_delete(
+                    lambda: self.iotops_mgmt_client.dataflow_graph.begin_delete(
+                        resource_group_name=resource_group_name,
+                        instance_name=name,
+                        dataflow_profile_name=dataflow_profile_name,
+                        dataflow_graph_name=graph_name,
+                    ),
+                    resource_desc=f"dataflow graph '{graph_name}'",
+                    **kwargs,
+                )
+                display.update_step(category, "Dataflow graph", StepState.COMPLETE, "removed")
+        elif resp_profile_name:
+            with display.step_scope(category, "Response dataflow"):
+                _graceful_delete(
+                    lambda: self.iotops_mgmt_client.dataflow.begin_delete(
+                        resource_group_name=resource_group_name,
+                        instance_name=name,
+                        dataflow_profile_name=resp_profile_name,
+                        dataflow_name=resp_name,
+                    ),
+                    resource_desc=f"orphaned response dataflow '{resp_name}'",
+                    **kwargs,
+                )
+                display.update_step(category, "Response dataflow", StepState.COMPLETE, "removed")
+            display.update_step(category, "Dataflow graph", StepState.SKIPPED, "not found")
+        else:
+            logger.info(
+                "Dataflow graph '%s' and response dataflow '%s' not found in any profile — skipping.",
+                graph_name,
+                resp_name,
+            )
+            display.update_step(category, "Response dataflow", StepState.SKIPPED, "not found")
+            display.update_step(category, "Dataflow graph", StepState.SKIPPED, "not found")
+
+        if ep_exists:
+            with display.step_scope(category, "EG dataflow endpoint"):
+                _graceful_delete(
+                    lambda: self.iotops_mgmt_client.dataflow_endpoint.begin_delete(
+                        resource_group_name=resource_group_name,
+                        instance_name=name,
+                        dataflow_endpoint_name=ep_name,
+                    ),
+                    resource_desc=f"dataflow endpoint '{ep_name}'",
+                    **kwargs,
+                )
+                display.update_step(category, "EG dataflow endpoint", StepState.COMPLETE, "removed")
+        else:
+            logger.info("Dataflow endpoint '%s' not found — skipping.", ep_name)
+            display.update_step(category, "EG dataflow endpoint", StepState.SKIPPED, "not found")
+
+    def _teardown_adr_endpoint(
+        self,
+        display: WorkflowDisplay,
+        category: str,
+        adr_namespace: Dict,
+        adr_resource_group: str,
+        adr_namespace_name: str,
+        custom_location_id: str,
+        existing_endpoints: Dict,
+        **kwargs,
+    ) -> None:
+        """Remove the management endpoint entry from the ADR namespace."""
+        if custom_location_id in existing_endpoints:
+            with display.step_scope(category, "Management endpoint"):
+                put_payload = _build_adr_put_payload(adr_namespace, endpoint_key_to_remove=custom_location_id)
+                poller = self.registry_mgmt_client.namespaces.begin_create_or_replace(
+                    resource_group_name=adr_resource_group,
+                    namespace_name=adr_namespace_name,
+                    resource=put_payload,
+                )
+                wait_for_terminal_state(poller, **kwargs)
+                logger.info(
+                    "Removed management endpoint entry for custom location from ADR namespace '%s'.",
+                    adr_namespace_name,
+                )
+                display.update_step(
+                    category, "Management endpoint", StepState.COMPLETE, "removed",
+                )
+        else:
+            logger.info(
+                "No management endpoint entry found for custom location on ADR namespace '%s' — skipping.",
+                adr_namespace_name,
+            )
+            display.update_step(
+                category, "Management endpoint", StepState.SKIPPED, "not found",
+            )
+
+    def _teardown_eg_resources(
+        self,
+        display: WorkflowDisplay,
+        category: str,
+        eg_ctx: Optional["EgNamespaceContext"],
+        pub_name: str,
+        sub_name: str,
+        pub_exists: bool,
+        sub_exists: bool,
+        ts_name: str,
+        ts_exists: bool,
+        **kwargs,
+    ) -> None:
+        """Delete EG permission bindings and topic space."""
+        if not eg_ctx:
+            logger.info("EG namespace not discovered from ADR — skipping EG resource cleanup.")
+            display.update_step(category, "Permission bindings", StepState.SKIPPED, "not found")
+            display.update_step(category, "Topic space", StepState.SKIPPED, "not found")
+            return
+
+        if pub_exists or sub_exists:
+            with display.step_scope(category, "Permission bindings"):
+                if pub_exists:
+                    _graceful_delete(
+                        lambda: self.eventgrid_mgmt_client.permission_bindings.begin_delete(
+                            resource_group_name=eg_ctx.resource_group_name,
+                            namespace_name=eg_ctx.namespace_name,
+                            permission_binding_name=pub_name,
+                        ),
+                        resource_desc=f"permission binding '{pub_name}'",
+                        **kwargs,
+                    )
+                if sub_exists:
+                    _graceful_delete(
+                        lambda: self.eventgrid_mgmt_client.permission_bindings.begin_delete(
+                            resource_group_name=eg_ctx.resource_group_name,
+                            namespace_name=eg_ctx.namespace_name,
+                            permission_binding_name=sub_name,
+                        ),
+                        resource_desc=f"permission binding '{sub_name}'",
+                        **kwargs,
+                    )
+                display.update_step(category, "Permission bindings", StepState.COMPLETE, "removed")
+        else:
+            display.update_step(category, "Permission bindings", StepState.SKIPPED, "not found")
+
+        if ts_exists:
+            with display.step_scope(category, "Topic space"):
+                _graceful_delete(
+                    lambda: self.eventgrid_mgmt_client.topic_spaces.begin_delete(
+                        resource_group_name=eg_ctx.resource_group_name,
+                        namespace_name=eg_ctx.namespace_name,
+                        topic_space_name=ts_name,
+                    ),
+                    resource_desc=f"topic space '{ts_name}'",
+                    **kwargs,
+                )
+                display.update_step(category, "Topic space", StepState.COMPLETE, "removed")
+        else:
+            display.update_step(category, "Topic space", StepState.SKIPPED, "not found")
+
+        if not any([pub_exists, sub_exists, ts_exists]):
+            logger.info("No EG resources found on namespace '%s' — skipping.", eg_ctx.namespace_name)
+
+    def _probe_eg_resources(
+        self,
+        eg_ctx: Optional[EgNamespaceContext],
+        ts_name: str,
+        pub_name: str,
+        sub_name: str,
+    ) -> Tuple[bool, bool, bool]:
+        """Check whether EG topic space and permission bindings exist.
+
+        Issues individual GET requests for each resource, catching
+        ResourceNotFoundError for resources that have already been removed.
+        Skipped entirely when eg_ctx is None (no EG namespace discovered).
+
+        Returns:
+            (ts_exists, pub_exists, sub_exists) tuple of booleans.
+        """
+        if not eg_ctx:
+            return False, False, False
+
+        rg = eg_ctx.resource_group_name
+        ns = eg_ctx.namespace_name
+
+        ts_exists = True
+        try:
+            self.eventgrid_mgmt_client.topic_spaces.get(
+                resource_group_name=rg, namespace_name=ns, topic_space_name=ts_name,
+            )
+        except ResourceNotFoundError:
+            ts_exists = False
+
+        pub_exists = True
+        try:
+            self.eventgrid_mgmt_client.permission_bindings.get(
+                resource_group_name=rg, namespace_name=ns, permission_binding_name=pub_name,
+            )
+        except ResourceNotFoundError:
+            pub_exists = False
+
+        sub_exists = True
+        try:
+            self.eventgrid_mgmt_client.permission_bindings.get(
+                resource_group_name=rg, namespace_name=ns, permission_binding_name=sub_name,
+            )
+        except ResourceNotFoundError:
+            sub_exists = False
+
+        return ts_exists, pub_exists, sub_exists
+
+    def _discover_dataflow_profile(
+        self,
+        instance_name: str,
+        resource_group_name: str,
+        get_resource: Callable[[str], dict],
+    ) -> Optional[str]:
+        """Auto-detect which dataflow profile contains a mgmt-actions resource.
+
+        Tries the default profile first (common case). If not found, lists all
+        profiles and checks each one. Returns the profile name or None if the
+        resource doesn't exist in any profile.
+
+        Args:
+            get_resource: Callable that takes a profile name and returns the resource
+                dict on success, or raises ResourceNotFoundError if absent.
+        """
+        # Fast path: check the default profile
+        try:
+            get_resource(MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE)
+            return MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE
+        except ResourceNotFoundError:
+            pass
+
+        # Slow path: enumerate all profiles
+        profiles = self.iotops_mgmt_client.dataflow_profile.list_by_resource_group(
+            resource_group_name=resource_group_name,
+            instance_name=instance_name,
+        )
+        for profile in profiles:
+            profile_name = profile.get("name", "")
+            if not profile_name or profile_name == MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE:
+                continue
+            try:
+                get_resource(profile_name)
+                return profile_name
+            except ResourceNotFoundError:
+                continue
+
+        return None
+
+    def _discover_eg_context(self, mgmt_endpoint: Optional[Dict]) -> Optional[EgNamespaceContext]:
+        """Extract EG namespace context from an ADR management endpoint entry.
+
+        Parses the resourceId from the endpoint, validates required fields, and creates
+        a cross-subscription EG client when the namespace is in a different subscription.
+        Returns None if the endpoint is missing or has incomplete EG reference data.
+        """
+        if not mgmt_endpoint:
+            return None
+
+        eg_resource_id = mgmt_endpoint.get("resourceId", "")
+        if not eg_resource_id:
+            return None
+
+        parsed_eg = parse_resource_id_dict(eg_resource_id)
+        eg_namespace_name = parsed_eg.get("name", "")
+        eg_resource_group = parsed_eg.get("resource_group", "")
+        eg_subscription_id = parsed_eg.get("subscription", "")
+        mqtt_hostname = mgmt_endpoint.get("address", "")
+
+        if not (eg_namespace_name and eg_resource_group and eg_subscription_id):
+            return None
+
+        eg_ctx = EgNamespaceContext(
+            resource_id=eg_resource_id,
+            subscription_id=eg_subscription_id,
+            resource_group_name=eg_resource_group,
+            namespace_name=eg_namespace_name,
+            mqtt_hostname=mqtt_hostname,
+        )
+
+        # Handle cross-subscription EG namespace
+        if eg_subscription_id.lower() != self.default_subscription_id.lower():
+            self.eventgrid_mgmt_client = get_eventgrid_mgmt_client(
+                **self._get_client_kwargs(subscription_id=eg_subscription_id)
+            )
+
+        return eg_ctx
 
     def _validate_eg_namespace(self, eg_resource_id: str) -> EgNamespaceContext:
         """Parse, fetch, and validate an Event Grid namespace for mgmt-actions use.
@@ -479,7 +1381,9 @@ class MgmtActions(Queryable):
                 eg_subscription_id,
                 self.default_subscription_id,
             )
-            self.eventgrid_mgmt_client = get_eventgrid_mgmt_client(subscription_id=eg_subscription_id)
+            self.eventgrid_mgmt_client = get_eventgrid_mgmt_client(
+                **self._get_client_kwargs(subscription_id=eg_subscription_id)
+            )
 
         # Fetch the namespace
         try:
@@ -562,6 +1466,7 @@ class MgmtActions(Queryable):
                 "name": topic_space_name,
                 "topicTemplates": topic_templates,
                 "scopeId": instance_name,
+                "exists": True,
             }
         except ResourceNotFoundError:
             pass
@@ -587,6 +1492,7 @@ class MgmtActions(Queryable):
             "name": topic_space_name,
             "topicTemplates": topic_templates,
             "scopeId": instance_name,
+            "exists": False,
         }
 
     def _setup_eg_permission_bindings(
@@ -607,6 +1513,7 @@ class MgmtActions(Queryable):
         sub_name = get_mgmt_actions_resource_name("sub", instance_resource_id)
 
         result: Dict = {}
+        all_exists = True
         for binding_name, permission, key in [
             (pub_name, "Publisher", "publisher"),
             (sub_name, "Subscriber", "subscriber"),
@@ -626,7 +1533,7 @@ class MgmtActions(Queryable):
                 result[key] = {"name": binding_name, "clientGroup": client_group}
                 continue
             except ResourceNotFoundError:
-                pass
+                all_exists = False
 
             # Create the permission binding
             binding_payload = {
@@ -655,6 +1562,7 @@ class MgmtActions(Queryable):
             )
             result[key] = {"name": binding_name, "clientGroup": client_group}
 
+        result["exists"] = all_exists
         return result
 
     def _setup_eg_dataflow_endpoint(
@@ -667,14 +1575,21 @@ class MgmtActions(Queryable):
         mi_resource: Optional[Dict] = None,
         **kwargs,
     ) -> Dict:
-        """Create or confirm the EG MQTT dataflow endpoint on the AIO instance.
+        """Create or update the EG MQTT dataflow endpoint on the AIO instance.
 
         Uses GET-then-PUT to report accurate status. The endpoint connects to the EG
         namespace's MQTT broker using managed identity authentication. Defaults to
         SystemAssigned MI; when mi_resource is provided, a UserAssigned MI is
         configured instead using clientId and tenantId from the resolved UAMI resource.
+
+        When the endpoint already exists, compares host and authentication against the
+        desired state. If either differs (e.g., re-enabling with a different EG namespace
+        or switching between SAMI/UAMI), the endpoint is updated via PUT.
         """
         endpoint_name = get_mgmt_actions_resource_name("eg", instance_resource_id)
+
+        # Build desired authentication block
+        desired_authentication = self._build_eg_endpoint_auth(mi_resource)
 
         # Check if endpoint already exists
         try:
@@ -683,33 +1598,29 @@ class MgmtActions(Queryable):
                 instance_name=instance_name,
                 dataflow_endpoint_name=endpoint_name,
             )
-            logger.info(
-                "Dataflow endpoint '%s' already exists on instance '%s'.",
-                endpoint_name,
-                instance_name,
-            )
-            existing_auth = existing.get("properties", {}).get("mqttSettings", {}).get("authentication", {})
-            return {"name": endpoint_name, "authentication": existing_auth}
-        except ResourceNotFoundError:
-            pass
+            existing_mqtt = existing.get("properties", {}).get("mqttSettings", {})
+            existing_host = existing_mqtt.get("host", "")
+            existing_auth = existing_mqtt.get("authentication", {})
 
-        # Build authentication block
-        if mi_resource:
-            authentication = {
-                "method": "UserAssignedManagedIdentity",
-                "userAssignedManagedIdentitySettings": {
-                    "clientId": mi_resource["properties"]["clientId"],
-                    "tenantId": mi_resource["properties"]["tenantId"],
-                    "scope": MGMT_ACTIONS_EG_AUDIENCE,
-                },
-            }
-        else:
-            authentication = {
-                "method": "SystemAssignedManagedIdentity",
-                "systemAssignedManagedIdentitySettings": {
-                    "audience": MGMT_ACTIONS_EG_AUDIENCE,
-                },
-            }
+            # Compare host and auth — update if either differs
+            host_matches = existing_host == eg_ctx.mqtt_hostname
+            auth_matches = existing_auth == desired_authentication
+            if host_matches and auth_matches:
+                logger.info(
+                    "Dataflow endpoint '%s' already exists on instance '%s' with matching configuration.",
+                    endpoint_name,
+                    instance_name,
+                )
+                return {"name": endpoint_name, "authentication": existing_auth, "exists": True}
+
+            logger.info(
+                "Dataflow endpoint '%s' exists but configuration differs (host_match=%s, auth_match=%s). Updating.",
+                endpoint_name,
+                host_matches,
+                auth_matches,
+            )
+        except ResourceNotFoundError:
+            existing = None
 
         resource = {
             "extendedLocation": extended_location,
@@ -717,7 +1628,7 @@ class MgmtActions(Queryable):
                 "endpointType": MQTT_ENDPOINT_TYPE,
                 "mqttSettings": {
                     "host": eg_ctx.mqtt_hostname,
-                    "authentication": authentication,
+                    "authentication": desired_authentication,
                     "tls": {
                         "mode": "Enabled",
                     },
@@ -732,13 +1643,40 @@ class MgmtActions(Queryable):
             resource=resource,
         )
         wait_for_terminal_state(poller, **kwargs)
+
+        if existing:
+            logger.info(
+                "Updated dataflow endpoint '%s' on instance '%s'.",
+                endpoint_name,
+                instance_name,
+            )
+            return {"name": endpoint_name, "authentication": desired_authentication, "exists": True, "updated": True}
+
         logger.info(
             "Created dataflow endpoint '%s' on instance '%s'.",
             endpoint_name,
             instance_name,
         )
+        return {"name": endpoint_name, "authentication": desired_authentication, "exists": False}
 
-        return {"name": endpoint_name, "authentication": authentication}
+    @staticmethod
+    def _build_eg_endpoint_auth(mi_resource: Optional[Dict] = None) -> Dict:
+        """Build the authentication block for the EG MQTT dataflow endpoint."""
+        if mi_resource:
+            return {
+                "method": "UserAssignedManagedIdentity",
+                "userAssignedManagedIdentitySettings": {
+                    "clientId": mi_resource["properties"]["clientId"],
+                    "tenantId": mi_resource["properties"]["tenantId"],
+                    "scope": f"{MGMT_ACTIONS_EG_AUDIENCE}/.default",
+                },
+            }
+        return {
+            "method": "SystemAssignedManagedIdentity",
+            "systemAssignedManagedIdentitySettings": {
+                "audience": MGMT_ACTIONS_EG_AUDIENCE,
+            },
+        }
 
     def _setup_adr_management_endpoint(
         self,
@@ -748,7 +1686,7 @@ class MgmtActions(Queryable):
     ) -> Dict:
         """Enable system-assigned MI and configure the management endpoint on the ADR namespace.
 
-        Performs a GET-merge-PUT to preserve existing management endpoints. The endpoint
+        Performs a GET-merge-PATCH to preserve existing management endpoints. The endpoint
         key is the instance's custom location resource ID, connecting the ADR namespace
         to the Event Grid MQTT broker for management actions routing.
 
@@ -816,6 +1754,8 @@ class MgmtActions(Queryable):
                     "principalId": principal_id,
                 },
                 "managementEndpoints": existing_endpoints,
+                "identity_exists": True,
+                "endpoint_exists": True,
             }
 
         # Build the update payload
@@ -867,6 +1807,8 @@ class MgmtActions(Queryable):
                 "principalId": principal_id,
             },
             "managementEndpoints": updated_endpoints,
+            "identity_exists": identity_already_enabled,
+            "endpoint_exists": endpoint_already_configured,
         }
 
     def _setup_dataflow_graph(
@@ -877,6 +1819,7 @@ class MgmtActions(Queryable):
         extended_location: Dict,
         eg_dataflow_endpoint_name: str,
         dataflow_profile_name: str,
+        registry_endpoint_name: str,
         **kwargs,
     ) -> Dict:
         """Create or confirm the management actions dataflow graph on the AIO instance.
@@ -900,7 +1843,7 @@ class MgmtActions(Queryable):
                 graph_name,
                 instance_name,
             )
-            return {"name": graph_name}
+            return {"name": graph_name, "exists": True}
         except ResourceNotFoundError:
             pass
 
@@ -926,7 +1869,7 @@ class MgmtActions(Queryable):
                         "name": "graph",
                         "nodeType": "Graph",
                         "graphSettings": {
-                            "registryEndpointRef": MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT,
+                            "registryEndpointRef": registry_endpoint_name,
                             "artifact": MGMT_ACTIONS_GRAPH_ARTIFACT,
                             "configuration": rules_config,
                         },
@@ -968,7 +1911,7 @@ class MgmtActions(Queryable):
             dataflow_profile_name,
         )
 
-        return {"name": graph_name}
+        return {"name": graph_name, "exists": False}
 
     def _setup_response_dataflow(
         self,
@@ -1001,7 +1944,7 @@ class MgmtActions(Queryable):
                 dataflow_name,
                 instance_name,
             )
-            return {"name": dataflow_name}
+            return {"name": dataflow_name, "exists": True}
         except ResourceNotFoundError:
             pass
 
@@ -1045,7 +1988,7 @@ class MgmtActions(Queryable):
             dataflow_profile_name,
         )
 
-        return {"name": dataflow_name}
+        return {"name": dataflow_name, "exists": False}
 
     def _resolve_user_assigned_mi(self, mi_resource_id: str) -> Dict:
         """Fetch a user-assigned managed identity resource to extract clientId and tenantId.
@@ -1059,7 +2002,7 @@ class MgmtActions(Queryable):
         if mi_subscription.lower() != self.default_subscription_id.lower():
             from ...util.az_client import get_resource_client
 
-            client = get_resource_client(subscription_id=mi_subscription)
+            client = get_resource_client(**self._get_client_kwargs(subscription_id=mi_subscription))
         else:
             client = self.resource_client
 
@@ -1208,3 +2151,280 @@ class MgmtActions(Queryable):
             }
 
         return result
+
+    def _resolve_request_schema(
+        self,
+        instance: dict,
+        namespace_rg: str,
+        namespace_name: str,
+        asset_name: str,
+        group_name: str,
+        action_name: str,
+    ) -> Optional[dict]:
+        """Resolve the request JSON schema for a management action.
+
+        Walks the resolution chain: instance schemaRegistryRef → asset status →
+        action's requestMessageSchemaReference → schema version content.
+        Returns the parsed JSON Schema dict, or None if any step fails.
+        """
+        # Resolve schema registry from instance
+        schema_registry_id = (
+            instance.get("properties", {})
+            .get("schemaRegistryRef", {})
+            .get("resourceId")
+        )
+        if not schema_registry_id:
+            logger.debug("No schemaRegistryRef on instance — skipping payload validation.")
+            return None
+
+        parsed_registry = parse_resource_id_dict(schema_registry_id)
+        registry_rg = parsed_registry.get("resource_group")
+        registry_name = parsed_registry.get("name")
+        registry_sub = parsed_registry.get("subscription")
+        if not registry_rg or not registry_name:
+            logger.debug("Could not parse schema registry resource ID — skipping payload validation.")
+            return None
+
+        # Resolve client for schema registry operations (may be cross-subscription)
+        if registry_sub and registry_sub.casefold() != self.default_subscription_id.casefold():
+            logger.debug(
+                "Schema registry is in subscription %s — using cross-subscription client.",
+                registry_sub,
+            )
+            schema_client = get_registry_mgmt_client(**self._get_client_kwargs(subscription_id=registry_sub))
+        else:
+            schema_client = self.registry_mgmt_client
+
+        # Fetch asset with status to get requestMessageSchemaReference
+        try:
+            asset = self.registry_mgmt_client.namespace_assets.get(
+                resource_group_name=namespace_rg,
+                namespace_name=namespace_name,
+                asset_name=asset_name,
+            )
+        except HttpResponseError as e:
+            logger.debug("Failed to fetch asset for schema resolution: %s", e)
+            return None
+
+        # Find matching group + action in status
+        schema_ref = None
+        for mg in asset.get("properties", {}).get("status", {}).get("managementGroups", []):
+            if mg.get("name", "").casefold() != group_name.casefold():
+                continue
+            for action in mg.get("actions", []):
+                if action.get("name", "").casefold() != action_name.casefold():
+                    continue
+                schema_ref = action.get("requestMessageSchemaReference")
+                break
+            if schema_ref:
+                break
+
+        if not schema_ref:
+            logger.debug(
+                "No requestMessageSchemaReference found for group=%s action=%s — skipping.",
+                group_name,
+                action_name,
+            )
+            return None
+
+        schema_name = schema_ref.get("schemaName")
+        schema_version = schema_ref.get("schemaVersion")
+        if not schema_name or not schema_version:
+            logger.debug(
+                "Incomplete schemaReference (name=%s, version=%s) — skipping.",
+                schema_name,
+                schema_version,
+            )
+            return None
+
+        # Fetch schema version content
+        try:
+            schema_version_resource = schema_client.schema_versions.get(
+                resource_group_name=registry_rg,
+                schema_registry_name=registry_name,
+                schema_name=schema_name,
+                schema_version_name=schema_version,
+            )
+        except HttpResponseError as e:
+            logger.debug("Failed to fetch schema version %s/%s: %s", schema_name, schema_version, e)
+            return None
+
+        schema_content_str = schema_version_resource.get("properties", {}).get("schemaContent")
+        if not schema_content_str:
+            logger.debug("Schema version has no schemaContent — skipping payload validation.")
+            return None
+
+        # Parse schemaContent JSON
+        try:
+            return json.loads(schema_content_str)
+        except json.JSONDecodeError as e:
+            logger.debug("schemaContent is not valid JSON: %s — skipping payload validation.", e)
+            return None
+
+    def execute(
+        self,
+        instance_name: str,
+        resource_group_name: str,
+        asset_name: str,
+        group_name: str,
+        action_name: str,
+        payload: Optional[str] = None,
+        no_validate: bool = False,
+        show_schema: bool = False,
+        **kwargs,
+    ) -> dict:
+        """Execute a management action on a namespace asset.
+
+        Resolves the ADR namespace from the instance, then optionally validates the
+        payload against the action's request schema before invoking the executeAction
+        ARM operation as an LRO. Returns the action result (status, response, errors).
+
+        When show_schema is True, resolves and returns the request schema without
+        executing the action.
+        """
+        from ...util.file_operations import deserialize_json_input
+
+        # Resolve instance → ADR namespace
+        instance = self.iotops_mgmt_client.instance.get(
+            instance_name=instance_name,
+            resource_group_name=resource_group_name,
+        )
+        adr_namespace_ref = instance.get("properties", {}).get("adrNamespaceRef", {}).get("resourceId")
+        if not adr_namespace_ref:
+            raise ValidationError(
+                "Instance does not have an ADR namespace reference. "
+                "Ensure the instance is properly configured."
+            )
+        parsed_adr = parse_resource_id_dict(adr_namespace_ref)
+        namespace_rg = parsed_adr.get("resource_group")
+        namespace_name = parsed_adr.get("name")
+        if not namespace_rg or not namespace_name:
+            raise ValidationError(
+                f"Could not parse ADR namespace resource ID: {adr_namespace_ref}"
+            )
+
+        # --show-schema: resolve and return the request schema, then exit
+        if show_schema:
+            with console.status("Resolving request schema..."):
+                request_schema = self._resolve_request_schema(
+                    instance=instance,
+                    namespace_rg=namespace_rg,
+                    namespace_name=namespace_name,
+                    asset_name=asset_name,
+                    group_name=group_name,
+                    action_name=action_name,
+                )
+            if not request_schema:
+                raise ResourceNotFoundError(
+                    f"Could not resolve the request schema for action '{action_name}' "
+                    f"in group '{group_name}' on asset '{asset_name}'. "
+                    "The schema may not be published, the asset status may not be populated, "
+                    "or the schema registry may be inaccessible."
+                )
+            return request_schema
+
+        # Build request body
+        body: Dict[str, Any] = {
+            "managementActionName": action_name,
+            "managementGroupName": group_name,
+        }
+        deserialized_payload = None
+        if payload:
+            deserialized_payload = deserialize_json_input(payload)
+            body["payload"] = deserialized_payload
+
+        # Validate payload against request schema (when validation is enabled)
+        if not no_validate:
+            with console.status("Validating payload..."):
+                request_schema = self._resolve_request_schema(
+                    instance=instance,
+                    namespace_rg=namespace_rg,
+                    namespace_name=namespace_name,
+                    asset_name=asset_name,
+                    group_name=group_name,
+                    action_name=action_name,
+                )
+                if request_schema:
+                    from ...util.schema_validation import check_json_schema, validate_data_against_schema
+
+                    schema_issue = check_json_schema(request_schema)
+                    if schema_issue:
+                        logger.warning(
+                            "%s — skipping validation. Use --show-schema to inspect the schema.",
+                            schema_issue,
+                        )
+                    else:
+                        validate_data_against_schema(
+                            request_schema,
+                            deserialized_payload if deserialized_payload is not None else {},
+                            name="payload",
+                        )
+
+        logger.debug("Execute action request body: %s", body)
+
+        # Execute action (LRO)
+        with console.status("Sending request...") as status:
+            poller = self.registry_mgmt_client.namespace_assets.begin_execute_action(
+                resource_group_name=namespace_rg,
+                namespace_name=namespace_name,
+                asset_name=asset_name,
+                body=body,
+            )
+            if not poller.done():
+                status.update("Waiting for response...")
+                return wait_for_terminal_state(poller, **kwargs)
+            return poller.result()
+
+    def remove_management_endpoint(
+        self,
+        namespace_name: str,
+        resource_group_name: str,
+        endpoint_key: str,
+        confirm_yes: Optional[bool] = None,
+        **kwargs,
+    ) -> None:
+        """Remove a management endpoint entry from an ADR namespace.
+
+        Uses PUT to replace the namespace resource with the target entry removed,
+        because ARM PATCH deep-merges dicts (can't remove keys by omission) and
+        the ADR API rejects null endpoint values.
+        """
+        adr_namespace = self.registry_mgmt_client.namespaces.get(
+            resource_group_name=resource_group_name,
+            namespace_name=namespace_name,
+        )
+
+        existing_endpoints = adr_namespace.get("properties", {}).get("management", {}).get("endpoints", {})
+        if endpoint_key not in existing_endpoints:
+            logger.warning(
+                "No management endpoint entry found for key '%s' on namespace '%s' — nothing to remove.",
+                endpoint_key,
+                namespace_name,
+            )
+            return
+
+        endpoint_info = existing_endpoints[endpoint_key]
+        endpoint_type = endpoint_info.get("endpointType", "unknown")
+        logger.warning(
+            "Management endpoint to remove from namespace '%s':\n  Key: %s\n  Type: %s",
+            namespace_name,
+            endpoint_key,
+            endpoint_type,
+        )
+
+        if not should_continue_prompt(confirm_yes):
+            return
+
+        put_payload = _build_adr_put_payload(adr_namespace, endpoint_key_to_remove=endpoint_key)
+        with console.status("Removing management endpoint..."):
+            poller = self.registry_mgmt_client.namespaces.begin_create_or_replace(
+                resource_group_name=resource_group_name,
+                namespace_name=namespace_name,
+                resource=put_payload,
+            )
+            wait_for_terminal_state(poller, **kwargs)
+        logger.info(
+            "Removed management endpoint entry '%s' from namespace '%s'.",
+            endpoint_key,
+            namespace_name,
+        )

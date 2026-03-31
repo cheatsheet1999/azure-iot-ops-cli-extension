@@ -11,7 +11,7 @@ import pytest
 import responses
 from azure.cli.core.azclierror import InvalidArgumentValueError, ValidationError
 
-from azure.core.exceptions import HttpResponseError
+from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 
 from azext_edge.edge.providers.orchestration.common import (
     CUSTOM_LOCATIONS_API_VERSION,
@@ -58,6 +58,18 @@ IOTOPS_API_VERSION = DEFAULT_IOTOPS_MGMT_API_VERSION.value
 UAMI_API_VERSION = MANAGED_IDENTITY_API_VERSION
 # Vendored KubernetesConfigurationClient bakes this version internally — no exported constant.
 K8S_EXTENSIONS_API_VERSION = "2023-05-01"
+
+
+# ---------------------------------------------------------------------------
+# Autouse fixture — suppress Rich display for all tests in this module
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def suppress_workflow_display(mocker):
+    """Prevent WorkflowDisplay and render_summary from writing to stderr during tests."""
+    mocker.patch("azext_edge.edge.providers.orchestration.mgmt_actions.WorkflowDisplay")
+    mocker.patch("azext_edge.edge.providers.orchestration.mgmt_actions.render_summary")
+    mocker.patch("azext_edge.edge.providers.orchestration.mgmt_actions.console")
 
 
 # ---------------------------------------------------------------------------
@@ -287,12 +299,13 @@ def _make_eg_ctx(
     )
 
 
-def _make_extended_location() -> dict:
-    return {
-        "name": f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/test-rg"
-        f"/providers/Microsoft.ExtendedLocation/customLocations/my-cl",
-        "type": "CustomLocation",
-    }
+MOCK_EXTENDED_LOCATION: dict = {
+    "name": (
+        f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/test-rg"
+        f"/providers/Microsoft.ExtendedLocation/customLocations/my-cl"
+    ),
+    "type": "CustomLocation",
+}
 
 
 def _build_instance_response(
@@ -300,10 +313,17 @@ def _build_instance_response(
     resource_group_name: str,
     version: str = MIN_INSTANCE_VERSION_MGMT_ACTIONS,
     adr_namespace_name: Optional[str] = None,
+    include_adr_ref: bool = True,
 ) -> dict:
-    extended_location = _make_extended_location()
-    adr_ns_name = adr_namespace_name or f"{instance_name}-adr-ns"
-    adr_ns_rid = _build_adr_namespace_resource_id(adr_ns_name, resource_group_name)
+    extended_location = MOCK_EXTENDED_LOCATION
+    properties: dict = {
+        "version": version,
+        "provisioningState": "Succeeded",
+    }
+    if include_adr_ref:
+        adr_ns_name = adr_namespace_name or f"{instance_name}-adr-ns"
+        adr_ns_rid = _build_adr_namespace_resource_id(adr_ns_name, resource_group_name)
+        properties["adrNamespaceRef"] = {"resourceId": adr_ns_rid}
     return {
         "id": (
             f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{resource_group_name}"
@@ -312,11 +332,30 @@ def _build_instance_response(
         "name": instance_name,
         "location": "eastus",
         "extendedLocation": extended_location,
-        "properties": {
-            "version": version,
-            "provisioningState": "Succeeded",
-            "adrNamespaceRef": {"resourceId": adr_ns_rid},
-        },
+        "properties": properties,
+    }
+
+
+def _make_base_fixtures() -> dict:
+    """Build the common fixture core shared by enable, disable, and show tests.
+
+    Returns instance identity fields and the 6 deterministic management-actions
+    resource names derived from the instance resource ID.
+    """
+    instance_name = generate_random_string()
+    rg = generate_random_string()
+    instance_rid = _build_instance_response(instance_name, rg)["id"]
+    return {
+        "instance_name": instance_name,
+        "rg": rg,
+        "adr_ns_name": f"{instance_name}-adr-ns",
+        "instance_rid": instance_rid,
+        "ts_name": get_mgmt_actions_resource_name("ops", instance_rid),
+        "pub_name": get_mgmt_actions_resource_name("pub", instance_rid),
+        "sub_name": get_mgmt_actions_resource_name("sub", instance_rid),
+        "ep_name": get_mgmt_actions_resource_name("eg", instance_rid),
+        "graph_name": get_mgmt_actions_resource_name("req", instance_rid),
+        "resp_name": get_mgmt_actions_resource_name("resp", instance_rid),
     }
 
 
@@ -821,7 +860,7 @@ class TestSetupEgDataflowEndpoint:
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
         eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
 
         ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
 
@@ -873,7 +912,7 @@ class TestSetupEgDataflowEndpoint:
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
         eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
 
         ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
         uami_name = generate_random_string()
@@ -923,16 +962,16 @@ class TestSetupEgDataflowEndpoint:
         uami_settings = auth["userAssignedManagedIdentitySettings"]
         assert uami_settings["clientId"] == uami_client_id
         assert uami_settings["tenantId"] == uami_tenant_id
-        assert uami_settings["scope"] == MGMT_ACTIONS_EG_AUDIENCE
+        assert uami_settings["scope"] == f"{MGMT_ACTIONS_EG_AUDIENCE}/.default"
 
-    def test_existing_endpoint(self, mocked_cmd, mocked_responses: responses):
-        """When endpoint already exists, returns status 'Exists' without PUT."""
+    def test_existing_endpoint_same_config(self, mocked_cmd, mocked_responses: responses):
+        """When endpoint already exists with matching host and auth, returns without PUT."""
         ns_name = generate_random_string()
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
         eg_ctx = _make_eg_ctx(namespace_name=ns_name, resource_group_name=rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
 
         ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
 
@@ -940,14 +979,19 @@ class TestSetupEgDataflowEndpoint:
             "method": "SystemAssignedManagedIdentity",
             "systemAssignedManagedIdentitySettings": {"audience": MGMT_ACTIONS_EG_AUDIENCE},
         }
-        # GET returns 200 (already exists)
+        # GET returns 200 with matching host and auth
         mocked_responses.add(
             method=responses.GET,
             url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
             json={
                 "id": f"/fake/path/dataflowEndpoints/{ep_name}",
                 "name": ep_name,
-                "properties": {"mqttSettings": {"authentication": existing_auth}},
+                "properties": {
+                    "mqttSettings": {
+                        "host": eg_ctx.mqtt_hostname,
+                        "authentication": existing_auth,
+                    },
+                },
             },
             status=200,
         )
@@ -964,8 +1008,258 @@ class TestSetupEgDataflowEndpoint:
 
         assert result["name"] == ep_name
         assert result["authentication"] == existing_auth
+        assert result["exists"] is True
+        assert "updated" not in result
         # Only the GET call, no PUT
         assert len(mocked_responses.calls) == 1
+
+    def test_existing_endpoint_different_host(self, mocked_cmd, mocked_responses: responses):
+        """When endpoint exists with a different host, updates via PUT."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        new_hostname = "new-ns.westus2-1.ts.eventgrid.azure.net"
+        eg_ctx = _make_eg_ctx(resource_group_name=rg, mqtt_hostname=new_hostname)
+        extended_location = MOCK_EXTENDED_LOCATION
+
+        ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
+
+        existing_auth = {
+            "method": "SystemAssignedManagedIdentity",
+            "systemAssignedManagedIdentitySettings": {"audience": MGMT_ACTIONS_EG_AUDIENCE},
+        }
+        # GET returns 200 with OLD host but matching auth
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={
+                "id": f"/fake/path/dataflowEndpoints/{ep_name}",
+                "name": ep_name,
+                "properties": {
+                    "mqttSettings": {
+                        "host": "old-ns.eastus-1.ts.eventgrid.azure.net",
+                        "authentication": existing_auth,
+                    },
+                },
+            },
+            status=200,
+        )
+        # PUT updates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            wait_sec=0,
+        )
+
+        assert result["name"] == ep_name
+        assert result["exists"] is True
+        assert result["updated"] is True
+        assert result["authentication"]["method"] == "SystemAssignedManagedIdentity"
+        assert len(mocked_responses.calls) == 2
+
+        # Verify the PUT payload has the new host
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        assert put_body["properties"]["mqttSettings"]["host"] == new_hostname
+
+    def test_existing_endpoint_sami_to_uami(self, mocked_cmd, mocked_responses: responses):
+        """When endpoint exists with SAMI but UAMI is now provided, updates auth via PUT."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        eg_ctx = _make_eg_ctx(resource_group_name=rg)
+        extended_location = MOCK_EXTENDED_LOCATION
+
+        ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
+
+        uami_client_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        uami_tenant_id = "tttttttt-tttt-tttt-tttt-tttttttttttt"
+        uami_resource = _build_uami_response(
+            _build_uami_resource_id("my-uami", rg), uami_client_id, uami_tenant_id
+        )
+
+        existing_auth = {
+            "method": "SystemAssignedManagedIdentity",
+            "systemAssignedManagedIdentitySettings": {"audience": MGMT_ACTIONS_EG_AUDIENCE},
+        }
+        # GET returns 200 with matching host but SAMI auth
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={
+                "id": f"/fake/path/dataflowEndpoints/{ep_name}",
+                "name": ep_name,
+                "properties": {
+                    "mqttSettings": {
+                        "host": eg_ctx.mqtt_hostname,
+                        "authentication": existing_auth,
+                    },
+                },
+            },
+            status=200,
+        )
+        # PUT updates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            mi_resource=uami_resource,
+            wait_sec=0,
+        )
+
+        assert result["exists"] is True
+        assert result["updated"] is True
+        assert result["authentication"]["method"] == "UserAssignedManagedIdentity"
+        assert result["authentication"]["userAssignedManagedIdentitySettings"]["clientId"] == uami_client_id
+        assert len(mocked_responses.calls) == 2
+
+    def test_existing_endpoint_uami_to_sami(self, mocked_cmd, mocked_responses: responses):
+        """When endpoint exists with UAMI but no mi_resource provided, updates to SAMI via PUT."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        eg_ctx = _make_eg_ctx(resource_group_name=rg)
+        extended_location = MOCK_EXTENDED_LOCATION
+
+        ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
+
+        existing_auth = {
+            "method": "UserAssignedManagedIdentity",
+            "userAssignedManagedIdentitySettings": {
+                "clientId": "old-client-id",
+                "tenantId": "old-tenant-id",
+                "scope": f"{MGMT_ACTIONS_EG_AUDIENCE}/.default",
+            },
+        }
+        # GET returns 200 with matching host but UAMI auth
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={
+                "id": f"/fake/path/dataflowEndpoints/{ep_name}",
+                "name": ep_name,
+                "properties": {
+                    "mqttSettings": {
+                        "host": eg_ctx.mqtt_hostname,
+                        "authentication": existing_auth,
+                    },
+                },
+            },
+            status=200,
+        )
+        # PUT updates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            wait_sec=0,
+        )
+
+        assert result["exists"] is True
+        assert result["updated"] is True
+        assert result["authentication"]["method"] == "SystemAssignedManagedIdentity"
+        assert len(mocked_responses.calls) == 2
+
+        # Verify the PUT payload has SAMI auth
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        auth = put_body["properties"]["mqttSettings"]["authentication"]
+        assert auth["method"] == "SystemAssignedManagedIdentity"
+
+    def test_existing_endpoint_host_and_auth_mismatch(self, mocked_cmd, mocked_responses: responses):
+        """When both host and auth differ, updates both via PUT."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        new_hostname = "new-ns.westus2-1.ts.eventgrid.azure.net"
+        eg_ctx = _make_eg_ctx(resource_group_name=rg, mqtt_hostname=new_hostname)
+        extended_location = MOCK_EXTENDED_LOCATION
+
+        ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
+
+        uami_client_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        uami_tenant_id = "tttttttt-tttt-tttt-tttt-tttttttttttt"
+        uami_resource = _build_uami_response(
+            _build_uami_resource_id("my-uami", rg), uami_client_id, uami_tenant_id
+        )
+
+        # Existing has OLD host + SAMI auth
+        existing_auth = {
+            "method": "SystemAssignedManagedIdentity",
+            "systemAssignedManagedIdentitySettings": {"audience": MGMT_ACTIONS_EG_AUDIENCE},
+        }
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={
+                "id": f"/fake/path/dataflowEndpoints/{ep_name}",
+                "name": ep_name,
+                "properties": {
+                    "mqttSettings": {
+                        "host": "old-ns.eastus-1.ts.eventgrid.azure.net",
+                        "authentication": existing_auth,
+                    },
+                },
+            },
+            status=200,
+        )
+        # PUT updates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_eg_dataflow_endpoint(
+            eg_ctx=eg_ctx,
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            mi_resource=uami_resource,
+            wait_sec=0,
+        )
+
+        assert result["exists"] is True
+        assert result["updated"] is True
+        assert result["authentication"]["method"] == "UserAssignedManagedIdentity"
+        assert len(mocked_responses.calls) == 2
+
+        # Verify the PUT payload has both new host and new auth
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        assert put_body["properties"]["mqttSettings"]["host"] == new_hostname
+        assert put_body["properties"]["mqttSettings"]["authentication"]["method"] == "UserAssignedManagedIdentity"
 
     def _create_endpoint_and_get_put_body(
         self,
@@ -979,7 +1273,7 @@ class TestSetupEgDataflowEndpoint:
         instance_rid = _build_eg_resource_id(instance_name, rg)
         if eg_ctx is None:
             eg_ctx = _make_eg_ctx(resource_group_name=rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
 
         mocked_responses.add(
@@ -1444,7 +1738,7 @@ class TestSetupDataflowGraph:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         profile_name = "default"
         eg_ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
         graph_name = get_mgmt_actions_resource_name("req", instance_rid)
@@ -1480,6 +1774,7 @@ class TestSetupDataflowGraph:
             extended_location=extended_location,
             eg_dataflow_endpoint_name=eg_ep_name,
             dataflow_profile_name=profile_name,
+            registry_endpoint_name=MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT,
             wait_sec=0,
         )
 
@@ -1537,7 +1832,7 @@ class TestSetupDataflowGraph:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         profile_name = "default"
         graph_name = get_mgmt_actions_resource_name("req", instance_rid)
         eg_ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
@@ -1562,6 +1857,7 @@ class TestSetupDataflowGraph:
             extended_location=extended_location,
             eg_dataflow_endpoint_name=eg_ep_name,
             dataflow_profile_name=profile_name,
+            registry_endpoint_name=MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT,
             wait_sec=0,
         )
 
@@ -1573,7 +1869,7 @@ class TestSetupDataflowGraph:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         custom_profile = "my-custom-profile"
         graph_name = get_mgmt_actions_resource_name("req", instance_rid)
         eg_ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
@@ -1609,11 +1905,66 @@ class TestSetupDataflowGraph:
             extended_location=extended_location,
             eg_dataflow_endpoint_name=eg_ep_name,
             dataflow_profile_name=custom_profile,
+            registry_endpoint_name=MGMT_ACTIONS_DEFAULT_REGISTRY_ENDPOINT,
             wait_sec=0,
         )
 
         assert result["name"] == graph_name
         assert len(mocked_responses.calls) == 2
+
+    def test_custom_registry_endpoint(self, mocked_cmd, mocked_responses: responses):
+        """Graph node uses the specified registry endpoint ref, not just 'default'."""
+        rg = generate_random_string()
+        instance_name = generate_random_string()
+        instance_rid = _build_eg_resource_id(instance_name, rg)
+        extended_location = MOCK_EXTENDED_LOCATION
+        profile_name = "default"
+        custom_registry_ep = "my-custom-registry-ep"
+        graph_name = get_mgmt_actions_resource_name("req", instance_rid)
+        eg_ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
+
+        # GET returns 404
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                instance_name,
+                rg,
+                sub_resource=f"/dataflowProfiles/{profile_name}/dataflowGraphs/{graph_name}",
+            ),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        # PUT creates it
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(
+                instance_name,
+                rg,
+                sub_resource=f"/dataflowProfiles/{profile_name}/dataflowGraphs/{graph_name}",
+            ),
+            json={"id": f"/fake/path/dataflowGraphs/{graph_name}", "name": graph_name},
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider._setup_dataflow_graph(
+            instance_name=instance_name,
+            instance_resource_id=instance_rid,
+            resource_group_name=rg,
+            extended_location=extended_location,
+            eg_dataflow_endpoint_name=eg_ep_name,
+            dataflow_profile_name=profile_name,
+            registry_endpoint_name=custom_registry_ep,
+            wait_sec=0,
+        )
+
+        assert result["name"] == graph_name
+        assert len(mocked_responses.calls) == 2
+
+        # Verify the graph node uses the custom registry endpoint
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        graph_node = put_body["properties"]["nodes"][1]
+        assert graph_node["graphSettings"]["registryEndpointRef"] == custom_registry_ep
 
 
 # ---------------------------------------------------------------------------
@@ -1669,7 +2020,7 @@ class TestSetupResponseDataflow:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         profile_name = "default"
         eg_ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
         dataflow_name = get_mgmt_actions_resource_name("resp", instance_rid)
@@ -1739,7 +2090,7 @@ class TestSetupResponseDataflow:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         profile_name = "default"
         dataflow_name = get_mgmt_actions_resource_name("resp", instance_rid)
 
@@ -1774,7 +2125,7 @@ class TestSetupResponseDataflow:
         rg = generate_random_string()
         instance_name = generate_random_string()
         instance_rid = _build_eg_resource_id(instance_name, rg)
-        extended_location = _make_extended_location()
+        extended_location = MOCK_EXTENDED_LOCATION
         custom_profile = "my-custom-profile"
         dataflow_name = get_mgmt_actions_resource_name("resp", instance_rid)
         eg_ep_name = get_mgmt_actions_resource_name("eg", instance_rid)
@@ -2182,59 +2533,42 @@ class TestEnable:
 
     def _make_enable_fixtures(self, dataflow_profile: str = "default") -> dict:
         """Build common test fixtures for enable tests."""
-        instance_name = generate_random_string()
-        rg = generate_random_string()
+        base = _make_base_fixtures()
         ns_name = generate_random_string()
-        hostname = f"{ns_name}.eastus-1.ts.eventgrid.azure.net"
-        instance_response = _build_instance_response(instance_name, rg)
-        instance_rid = instance_response["id"]
+        instance_response = _build_instance_response(base["instance_name"], base["rg"])
         return {
-            "instance_name": instance_name,
-            "rg": rg,
+            **base,
             "ns_name": ns_name,
-            "hostname": hostname,
+            "hostname": f"{ns_name}.eastus-1.ts.eventgrid.azure.net",
             "instance_response": instance_response,
-            "instance_rid": instance_rid,
             "cl_id": instance_response["extendedLocation"]["name"],
-            "eg_rid": _build_eg_resource_id(ns_name, rg),
-            "adr_ns_name": f"{instance_name}-adr-ns",
+            "eg_rid": _build_eg_resource_id(ns_name, base["rg"]),
             "adr_principal_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             "dataflow_profile": dataflow_profile,
-            "ts_name": get_mgmt_actions_resource_name("ops", instance_rid),
-            "pub_name": get_mgmt_actions_resource_name("pub", instance_rid),
-            "sub_name": get_mgmt_actions_resource_name("sub", instance_rid),
-            "ep_name": get_mgmt_actions_resource_name("eg", instance_rid),
-            "graph_name": get_mgmt_actions_resource_name("req", instance_rid),
-            "resp_name": get_mgmt_actions_resource_name("resp", instance_rid),
         }
 
     def _register_enable_mocks(
         self,
         mocked_responses: responses,
-        instance_name: str,
-        rg: str,
-        ns_name: str,
-        hostname: str,
-        instance_response: dict,
-        instance_rid: str,
-        cl_id: str,
-        eg_rid: str,
-        adr_ns_name: str,
-        adr_principal_id: str,
-        dataflow_profile: str,
-        ts_name: str,
-        pub_name: str,
-        sub_name: str,
-        ep_name: str,
-        graph_name: str,
-        resp_name: str,
+        f: dict,
+        *,
         mi_response: Optional[dict] = None,
     ) -> None:
         """Register HTTP mocks for an enable() call.
 
         Registers 16 calls (or 17 with mi_response) in the exact order
-        the enable() method issues them.
+        the enable() method issues them:
+          Instance GET → EG namespace GET → (UAMI GET) → topic space → permission bindings
+          → ADR namespace GET/PATCH → dataflow endpoint → dataflow graph → response dataflow.
         """
+        instance_name, rg = f["instance_name"], f["rg"]
+        ns_name, hostname = f["ns_name"], f["hostname"]
+        instance_response = f["instance_response"]
+        cl_id, eg_rid = f["cl_id"], f["eg_rid"]
+        adr_ns_name, adr_principal_id = f["adr_ns_name"], f["adr_principal_id"]
+        dataflow_profile = f["dataflow_profile"]
+        ts_name, pub_name, sub_name = f["ts_name"], f["pub_name"], f["sub_name"]
+        ep_name, graph_name, resp_name = f["ep_name"], f["graph_name"], f["resp_name"]
         # 1. GET instance
         mocked_responses.add(
             method=responses.GET,
@@ -2284,19 +2618,6 @@ class TestEnable:
                 json=_build_permission_binding_response(name, perm, ts_name),
                 status=200,
             )
-        # Dataflow endpoint: GET 404, PUT 200
-        mocked_responses.add(
-            method=responses.GET,
-            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
-            json={"error": {"code": "ResourceNotFound"}},
-            status=404,
-        )
-        mocked_responses.add(
-            method=responses.PUT,
-            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
-            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
-            status=200,
-        )
         # ADR namespace: GET, PATCH 200
         mocked_responses.add(
             method=responses.GET,
@@ -2321,6 +2642,19 @@ class TestEnable:
                     },
                 },
             ),
+            status=200,
+        )
+        # Dataflow endpoint: GET 404, PUT 200
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_iotops_endpoint(instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}"),
+            json={"id": f"/fake/path/dataflowEndpoints/{ep_name}", "name": ep_name},
             status=200,
         )
         # Dataflow graph: GET 404, PUT 200
@@ -2372,7 +2706,7 @@ class TestEnable:
         }
         mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity", return_value=df_auth_pid)
         mocker.patch.object(MgmtActions, "_setup_role_assignments", return_value=mock_role_result)
-        self._register_enable_mocks(mocked_responses, **f)
+        self._register_enable_mocks(mocked_responses, f)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.enable(
@@ -2397,6 +2731,11 @@ class TestEnable:
         assert inst["dataflowEndpoint"]["name"] == f["ep_name"]
         assert inst["requestDataflowGraph"]["name"] == f["graph_name"]
         assert inst["responseDataflow"]["name"] == f["resp_name"]
+        # Internal `exists` and `updated` flags must be stripped from consumer-facing return (desired-state semantics)
+        assert "exists" not in inst["dataflowEndpoint"]
+        assert "updated" not in inst["dataflowEndpoint"]
+        assert "exists" not in inst["requestDataflowGraph"]
+        assert "exists" not in inst["responseDataflow"]
 
         # -- Assert eventGrid section --
         eg = result["eventGrid"]
@@ -2409,6 +2748,7 @@ class TestEnable:
 
         assert eg["topicSpace"]["name"] == f["ts_name"]
         assert eg["topicSpace"]["scopeId"] == f["instance_name"]
+        assert "exists" not in eg["topicSpace"]  # internal flag stripped
 
         assert eg["permissionBindings"]["publisher"]["name"] == f["pub_name"]
         assert eg["permissionBindings"]["publisher"]["clientGroup"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
@@ -2422,6 +2762,10 @@ class TestEnable:
         assert adr["subscriptionId"] == ZEROED_SUBSCRIPTION
         assert adr["identity"]["type"] == "SystemAssigned"
         assert adr["identity"]["principalId"] == f["adr_principal_id"]
+        assert adr["managementEndpoint"]["endpointType"] == MGMT_ACTIONS_ADR_ENDPOINT_TYPE
+        assert adr["managementEndpoint"]["address"] == f["hostname"]
+        assert adr["managementEndpoint"]["scopeId"] == f["instance_name"]
+        assert "managementEndpoints" not in adr
 
         # -- Assert roleAssignments section --
         assert result["roleAssignments"] == mock_role_result
@@ -2455,13 +2799,46 @@ class TestEnable:
 
         assert len(mocked_responses.calls) == 1
 
+    @pytest.mark.parametrize(
+        "version",
+        [
+            "1.3.0-main.20260307.5",
+            "1.0.0-alpha.1",
+            "1.3.14-rc.1",
+            "2.0.0-beta.1",
+        ],
+        ids=[
+            "ci-build-below-min-patch",
+            "prerelease-well-below-min",
+            "prerelease-at-exact-min",
+            "prerelease-above-min-major",
+        ],
+    )
+    def test_prerelease_version_skips_gate(self, mocked_cmd, mocked_responses: responses, mocker, version: str):
+        """enable() skips the minimum version check when instance version has a pre-release component."""
+        f = self._make_enable_fixtures()
+        f["instance_response"]["properties"]["version"] = version
+        mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity", return_value="df-pid")
+        mocker.patch.object(MgmtActions, "_setup_role_assignments", return_value={})
+        self._register_enable_mocks(mocked_responses, f)
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.enable(
+            name=f["instance_name"],
+            resource_group_name=f["rg"],
+            eg_resource_id=f["eg_rid"],
+            wait_sec=0,
+        )
+
+        assert result  # Flow completed without ValidationError
+
     def test_custom_dataflow_profile(self, mocked_cmd, mocked_responses: responses, mocker):
         """enable() uses a custom dataflow profile name when provided."""
         custom_profile = "my-custom-profile"
         f = self._make_enable_fixtures(dataflow_profile=custom_profile)
         mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity", return_value="df-pid")
         mocker.patch.object(MgmtActions, "_setup_role_assignments", return_value={})
-        self._register_enable_mocks(mocked_responses, **f)
+        self._register_enable_mocks(mocked_responses, f)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.enable(
@@ -2493,7 +2870,7 @@ class TestEnable:
 
         mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity", return_value="df-pid")
         mocker.patch.object(MgmtActions, "_setup_role_assignments", return_value={})
-        self._register_enable_mocks(mocked_responses, **f, mi_response=mi_response)
+        self._register_enable_mocks(mocked_responses, f, mi_response=mi_response)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.enable(
@@ -2507,14 +2884,15 @@ class TestEnable:
         assert result["instance"]["dataflowEndpoint"]["name"] == f["ep_name"]
 
         # Verify the endpoint PUT body contains UserAssignedManagedIdentity auth
-        endpoint_put_call = mocked_responses.calls[10]
+        # Index 12: UAMI GET(2) + topic space(3-4) + bindings(5-8) + ADR(9-10) + ep GET(11) + ep PUT(12)
+        endpoint_put_call = mocked_responses.calls[12]
         endpoint_body = json.loads(endpoint_put_call.request.body)
         auth = endpoint_body["properties"]["mqttSettings"]["authentication"]
         assert auth["method"] == "UserAssignedManagedIdentity"
         uami_settings = auth["userAssignedManagedIdentitySettings"]
         assert uami_settings["clientId"] == mi_client_id
         assert uami_settings["tenantId"] == mi_tenant_id
-        assert uami_settings["scope"] == MGMT_ACTIONS_EG_AUDIENCE
+        assert uami_settings["scope"] == f"{MGMT_ACTIONS_EG_AUDIENCE}/.default"
 
         assert len(mocked_responses.calls) == 17
 
@@ -2523,7 +2901,7 @@ class TestEnable:
         f = self._make_enable_fixtures()
         mock_resolve = mocker.patch.object(MgmtActions, "_resolve_dataflow_auth_identity")
         mock_setup_ra = mocker.patch.object(MgmtActions, "_setup_role_assignments")
-        self._register_enable_mocks(mocked_responses, **f)
+        self._register_enable_mocks(mocked_responses, f)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.enable(
@@ -2551,13 +2929,675 @@ class TestEnable:
 
 
 class TestDisable:
-    """Tests for MgmtActions.disable()."""
+    """Tests for MgmtActions.disable().
 
-    def test_disable_raises_not_implemented(self, mocked_cmd):
-        """disable() raises NotImplementedError until implementation is added."""
+    Validates the teardown orchestration: AIO resources (response dataflow, graph,
+    endpoint), ADR management endpoint removal, and EG resources (permission bindings,
+    topic space). EG discovery is auto-derived from the ADR namespace management endpoint.
+    """
+
+    PROMPT_TARGET = "azext_edge.edge.providers.orchestration.mgmt_actions.should_continue_prompt"
+
+    def _make_disable_fixtures(
+        self,
+        eg_subscription_id: Optional[str] = None,
+        include_mgmt_endpoint: bool = True,
+        include_adr_namespace_ref: bool = True,
+    ) -> dict:
+        """Build common test fixtures for disable tests."""
+        base = _make_base_fixtures()
+        instance_name, rg = base["instance_name"], base["rg"]
+        eg_ns_name = generate_random_string()
+        eg_rg = generate_random_string()
+        eg_sub = eg_subscription_id or ZEROED_SUBSCRIPTION
+        hostname = f"{eg_ns_name}.eastus-1.ts.eventgrid.azure.net"
+        custom_location_id = MOCK_EXTENDED_LOCATION["name"]
+
+        instance_response = _build_instance_response(
+            instance_name, rg, adr_namespace_name=base["adr_ns_name"]
+        )
+        if not include_adr_namespace_ref:
+            instance_response["properties"].pop("adrNamespaceRef", None)
+
+        eg_rid = _build_eg_resource_id(eg_ns_name, eg_rg, subscription_id=eg_sub)
+
+        mgmt_endpoints = {}
+        if include_mgmt_endpoint:
+            mgmt_endpoints[custom_location_id] = {
+                "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                "address": hostname,
+                "scopeId": instance_name,
+                "resourceId": eg_rid,
+            }
+
+        return {
+            **base,
+            "adr_rg": rg,
+            "eg_ns_name": eg_ns_name,
+            "eg_rg": eg_rg,
+            "eg_sub": eg_sub,
+            "hostname": hostname,
+            "custom_location_id": custom_location_id,
+            "instance_response": instance_response,
+            "eg_rid": eg_rid,
+            "mgmt_endpoints": mgmt_endpoints,
+        }
+
+    def _register_disable_mocks(
+        self,
+        mocked_responses: responses,
+        f: dict,
+        adr_not_found: bool = False,
+        graph_profile: str = MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE,
+        graph_not_found_in_default: bool = False,
+        graph_not_found_anywhere: bool = False,
+        resp_dataflow_orphaned: bool = False,
+        aio_resources_not_found: bool = False,
+        eg_not_found: bool = False,
+        ep_not_found: bool = False,
+        extra_adr_endpoints: Optional[dict] = None,
+    ) -> None:
+        """Register HTTP mocks for a disable() call.
+
+        Mock insertion order mirrors the exact HTTP call sequence of disable().
+        """
+        # 1. GET instance
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=f["instance_response"],
+            status=200,
+        )
+
+        # 2. GET ADR namespace
+        mgmt_endpoints = dict(f["mgmt_endpoints"])
+        if extra_adr_endpoints:
+            mgmt_endpoints.update(extra_adr_endpoints)
+
+        if adr_not_found:
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_adr_endpoint(f["adr_ns_name"], f["adr_rg"]),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+            return
+
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(f["adr_ns_name"], f["adr_rg"]),
+            json=_build_adr_namespace_response(
+                f["adr_ns_name"], f["adr_rg"],
+                identity_type="SystemAssigned",
+                principal_id="00000000-0000-0000-0000-bbbbbbbbbbbb",
+                management_endpoints=mgmt_endpoints,
+            ),
+            status=200,
+        )
+
+        # 3. Profile auto-detection: GET graph under default profile
+        if graph_not_found_anywhere:
+            # Graph not in default profile
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                    f"/dataflowGraphs/{f['graph_name']}",
+                ),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+            # List profiles returns empty
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource="/dataflowProfiles",
+                ),
+                json={"value": []},
+                status=200,
+            )
+        elif graph_not_found_in_default and graph_profile != MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE:
+            # Graph not in default profile
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                    f"/dataflowGraphs/{f['graph_name']}",
+                ),
+                json={"error": {"code": "ResourceNotFound"}},
+                status=404,
+            )
+            # List profiles returns the custom profile
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource="/dataflowProfiles",
+                ),
+                json={"value": [{"name": graph_profile}]},
+                status=200,
+            )
+            # Graph found in custom profile
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{graph_profile}/dataflowGraphs/{f['graph_name']}",
+                ),
+                json={"name": f["graph_name"]},
+                status=200,
+            )
+        else:
+            # Graph found in default profile (common case)
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{graph_profile}/dataflowGraphs/{f['graph_name']}",
+                ),
+                json={"name": f["graph_name"]},
+                status=200,
+            )
+
+        # 3b. Response dataflow discovery (only when graph not found anywhere)
+        if graph_not_found_anywhere:
+            if resp_dataflow_orphaned:
+                # Orphaned response dataflow found in default profile
+                mocked_responses.add(
+                    method=responses.GET,
+                    url=_build_iotops_endpoint(
+                        f["instance_name"], f["rg"],
+                        sub_resource=f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                        f"/dataflows/{f['resp_name']}",
+                    ),
+                    json={"name": f["resp_name"]},
+                    status=200,
+                )
+            else:
+                # Response dataflow also not found — second discovery pass
+                mocked_responses.add(
+                    method=responses.GET,
+                    url=_build_iotops_endpoint(
+                        f["instance_name"], f["rg"],
+                        sub_resource=f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                        f"/dataflows/{f['resp_name']}",
+                    ),
+                    json={"error": {"code": "ResourceNotFound"}},
+                    status=404,
+                )
+                # list_by_resource_group reuses the existing profiles mock from step 3
+
+        # 3c. Endpoint existence check GET
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                f["instance_name"], f["rg"],
+                sub_resource=f"/dataflowEndpoints/{f['ep_name']}",
+            ),
+            json={"name": f["ep_name"]} if not ep_not_found else {"error": {"code": "ResourceNotFound"}},
+            status=200 if not ep_not_found else 404,
+        )
+
+        # 3d. EG resource existence GETs (topic space + pub + sub)
+        if f["mgmt_endpoints"]:
+            eg_probe_status = 404 if eg_not_found else 200
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(
+                    f["eg_ns_name"], f["eg_rg"],
+                    subscription_id=f["eg_sub"],
+                    sub_resource=f"/topicSpaces/{f['ts_name']}",
+                ),
+                json={"name": f["ts_name"]} if not eg_not_found else {"error": {"code": "ResourceNotFound"}},
+                status=eg_probe_status,
+            )
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(
+                    f["eg_ns_name"], f["eg_rg"],
+                    subscription_id=f["eg_sub"],
+                    sub_resource=f"/permissionBindings/{f['pub_name']}",
+                ),
+                json={"name": f["pub_name"]} if not eg_not_found else {"error": {"code": "ResourceNotFound"}},
+                status=eg_probe_status,
+            )
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_eg_endpoint(
+                    f["eg_ns_name"], f["eg_rg"],
+                    subscription_id=f["eg_sub"],
+                    sub_resource=f"/permissionBindings/{f['sub_name']}",
+                ),
+                json={"name": f["sub_name"]} if not eg_not_found else {"error": {"code": "ResourceNotFound"}},
+                status=eg_probe_status,
+            )
+
+        # 4. AIO resource deletion (response dataflow, graph, endpoint)
+        # IoT Ops begin_delete accepts only 202/204; use 204 with no body.
+        resp_status = 404 if aio_resources_not_found else 204
+        if not graph_not_found_anywhere:
+            # Response dataflow DELETE
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{graph_profile}/dataflows/{f['resp_name']}",
+                ),
+                status=resp_status,
+                content_type="application/json",
+            )
+            # Dataflow graph DELETE
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{graph_profile}/dataflowGraphs/{f['graph_name']}",
+                ),
+                status=resp_status,
+                content_type="application/json",
+            )
+        elif resp_dataflow_orphaned:
+            # Orphaned response dataflow DELETE (no graph delete)
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                    f"/dataflows/{f['resp_name']}",
+                ),
+                status=resp_status,
+                content_type="application/json",
+            )
+
+        # Dataflow endpoint DELETE (only if endpoint exists)
+        if not ep_not_found:
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_iotops_endpoint(
+                    f["instance_name"], f["rg"],
+                    sub_resource=f"/dataflowEndpoints/{f['ep_name']}",
+                ),
+                status=resp_status,
+                content_type="application/json",
+            )
+
+        # 5. ADR namespace PUT (remove management endpoint entry)
+        # PATCH deep-merges dicts (can't remove keys) and ADR API rejects null values,
+        # so we use PUT (begin_create_or_replace) to replace the entire resource.
+        if f["mgmt_endpoints"]:
+            mocked_responses.add(
+                method=responses.PUT,
+                url=_build_adr_endpoint(f["adr_ns_name"], f["adr_rg"]),
+                json=_build_adr_namespace_response(
+                    f["adr_ns_name"], f["adr_rg"],
+                    identity_type="SystemAssigned",
+                    principal_id="00000000-0000-0000-0000-bbbbbbbbbbbb",
+                    management_endpoints=extra_adr_endpoints or {},
+                ),
+                status=200,
+            )
+
+        # 6. EG resource deletion (only if EG resources were found during discovery)
+        # EG begin_delete accepts 200/202/204 and uses _stream=True; use 200 with json body.
+        if f["mgmt_endpoints"] and not eg_not_found:
+            # Permission binding pub DELETE
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_eg_endpoint(
+                    f["eg_ns_name"], f["eg_rg"],
+                    subscription_id=f["eg_sub"],
+                    sub_resource=f"/permissionBindings/{f['pub_name']}",
+                ),
+                json={},
+                status=200,
+            )
+            # Permission binding sub DELETE
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_eg_endpoint(
+                    f["eg_ns_name"], f["eg_rg"],
+                    subscription_id=f["eg_sub"],
+                    sub_resource=f"/permissionBindings/{f['sub_name']}",
+                ),
+                json={},
+                status=200,
+            )
+            # Topic space DELETE
+            mocked_responses.add(
+                method=responses.DELETE,
+                url=_build_eg_endpoint(
+                    f["eg_ns_name"], f["eg_rg"],
+                    subscription_id=f["eg_sub"],
+                    sub_resource=f"/topicSpaces/{f['ts_name']}",
+                ),
+                json={},
+                status=200,
+            )
+
+    def _call_disable(self, mocked_cmd, f: dict, **kwargs) -> None:
+        """Invoke provider.disable() with standard arguments."""
         provider = MgmtActions(cmd=mocked_cmd)
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
-            provider.disable(name="inst", resource_group_name="rg")
+        provider.disable(
+            name=f["instance_name"],
+            resource_group_name=f["rg"],
+            confirm_yes=kwargs.pop("confirm_yes", True),
+            wait_sec=0,
+            **kwargs,
+        )
+
+    def test_happy_path(self, mocked_cmd, mocked_responses: responses, mocker):
+        """All resources deleted in correct order with confirm_yes=True."""
+        f = self._make_disable_fixtures()
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f)
+
+        self._call_disable(mocked_cmd, f)
+
+        # instance GET + ADR GET + graph detect GET + ep detect GET +
+        # EG ts GET + EG pub GET + EG sub GET +
+        # resp DELETE + graph DELETE + ep DELETE + ADR PUT +
+        # pub DELETE + sub DELETE + ts DELETE = 14
+        assert len(mocked_responses.calls) == 14
+
+        # Verify full call sequence: discovery GETs → AIO DELETEs → ADR PUT → EG DELETEs
+        call_methods = [c.request.method for c in mocked_responses.calls]
+        assert call_methods == [
+            "GET", "GET", "GET", "GET",     # instance, ADR, graph detect, ep detect
+            "GET", "GET", "GET",             # EG ts, pub, sub existence
+            "DELETE", "DELETE", "DELETE",    # resp dataflow, graph, endpoint
+            "PUT",                           # ADR namespace update (full replace)
+            "DELETE", "DELETE", "DELETE",    # pub binding, sub binding, topic space
+        ]
+
+        # Verify mutation calls target expected resources
+        mut_paths = [
+            c.request.path_url.split("?")[0]
+            for c in mocked_responses.calls
+            if c.request.method in ("DELETE", "PUT")
+        ]
+        assert f"/dataflows/{f['resp_name']}" in mut_paths[0]
+        assert f"/dataflowGraphs/{f['graph_name']}" in mut_paths[1]
+        assert f"/dataflowEndpoints/{f['ep_name']}" in mut_paths[2]
+        assert f"/providers/{DEVICEREGISTRY_RP}/namespaces/{f['adr_ns_name']}" in mut_paths[3]
+        assert f"/permissionBindings/{f['pub_name']}" in mut_paths[4]
+        assert f"/permissionBindings/{f['sub_name']}" in mut_paths[5]
+        assert f"/topicSpaces/{f['ts_name']}" in mut_paths[6]
+
+    def test_confirmation_cancel(self, mocked_cmd, mocked_responses: responses, mocker):
+        """Cancellation via should_continue_prompt stops all deletions."""
+        f = self._make_disable_fixtures()
+        mock_prompt = mocker.patch(self.PROMPT_TARGET, return_value=False)
+        # Register mocks for all calls before the prompt:
+        # instance GET + ADR GET + graph discovery + endpoint existence check.
+        # Any call past the prompt would hit an unregistered mock and fail the test.
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=f["instance_response"],
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(f["adr_ns_name"], f["adr_rg"]),
+            json=_build_adr_namespace_response(
+                f["adr_ns_name"], f["adr_rg"],
+                identity_type="SystemAssigned",
+                principal_id="00000000-0000-0000-0000-bbbbbbbbbbbb",
+                management_endpoints=f["mgmt_endpoints"],
+            ),
+            status=200,
+        )
+        # Graph found in default profile (discovery)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                f["instance_name"], f["rg"],
+                sub_resource=f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                f"/dataflowGraphs/{f['graph_name']}",
+            ),
+            json={"name": f["graph_name"]},
+            status=200,
+        )
+        # Endpoint existence check
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                f["instance_name"], f["rg"],
+                sub_resource=f"/dataflowEndpoints/{f['ep_name']}",
+            ),
+            json={"name": f["ep_name"]},
+            status=200,
+        )
+        # EG resource existence probes (topic space + pub + sub)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_eg_endpoint(
+                f["eg_ns_name"], f["eg_rg"],
+                subscription_id=f["eg_sub"],
+                sub_resource=f"/topicSpaces/{f['ts_name']}",
+            ),
+            json={"name": f["ts_name"]},
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_eg_endpoint(
+                f["eg_ns_name"], f["eg_rg"],
+                subscription_id=f["eg_sub"],
+                sub_resource=f"/permissionBindings/{f['pub_name']}",
+            ),
+            json={"name": f["pub_name"]},
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_eg_endpoint(
+                f["eg_ns_name"], f["eg_rg"],
+                subscription_id=f["eg_sub"],
+                sub_resource=f"/permissionBindings/{f['sub_name']}",
+            ),
+            json={"name": f["sub_name"]},
+            status=200,
+        )
+
+        self._call_disable(mocked_cmd, f, confirm_yes=None)
+
+        mock_prompt.assert_called_once_with(confirm_yes=None)
+        # instance GET + ADR GET + graph discovery GET + ep existence GET +
+        # EG ts GET + EG pub GET + EG sub GET = 7
+        assert len(mocked_responses.calls) == 7
+
+    def test_confirm_yes_flag(self, mocked_cmd, mocked_responses: responses, mocker):
+        """confirm_yes=True is forwarded to should_continue_prompt."""
+        f = self._make_disable_fixtures()
+        mock_prompt = mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f)
+
+        self._call_disable(mocked_cmd, f, confirm_yes=True)
+
+        mock_prompt.assert_called_once_with(confirm_yes=True)
+        assert len(mocked_responses.calls) == 14
+
+    def test_aio_resources_not_found(self, mocked_cmd, mocked_responses: responses, mocker):
+        """AIO resources already deleted (404) — continues to ADR and EG cleanup."""
+        f = self._make_disable_fixtures()
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f, aio_resources_not_found=True)
+
+        self._call_disable(mocked_cmd, f)
+
+        assert len(mocked_responses.calls) == 14
+
+    def test_eg_resources_not_found(self, mocked_cmd, mocked_responses: responses, mocker):
+        """EG resources not found during discovery — EG teardown skipped."""
+        f = self._make_disable_fixtures()
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f, eg_not_found=True)
+
+        self._call_disable(mocked_cmd, f)
+
+        # instance GET + ADR GET + graph detect + ep detect +
+        # EG ts GET(404) + EG pub GET(404) + EG sub GET(404) +
+        # resp DELETE + graph DELETE + ep DELETE + ADR PUT = 11
+        # No EG DELETEs since resources weren't found
+        assert len(mocked_responses.calls) == 11
+
+    def test_no_adr_namespace_ref(self, mocked_cmd, mocked_responses: responses):
+        """Instance missing adrNamespaceRef — returns early with no deletions."""
+        f = self._make_disable_fixtures(include_adr_namespace_ref=False)
+        # Only instance GET is needed — no ADR ref means immediate return.
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=f["instance_response"],
+            status=200,
+        )
+
+        self._call_disable(mocked_cmd, f)
+
+        assert len(mocked_responses.calls) == 1
+
+    def test_adr_namespace_not_found(self, mocked_cmd, mocked_responses: responses):
+        """ADR namespace 404 — returns early with no deletions."""
+        f = self._make_disable_fixtures()
+        self._register_disable_mocks(mocked_responses, f, adr_not_found=True)
+
+        self._call_disable(mocked_cmd, f)
+
+        assert len(mocked_responses.calls) == 2
+
+    def test_management_endpoint_missing(self, mocked_cmd, mocked_responses: responses, mocker):
+        """No management endpoint entry for custom location — AIO deleted, EG skipped."""
+        f = self._make_disable_fixtures(include_mgmt_endpoint=False)
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f)
+
+        self._call_disable(mocked_cmd, f)
+
+        # instance GET + ADR GET + graph detect + ep detect + 3 AIO DELETEs = 7
+        # No ADR PUT (nothing to remove), no EG DELETEs (no EG context)
+        assert len(mocked_responses.calls) == 7
+        methods_paths = [(c.request.method, c.request.path_url) for c in mocked_responses.calls]
+        assert not any("PUT" in m for m, _ in methods_paths)
+        assert not any(f"/providers/{EVENTGRID_RP}/" in p for _, p in methods_paths)
+
+    def test_cross_subscription_eg(self, mocked_cmd, mocked_responses: responses, mocker):
+        """Cross-subscription EG namespace creates correct client and deletes succeed."""
+        cross_sub = "11111111-1111-1111-1111-111111111111"
+        f = self._make_disable_fixtures(eg_subscription_id=cross_sub)
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f)
+
+        self._call_disable(mocked_cmd, f)
+
+        eg_calls = [
+            c for c in mocked_responses.calls
+            if f"/providers/{EVENTGRID_RP}/" in c.request.path_url
+        ]
+        assert len(eg_calls) == 6  # 3 discovery GETs + 3 DELETEs
+        for call in eg_calls:
+            assert f"/subscriptions/{cross_sub}/" in call.request.path_url
+
+    def test_adr_preserves_other_entries(self, mocked_cmd, mocked_responses: responses, mocker):
+        """ADR namespace with multiple management endpoints — only ours is removed."""
+        f = self._make_disable_fixtures()
+        other_cl_id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ExtendedLocation/customLocations/other"
+        extra_endpoints = {
+            other_cl_id: {
+                "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                "address": "other.eventgrid.azure.net",
+                "scopeId": "other-instance",
+                "resourceId": (
+                    "/subscriptions/sub/resourceGroups/rg"
+                    "/providers/Microsoft.EventGrid/namespaces/other-ns"
+                ),
+            },
+        }
+
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f, extra_adr_endpoints=extra_endpoints)
+
+        self._call_disable(mocked_cmd, f)
+
+        put_calls = [c for c in mocked_responses.calls if c.request.method == "PUT"]
+        assert len(put_calls) == 1
+        put_body = json.loads(put_calls[0].request.body)
+        put_endpoints = put_body["properties"]["management"]["endpoints"]
+        # PUT replaces the entire resource — our entry is absent, other entries preserved
+        assert f["custom_location_id"] not in put_endpoints
+        assert put_endpoints[other_cl_id] == extra_endpoints[other_cl_id]
+        # Verify identity and location are preserved
+        assert put_body.get("location") == "eastus"
+        assert put_body.get("identity", {}).get("type") == "SystemAssigned"
+
+    def test_custom_profile_auto_detected(self, mocked_cmd, mocked_responses: responses, mocker):
+        """Graph under a non-default profile is auto-detected and deleted."""
+        f = self._make_disable_fixtures()
+        custom_profile = "custom-profile"
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(
+            mocked_responses, f,
+            graph_profile=custom_profile,
+            graph_not_found_in_default=True,
+        )
+
+        self._call_disable(mocked_cmd, f)
+
+        delete_calls = [c for c in mocked_responses.calls if c.request.method == "DELETE"]
+        resp_delete = [c for c in delete_calls if f"/dataflows/{f['resp_name']}" in c.request.path_url]
+        graph_delete = [c for c in delete_calls if f"/dataflowGraphs/{f['graph_name']}" in c.request.path_url]
+        assert len(resp_delete) == 1
+        assert f"/dataflowProfiles/{custom_profile}/" in resp_delete[0].request.path_url
+        assert len(graph_delete) == 1
+        assert f"/dataflowProfiles/{custom_profile}/" in graph_delete[0].request.path_url
+
+    def test_graph_not_found_anywhere(self, mocked_cmd, mocked_responses: responses, mocker):
+        """Graph not in any profile — graph and response dataflow deletion skipped."""
+        f = self._make_disable_fixtures()
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(mocked_responses, f, graph_not_found_anywhere=True)
+
+        self._call_disable(mocked_cmd, f)
+
+        delete_paths = [
+            c.request.path_url.split("?")[0]
+            for c in mocked_responses.calls
+            if c.request.method == "DELETE"
+        ]
+        assert not any(f"/dataflows/{f['resp_name']}" in p for p in delete_paths)
+        assert not any(f"/dataflowGraphs/{f['graph_name']}" in p for p in delete_paths)
+        # endpoint + pub + sub + ts = 4 DELETEs
+        assert len(delete_paths) == 4
+        assert any(f"/dataflowEndpoints/{f['ep_name']}" in p for p in delete_paths)
+
+    def test_orphaned_response_dataflow(self, mocked_cmd, mocked_responses: responses, mocker):
+        """Graph gone but response dataflow still exists — orphaned resp is cleaned up."""
+        f = self._make_disable_fixtures()
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+        self._register_disable_mocks(
+            mocked_responses, f,
+            graph_not_found_anywhere=True,
+            resp_dataflow_orphaned=True,
+        )
+
+        self._call_disable(mocked_cmd, f)
+
+        delete_paths = [
+            c.request.path_url.split("?")[0]
+            for c in mocked_responses.calls
+            if c.request.method == "DELETE"
+        ]
+        # Orphaned response dataflow is deleted
+        resp_deletes = [p for p in delete_paths if f"/dataflows/{f['resp_name']}" in p]
+        assert len(resp_deletes) == 1
+        assert f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}/" in resp_deletes[0]
+        # Graph deletion is NOT attempted (already gone)
+        assert not any(f"/dataflowGraphs/{f['graph_name']}" in p for p in delete_paths)
+        # resp + endpoint + pub + sub + ts = 5 DELETEs
+        assert len(delete_paths) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -2568,273 +3608,451 @@ class TestDisable:
 class TestShow:
     """Tests for MgmtActions.show()."""
 
+    def _register_show_aio_mocks(
+        self,
+        mocked_responses: responses,
+        f: dict,
+        include_ep: bool = True,
+        include_graph: bool = True,
+        include_resp: bool = True,
+        graph_profile: str = MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE,
+        graph_not_in_default: bool = False,
+    ) -> None:
+        """Register AIO dataflow resource mocks for show() calls.
+
+        Mock insertion order mirrors the AIO probing sequence in show():
+        1. Dataflow endpoint GET
+        2. Graph discovery (via _discover_dataflow_profile)
+        3. Response dataflow discovery
+        """
+        instance_name = f["instance_name"]
+        rg = f["rg"]
+        ep_name = f["ep_name"]
+        graph_name = f["graph_name"]
+        resp_name = f["resp_name"]
+
+        # 1. Dataflow endpoint GET
+        ep_auth = {
+            "method": "SystemAssignedManagedIdentity",
+            "systemAssignedManagedIdentitySettings": {
+                "audience": MGMT_ACTIONS_EG_AUDIENCE,
+            },
+        }
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(
+                instance_name, rg, sub_resource=f"/dataflowEndpoints/{ep_name}",
+            ),
+            json={
+                "name": ep_name,
+                "properties": {
+                    "endpointType": MQTT_ENDPOINT_TYPE,
+                    "mqttSettings": {"authentication": ep_auth},
+                },
+            } if include_ep else {"error": {"code": "ResourceNotFound"}},
+            status=200 if include_ep else 404,
+        )
+
+        # 2. Graph discovery via _discover_dataflow_profile
+        default_graph_url = _build_iotops_endpoint(
+            instance_name, rg,
+            sub_resource=(
+                f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                f"/dataflowGraphs/{graph_name}"
+            ),
+        )
+        profiles_url = _build_iotops_endpoint(instance_name, rg, sub_resource="/dataflowProfiles")
+
+        if include_graph and not graph_not_in_default:
+            # Found in default profile (fast path)
+            mocked_responses.add(
+                method=responses.GET, url=default_graph_url,
+                json={"name": graph_name}, status=200,
+            )
+        elif include_graph and graph_not_in_default:
+            # Not in default, found in custom profile
+            mocked_responses.add(
+                method=responses.GET, url=default_graph_url,
+                json={"error": {"code": "ResourceNotFound"}}, status=404,
+            )
+            mocked_responses.add(
+                method=responses.GET, url=profiles_url,
+                json={"value": [{"name": graph_profile}]}, status=200,
+            )
+            mocked_responses.add(
+                method=responses.GET,
+                url=_build_iotops_endpoint(
+                    instance_name, rg,
+                    sub_resource=f"/dataflowProfiles/{graph_profile}/dataflowGraphs/{graph_name}",
+                ),
+                json={"name": graph_name}, status=200,
+            )
+        else:
+            # Not found anywhere
+            mocked_responses.add(
+                method=responses.GET, url=default_graph_url,
+                json={"error": {"code": "ResourceNotFound"}}, status=404,
+            )
+            mocked_responses.add(
+                method=responses.GET, url=profiles_url,
+                json={"value": []}, status=200,
+            )
+
+        # 3. Response dataflow discovery
+        resolved_profile = (
+            graph_profile if (include_graph and graph_not_in_default)
+            else MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE
+        )
+        resp_url = _build_iotops_endpoint(
+            instance_name, rg,
+            sub_resource=f"/dataflowProfiles/{resolved_profile}/dataflows/{resp_name}",
+        )
+
+        if include_graph:
+            # Graph exists — show() tries resp under graph's profile first
+            if include_resp:
+                mocked_responses.add(
+                    method=responses.GET, url=resp_url,
+                    json={"name": resp_name}, status=200,
+                )
+            else:
+                # Resp not found under graph's profile → falls through to independent discovery
+                mocked_responses.add(
+                    method=responses.GET, url=resp_url,
+                    json={"error": {"code": "ResourceNotFound"}}, status=404,
+                )
+                # Independent _discover_dataflow_profile starts with default profile.
+                # If graph was in a custom profile, the default resp URL is a different URL
+                # that needs its own 404 mock.
+                if graph_not_in_default:
+                    default_resp_url = _build_iotops_endpoint(
+                        instance_name, rg,
+                        sub_resource=(
+                            f"/dataflowProfiles/{MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE}"
+                            f"/dataflows/{resp_name}"
+                        ),
+                    )
+                    mocked_responses.add(
+                        method=responses.GET, url=default_resp_url,
+                        json={"error": {"code": "ResourceNotFound"}}, status=404,
+                    )
+                # Profile list mock: only needed if not already registered by graph discovery.
+                # Graph fast path (default profile) doesn't list profiles.
+                if not graph_not_in_default:
+                    mocked_responses.add(
+                        method=responses.GET, url=profiles_url,
+                        json={"value": []}, status=200,
+                    )
+        else:
+            # No graph — independent resp discovery via _discover_dataflow_profile
+            if include_resp:
+                mocked_responses.add(
+                    method=responses.GET, url=resp_url,
+                    json={"name": resp_name}, status=200,
+                )
+            else:
+                # Resp not found in default — profile list already registered (from graph discovery)
+                mocked_responses.add(
+                    method=responses.GET, url=resp_url,
+                    json={"error": {"code": "ResourceNotFound"}}, status=404,
+                )
+
     def _register_show_mocks(
         self,
         mocked_responses: responses,
-        instance_name: str,
-        rg: str,
-        adr_ns_name: str,
-        eg_ns_name: str,
-        eg_rg: str,
-        hostname: str,
-        custom_location_id: str,
-        instance_resource_id: str,
-        eg_subscription_id: Optional[str] = None,
+        f: dict,
+        # ADR control
+        no_adr_ref: bool = False,
+        adr_not_found: bool = False,
+        management_endpoints: Optional[dict] = None,
+        # EG control
+        eg_not_found: bool = False,
         include_topic_space: bool = True,
         include_pub_binding: bool = True,
         include_sub_binding: bool = True,
-        adr_not_found: bool = False,
-        eg_not_found: bool = False,
-        management_endpoints: Optional[dict] = None,
         client_group: str = MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP,
+        eg_subscription_id: Optional[str] = None,
+        # AIO control (forwarded to _register_show_aio_mocks)
+        include_ep: bool = True,
+        include_graph: bool = True,
+        include_resp: bool = True,
+        graph_profile: str = MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE,
+        graph_not_in_default: bool = False,
     ) -> None:
-        """Register all HTTP mocks needed for a show() call."""
+        """Register all HTTP mocks needed for a show() call.
+
+        Mock insertion order mirrors the exact HTTP call sequence of show().
+        show() probes all three domains independently — no early returns.
+        """
         eg_sub = eg_subscription_id or ZEROED_SUBSCRIPTION
 
-        # Instance GET
-        instance_response = _build_instance_response(instance_name, rg, adr_namespace_name=adr_ns_name)
+        # --- 1. Instance GET ---
+        instance_response = _build_instance_response(
+            f["instance_name"], f["rg"],
+            adr_namespace_name=f["adr_ns_name"],
+            include_adr_ref=not no_adr_ref,
+        )
         mocked_responses.add(
             method=responses.GET,
-            url=_build_iotops_endpoint(instance_name, rg),
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
             json=instance_response,
             status=200,
         )
 
-        # ADR namespace GET
-        eg_rid = _build_eg_resource_id(eg_ns_name, eg_rg, subscription_id=eg_sub)
-        if management_endpoints is None:
-            management_endpoints = {
-                custom_location_id: {
-                    "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
-                    "address": hostname,
-                    "scopeId": instance_name,
-                    "resourceId": eg_rid,
-                },
-            }
-
-        if adr_not_found:
-            mocked_responses.add(
-                method=responses.GET,
-                url=_build_adr_endpoint(adr_ns_name, rg),
-                json={"error": {"code": "ResourceNotFound"}},
-                status=404,
-            )
-            return
-        else:
-            mocked_responses.add(
-                method=responses.GET,
-                url=_build_adr_endpoint(adr_ns_name, rg),
-                json=_build_adr_namespace_response(
-                    adr_ns_name, rg,
-                    identity_type="SystemAssigned",
-                    principal_id="00000000-0000-0000-0000-bbbbbbbbbbbb",
-                    management_endpoints=management_endpoints,
-                ),
-                status=200,
-            )
-
-        # Short-circuit: if no management endpoints, show() won't probe EG
-        if not management_endpoints:
-            return
-
-        # EG namespace GET
-        if eg_not_found:
-            mocked_responses.add(
-                method=responses.GET,
-                url=_build_eg_endpoint(eg_ns_name, eg_rg, subscription_id=eg_sub),
-                json={"error": {"code": "ResourceNotFound"}},
-                status=404,
-            )
-            return
-        else:
-            mocked_responses.add(
-                method=responses.GET,
-                url=_build_eg_endpoint(eg_ns_name, eg_rg, subscription_id=eg_sub),
-                json=_build_namespace_response(eg_ns_name, eg_rg, mqtt_hostname=hostname, subscription_id=eg_sub),
-                status=200,
-            )
-
-        # Topic space GET — show() short-circuits on 404, so no binding mocks needed
-        ts_name = get_mgmt_actions_resource_name("ops", instance_resource_id)
-        if include_topic_space:
-            expected_templates = _get_expected_topic_templates(instance_name)
-            mocked_responses.add(
-                method=responses.GET,
-                url=_build_eg_endpoint(
-                    eg_ns_name, eg_rg,
-                    subscription_id=eg_sub,
-                    sub_resource=f"/topicSpaces/{ts_name}",
-                ),
-                json={
-                    "name": ts_name,
-                    "properties": {
-                        "topicTemplates": expected_templates,
+        # --- 2. ADR namespace GET ---
+        has_mgmt_endpoint = False
+        if not no_adr_ref:
+            eg_rid = _build_eg_resource_id(f["eg_ns_name"], f["eg_rg"], subscription_id=eg_sub)
+            if management_endpoints is None:
+                management_endpoints = {
+                    f["custom_location_id"]: {
+                        "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                        "address": f["hostname"],
+                        "scopeId": f["instance_name"],
+                        "resourceId": eg_rid,
                     },
-                },
-                status=200,
-            )
-        else:
-            mocked_responses.add(
-                method=responses.GET,
-                url=_build_eg_endpoint(
-                    eg_ns_name, eg_rg,
-                    subscription_id=eg_sub,
-                    sub_resource=f"/topicSpaces/{ts_name}",
-                ),
-                json={"error": {"code": "ResourceNotFound"}},
-                status=404,
-            )
-            return
+                }
 
-        # Publisher permission binding GET — show() short-circuits on 404
-        pub_name = get_mgmt_actions_resource_name("pub", instance_resource_id)
-        if include_pub_binding:
-            mocked_responses.add(
-                method=responses.GET,
-                url=_build_eg_endpoint(
-                    eg_ns_name, eg_rg,
-                    subscription_id=eg_sub,
-                    sub_resource=f"/permissionBindings/{pub_name}",
-                ),
-                json={
-                    "name": pub_name,
-                    "properties": {
-                        "clientGroupName": client_group,
-                        "permission": "Publisher",
-                        "topicSpaceName": ts_name,
-                    },
-                },
-                status=200,
-            )
-        else:
-            mocked_responses.add(
-                method=responses.GET,
-                url=_build_eg_endpoint(
-                    eg_ns_name, eg_rg,
-                    subscription_id=eg_sub,
-                    sub_resource=f"/permissionBindings/{pub_name}",
-                ),
-                json={"error": {"code": "ResourceNotFound"}},
-                status=404,
-            )
-            return
+            if adr_not_found:
+                mocked_responses.add(
+                    method=responses.GET,
+                    url=_build_adr_endpoint(f["adr_ns_name"], f["rg"]),
+                    json={"error": {"code": "ResourceNotFound"}},
+                    status=404,
+                )
+            else:
+                mocked_responses.add(
+                    method=responses.GET,
+                    url=_build_adr_endpoint(f["adr_ns_name"], f["rg"]),
+                    json=_build_adr_namespace_response(
+                        f["adr_ns_name"], f["rg"],
+                        identity_type="SystemAssigned",
+                        principal_id="00000000-0000-0000-0000-bbbbbbbbbbbb",
+                        management_endpoints=management_endpoints,
+                    ),
+                    status=200,
+                )
+                has_mgmt_endpoint = bool(management_endpoints)
 
-        # Subscriber permission binding GET
-        sub_name = get_mgmt_actions_resource_name("sub", instance_resource_id)
-        if include_sub_binding:
-            mocked_responses.add(
-                method=responses.GET,
-                url=_build_eg_endpoint(
-                    eg_ns_name, eg_rg,
-                    subscription_id=eg_sub,
-                    sub_resource=f"/permissionBindings/{sub_name}",
-                ),
-                json={
-                    "name": sub_name,
-                    "properties": {
-                        "clientGroupName": client_group,
-                        "permission": "Subscriber",
-                        "topicSpaceName": ts_name,
-                    },
-                },
-                status=200,
-            )
-        else:
-            mocked_responses.add(
-                method=responses.GET,
-                url=_build_eg_endpoint(
-                    eg_ns_name, eg_rg,
-                    subscription_id=eg_sub,
-                    sub_resource=f"/permissionBindings/{sub_name}",
-                ),
-                json={"error": {"code": "ResourceNotFound"}},
-                status=404,
-            )
+        # --- 3–6. EG namespace + sub-resource GETs ---
+        if has_mgmt_endpoint:
+            if eg_not_found:
+                mocked_responses.add(
+                    method=responses.GET,
+                    url=_build_eg_endpoint(f["eg_ns_name"], f["eg_rg"], subscription_id=eg_sub),
+                    json={"error": {"code": "ResourceNotFound"}},
+                    status=404,
+                )
+            else:
+                mocked_responses.add(
+                    method=responses.GET,
+                    url=_build_eg_endpoint(f["eg_ns_name"], f["eg_rg"], subscription_id=eg_sub),
+                    json=_build_namespace_response(
+                        f["eg_ns_name"], f["eg_rg"],
+                        mqtt_hostname=f["hostname"], subscription_id=eg_sub,
+                    ),
+                    status=200,
+                )
+
+                # Topic space GET
+                ts_name = f["ts_name"]
+                expected_templates = _get_expected_topic_templates(f["instance_name"])
+                mocked_responses.add(
+                    method=responses.GET,
+                    url=_build_eg_endpoint(
+                        f["eg_ns_name"], f["eg_rg"], subscription_id=eg_sub,
+                        sub_resource=f"/topicSpaces/{ts_name}",
+                    ),
+                    json={
+                        "name": ts_name,
+                        "properties": {"topicTemplates": expected_templates},
+                    } if include_topic_space else {"error": {"code": "ResourceNotFound"}},
+                    status=200 if include_topic_space else 404,
+                )
+
+                # Publisher binding GET
+                pub_name = f["pub_name"]
+                mocked_responses.add(
+                    method=responses.GET,
+                    url=_build_eg_endpoint(
+                        f["eg_ns_name"], f["eg_rg"], subscription_id=eg_sub,
+                        sub_resource=f"/permissionBindings/{pub_name}",
+                    ),
+                    json={
+                        "name": pub_name,
+                        "properties": {
+                            "clientGroupName": client_group,
+                            "permission": "Publisher",
+                            "topicSpaceName": ts_name,
+                        },
+                    } if include_pub_binding else {"error": {"code": "ResourceNotFound"}},
+                    status=200 if include_pub_binding else 404,
+                )
+
+                # Subscriber binding GET
+                sub_name = f["sub_name"]
+                mocked_responses.add(
+                    method=responses.GET,
+                    url=_build_eg_endpoint(
+                        f["eg_ns_name"], f["eg_rg"], subscription_id=eg_sub,
+                        sub_resource=f"/permissionBindings/{sub_name}",
+                    ),
+                    json={
+                        "name": sub_name,
+                        "properties": {
+                            "clientGroupName": client_group,
+                            "permission": "Subscriber",
+                            "topicSpaceName": ts_name,
+                        },
+                    } if include_sub_binding else {"error": {"code": "ResourceNotFound"}},
+                    status=200 if include_sub_binding else 404,
+                )
+
+        # --- 7–9. AIO resource mocks (always registered) ---
+        self._register_show_aio_mocks(
+            mocked_responses, f,
+            include_ep=include_ep,
+            include_graph=include_graph,
+            include_resp=include_resp,
+            graph_profile=graph_profile,
+            graph_not_in_default=graph_not_in_default,
+        )
 
     def _make_show_fixtures(self) -> dict:
         """Build common test fixtures for show tests."""
-        instance_name = generate_random_string()
-        rg = generate_random_string()
-        adr_ns_name = f"{instance_name}-adr-ns"
+        base = _make_base_fixtures()
         eg_ns_name = generate_random_string()
         eg_rg = generate_random_string()
-        hostname = f"{eg_ns_name}.eastus-1.ts.eventgrid.azure.net"
-        extended_location = _make_extended_location()
-        custom_location_id = extended_location["name"]
-        instance_resource_id = (
-            f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{rg}"
-            f"/providers/{IOTOPS_RP}/instances/{instance_name}"
-        )
         return {
-            "instance_name": instance_name,
-            "rg": rg,
-            "adr_ns_name": adr_ns_name,
+            **base,
             "eg_ns_name": eg_ns_name,
             "eg_rg": eg_rg,
-            "hostname": hostname,
-            "custom_location_id": custom_location_id,
-            "instance_resource_id": instance_resource_id,
+            "hostname": f"{eg_ns_name}.eastus-1.ts.eventgrid.azure.net",
+            "custom_location_id": MOCK_EXTENDED_LOCATION["name"],
         }
+
+    def _assert_4_key_shape(self, result: dict) -> None:
+        """Assert the result has the consistent 4-key shape."""
+        assert set(result.keys()) == {"enabled", "instance", "eventGrid", "deviceRegistryNamespace"}
+
+    def _assert_instance_all_exist(self, result: dict, f: dict) -> None:
+        """Assert `instance` section has all resources existing with correct names."""
+        inst = result["instance"]
+        assert inst["dataflowProfile"] == MGMT_ACTIONS_DEFAULT_DATAFLOW_PROFILE
+        assert inst["dataflowEndpoint"]["name"] == f["ep_name"]
+        assert inst["dataflowEndpoint"]["exists"] is True
+        assert inst["dataflowEndpoint"]["authentication"] is not None
+        assert inst["requestDataflowGraph"]["name"] == f["graph_name"]
+        assert inst["requestDataflowGraph"]["exists"] is True
+        assert inst["responseDataflow"]["name"] == f["resp_name"]
+        assert inst["responseDataflow"]["exists"] is True
+
+    def _assert_instance_all_missing(self, result: dict, f: dict) -> None:
+        """Assert `instance` section has all resources missing."""
+        inst = result["instance"]
+        assert inst["dataflowProfile"] is None
+        assert inst["dataflowEndpoint"]["name"] == f["ep_name"]
+        assert inst["dataflowEndpoint"]["exists"] is False
+        assert inst["dataflowEndpoint"]["authentication"] is None
+        assert inst["requestDataflowGraph"]["name"] == f["graph_name"]
+        assert inst["requestDataflowGraph"]["exists"] is False
+        assert inst["responseDataflow"]["name"] == f["resp_name"]
+        assert inst["responseDataflow"]["exists"] is False
 
     def test_fully_enabled(self, mocked_cmd, mocked_responses: responses):
         """Fully configured instance returns enabled=True with complete topology."""
         f = self._make_show_fixtures()
-        self._register_show_mocks(mocked_responses, **f)
+        self._register_show_mocks(mocked_responses, f)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
 
+        self._assert_4_key_shape(result)
         assert result["enabled"] is True
-        assert result["eventGrid"]["namespace"]["name"] == f["eg_ns_name"]
-        assert result["eventGrid"]["namespace"]["resourceGroup"] == f["eg_rg"]
-        assert result["eventGrid"]["namespace"]["subscriptionId"] == ZEROED_SUBSCRIPTION
-        assert result["eventGrid"]["namespace"]["mqttHostname"] == f["hostname"]
-        assert result["eventGrid"]["topicSpace"]["name"] == get_mgmt_actions_resource_name(
-            "ops", f["instance_resource_id"]
-        )
-        assert result["eventGrid"]["topicSpace"]["scopeId"] == f["instance_name"]
-        assert len(result["eventGrid"]["topicSpace"]["topicTemplates"]) == 2
-        assert result["eventGrid"]["permissionBindings"]["clientGroup"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
-        assert result["deviceRegistryNamespace"]["name"] == f["adr_ns_name"]
-        assert result["deviceRegistryNamespace"]["resourceGroup"] == f["rg"]
-        assert result["deviceRegistryNamespace"]["subscriptionId"] == ZEROED_SUBSCRIPTION
-        assert result["deviceRegistryNamespace"]["managementEndpoint"]["endpointType"] == MGMT_ACTIONS_ADR_ENDPOINT_TYPE
-        assert result["deviceRegistryNamespace"]["managementEndpoint"]["address"] == f["hostname"]
-        assert result["deviceRegistryNamespace"]["managementEndpoint"]["scopeId"] == f["instance_name"]
-        # instance GET + ADR GET + EG namespace GET + topic space GET + pub binding GET + sub binding GET
-        assert len(mocked_responses.calls) == 6
+
+        # -- instance section --
+        self._assert_instance_all_exist(result, f)
+
+        # -- eventGrid section --
+        eg = result["eventGrid"]
+        assert eg["namespace"]["name"] == f["eg_ns_name"]
+        assert eg["namespace"]["resourceGroup"] == f["eg_rg"]
+        assert eg["namespace"]["subscriptionId"] == ZEROED_SUBSCRIPTION
+        assert eg["namespace"]["mqttHostname"] == f["hostname"]
+        assert eg["topicSpace"]["name"] == f["ts_name"]
+        assert eg["topicSpace"]["scopeId"] == f["instance_name"]
+        assert eg["topicSpace"]["exists"] is True
+        assert len(eg["topicSpace"]["topicTemplates"]) == 2
+        assert eg["permissionBindings"]["publisher"]["name"] == f["pub_name"]
+        assert eg["permissionBindings"]["publisher"]["clientGroup"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
+        assert eg["permissionBindings"]["subscriber"]["name"] == f["sub_name"]
+        assert eg["permissionBindings"]["subscriber"]["clientGroup"] == MGMT_ACTIONS_DEFAULT_EG_CLIENT_GROUP
+        assert eg["permissionBindings"]["exists"] is True
+
+        # -- deviceRegistryNamespace section --
+        adr = result["deviceRegistryNamespace"]
+        assert adr["name"] == f["adr_ns_name"]
+        assert adr["resourceGroup"] == f["rg"]
+        assert adr["subscriptionId"] == ZEROED_SUBSCRIPTION
+        assert adr["managementEndpoint"]["endpointType"] == MGMT_ACTIONS_ADR_ENDPOINT_TYPE
+        assert adr["managementEndpoint"]["address"] == f["hostname"]
+        assert adr["managementEndpoint"]["scopeId"] == f["instance_name"]
+
+        # instance GET + ADR GET + EG NS GET + TS GET + Pub GET + Sub GET + EP GET + Graph GET + Resp GET
+        assert len(mocked_responses.calls) == 9
 
     def test_no_management_endpoint(self, mocked_cmd, mocked_responses: responses):
-        """Instance with no ADR management endpoint entry returns enabled=False."""
+        """ADR namespace exists but no management endpoint entry → enabled=False, ADR populated, no EG."""
         f = self._make_show_fixtures()
-        self._register_show_mocks(mocked_responses, **f, management_endpoints={})
+        self._register_show_mocks(mocked_responses, f, management_endpoints={})
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
 
-        assert result == {"enabled": False}
-        # instance GET + ADR GET only, no EG calls
-        assert len(mocked_responses.calls) == 2
+        self._assert_4_key_shape(result)
+        assert result["enabled"] is False
+        self._assert_instance_all_exist(result, f)
+        assert result["eventGrid"] is None
+        # ADR section populated with managementEndpoint: None
+        adr = result["deviceRegistryNamespace"]
+        assert adr["name"] == f["adr_ns_name"]
+        assert adr["managementEndpoint"] is None
+        # instance GET + ADR GET + 3 AIO GETs
+        assert len(mocked_responses.calls) == 5
 
     def test_adr_namespace_not_found(self, mocked_cmd, mocked_responses: responses):
-        """ADR namespace 404 returns enabled=False."""
+        """ADR namespace 404 → enabled=False, ADR null, EG null, instance probed."""
         f = self._make_show_fixtures()
-        self._register_show_mocks(mocked_responses, **f, adr_not_found=True)
+        self._register_show_mocks(mocked_responses, f, adr_not_found=True)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
 
-        assert result == {"enabled": False}
+        self._assert_4_key_shape(result)
+        assert result["enabled"] is False
+        self._assert_instance_all_exist(result, f)
+        assert result["eventGrid"] is None
+        assert result["deviceRegistryNamespace"] is None
+        # instance GET + ADR GET (404) + 3 AIO GETs
+        assert len(mocked_responses.calls) == 5
 
     def test_eg_namespace_not_found(self, mocked_cmd, mocked_responses: responses):
-        """EG namespace 404 returns enabled=False."""
+        """EG namespace 404 → enabled=False, EG null, instance and ADR probed."""
         f = self._make_show_fixtures()
-        self._register_show_mocks(mocked_responses, **f, eg_not_found=True)
+        self._register_show_mocks(mocked_responses, f, eg_not_found=True)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
 
-        assert result == {"enabled": False}
+        self._assert_4_key_shape(result)
+        assert result["enabled"] is False
+        # AIO probed independently — all exist
+        self._assert_instance_all_exist(result, f)
+        assert result["eventGrid"] is None
+        assert result["deviceRegistryNamespace"] is not None
+        assert result["deviceRegistryNamespace"]["managementEndpoint"] is not None
+        # instance GET + ADR GET + EG NS GET (404) + 3 AIO GETs
+        assert len(mocked_responses.calls) == 6
 
     @pytest.mark.parametrize(
         "missing_resource",
@@ -2846,38 +4064,296 @@ class TestShow:
         mocked_responses: responses,
         missing_resource: str,
     ):
-        """Missing EG resource returns enabled=False."""
+        """Missing EG sub-resource → enabled=False with exists flags showing which is missing."""
         f = self._make_show_fixtures()
         kwargs = {
             "include_topic_space": missing_resource != "topic_space",
             "include_pub_binding": missing_resource != "pub_binding",
             "include_sub_binding": missing_resource != "sub_binding",
         }
-        self._register_show_mocks(mocked_responses, **f, **kwargs)
+        self._register_show_mocks(mocked_responses, f, **kwargs)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
 
-        assert result == {"enabled": False}
+        self._assert_4_key_shape(result)
+        assert result["enabled"] is False
+        self._assert_instance_all_exist(result, f)
+        # EG section populated with exists flags
+        eg = result["eventGrid"]
+        assert eg is not None
+        assert eg["namespace"]["name"] == f["eg_ns_name"]
+        ts_exists = missing_resource != "topic_space"
+        assert eg["topicSpace"]["exists"] is ts_exists
+        assert eg["topicSpace"]["name"] == f["ts_name"]
+        if ts_exists:
+            assert "topicTemplates" in eg["topicSpace"]
+            assert "scopeId" in eg["topicSpace"]
+        else:
+            assert "topicTemplates" not in eg["topicSpace"]
+            assert "scopeId" not in eg["topicSpace"]
+        # Bindings exist only when both pub and sub exist
+        pub_missing = missing_resource == "pub_binding"
+        sub_missing = missing_resource == "sub_binding"
+        bindings_exist = not pub_missing and not sub_missing
+        assert eg["permissionBindings"]["exists"] is bindings_exist
+        if not pub_missing:
+            assert "clientGroup" in eg["permissionBindings"]["publisher"]
+        else:
+            assert "clientGroup" not in eg["permissionBindings"]["publisher"]
+        if not sub_missing:
+            assert "clientGroup" in eg["permissionBindings"]["subscriber"]
+        else:
+            assert "clientGroup" not in eg["permissionBindings"]["subscriber"]
 
     def test_cross_subscription_eg(self, mocked_cmd, mocked_responses: responses):
         """EG namespace in a different subscription is handled correctly."""
         f = self._make_show_fixtures()
         cross_sub = "11111111-1111-1111-1111-111111111111"
-        self._register_show_mocks(mocked_responses, **f, eg_subscription_id=cross_sub)
+        self._register_show_mocks(mocked_responses, f, eg_subscription_id=cross_sub)
 
         provider = MgmtActions(cmd=mocked_cmd)
         result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
 
+        self._assert_4_key_shape(result)
         assert result["enabled"] is True
         assert result["eventGrid"]["namespace"]["subscriptionId"] == cross_sub
 
     def test_no_adr_namespace_ref(self, mocked_cmd, mocked_responses: responses):
-        """Instance without adrNamespaceRef returns enabled=False."""
+        """Instance without adrNamespaceRef → enabled=False, ADR null, EG null, AIO probed."""
+        f = self._make_show_fixtures()
+        self._register_show_mocks(
+            mocked_responses, f,
+            no_adr_ref=True, include_ep=False, include_graph=False, include_resp=False,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
+
+        self._assert_4_key_shape(result)
+        assert result["enabled"] is False
+        self._assert_instance_all_missing(result, f)
+        assert result["eventGrid"] is None
+        assert result["deviceRegistryNamespace"] is None
+
+    def test_aio_all_missing(self, mocked_cmd, mocked_responses: responses):
+        """All AIO resources 404 → enabled=False, instance section all exists=False."""
+        f = self._make_show_fixtures()
+        self._register_show_mocks(
+            mocked_responses, f,
+            include_ep=False, include_graph=False, include_resp=False,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
+
+        self._assert_4_key_shape(result)
+        assert result["enabled"] is False
+        self._assert_instance_all_missing(result, f)
+        # EG and ADR still fully populated
+        assert result["eventGrid"] is not None
+        assert result["eventGrid"]["topicSpace"]["exists"] is True
+        assert result["eventGrid"]["permissionBindings"]["exists"] is True
+        assert result["deviceRegistryNamespace"] is not None
+
+    @pytest.mark.parametrize(
+        "missing",
+        ["endpoint", "graph", "response"],
+    )
+    def test_aio_partially_missing(
+        self,
+        mocked_cmd,
+        mocked_responses: responses,
+        missing: str,
+    ):
+        """Single AIO resource missing → enabled=False, correct exists flags."""
+        f = self._make_show_fixtures()
+        self._register_show_mocks(
+            mocked_responses, f,
+            include_ep=missing != "endpoint",
+            include_graph=missing != "graph",
+            include_resp=missing != "response",
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
+
+        self._assert_4_key_shape(result)
+        assert result["enabled"] is False
+        inst = result["instance"]
+        assert inst["dataflowEndpoint"]["exists"] is (missing != "endpoint")
+        assert inst["requestDataflowGraph"]["exists"] is (missing != "graph")
+        assert inst["responseDataflow"]["exists"] is (missing != "response")
+
+    def test_aio_custom_profile(self, mocked_cmd, mocked_responses: responses):
+        """Graph and response under non-default profile → correct profile name reported."""
+        f = self._make_show_fixtures()
+        custom_profile = "custom-perf-profile"
+        self._register_show_mocks(
+            mocked_responses, f,
+            graph_profile=custom_profile,
+            graph_not_in_default=True,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.show(name=f["instance_name"], resource_group_name=f["rg"])
+
+        self._assert_4_key_shape(result)
+        assert result["enabled"] is True
+        assert result["instance"]["dataflowProfile"] == custom_profile
+        assert result["instance"]["requestDataflowGraph"]["exists"] is True
+        assert result["instance"]["responseDataflow"]["exists"] is True
+
+
+class TestExecute:
+    """Tests for MgmtActions.execute()."""
+
+    def _build_execute_action_endpoint(
+        self,
+        namespace_name: str,
+        resource_group_name: str,
+        asset_name: str,
+        subscription_id: Optional[str] = None,
+    ) -> str:
+        """Build the executeAction POST URL."""
+        sub_id = subscription_id or ZEROED_SUBSCRIPTION
+        return (
+            f"{BASE_URL}/subscriptions/{sub_id}/resourceGroups/{resource_group_name}"
+            f"/providers/{DEVICEREGISTRY_RP}/namespaces/{namespace_name}"
+            f"/assets/{asset_name}/executeAction"
+            f"?api-version={DEVICEREGISTRY_API_VERSION}"
+        )
+
+    def _make_execute_fixtures(self) -> dict:
+        """Build common test fixtures for execute tests."""
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+        adr_ns_name = f"{instance_name}-adr-ns"
+        asset_name = generate_random_string()
+        group_name = generate_random_string()
+        action_name = generate_random_string()
+        return {
+            "instance_name": instance_name,
+            "rg": rg,
+            "adr_ns_name": adr_ns_name,
+            "asset_name": asset_name,
+            "group_name": group_name,
+            "action_name": action_name,
+        }
+
+    def _register_execute_mocks(
+        self,
+        mocked_responses: responses,
+        instance_name: str,
+        rg: str,
+        adr_ns_name: str,
+        asset_name: str,
+        execute_response: dict,
+        execute_status: int = 200,
+        instance_response: Optional[dict] = None,
+    ) -> None:
+        """Register HTTP mocks for instance GET and executeAction POST."""
+        if instance_response is None:
+            instance_response = _build_instance_response(instance_name, rg, adr_namespace_name=adr_ns_name)
+
+        # Instance GET
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(instance_name, rg),
+            json=instance_response,
+            status=200,
+        )
+
+        # executeAction POST
+        mocked_responses.add(
+            method=responses.POST,
+            url=self._build_execute_action_endpoint(adr_ns_name, rg, asset_name),
+            json=execute_response,
+            status=execute_status,
+        )
+
+    def test_happy_path_with_payload(self, mocked_cmd, mocked_responses: responses):
+        """Execute with payload — verify request body and return value."""
+        f = self._make_execute_fixtures()
+        payload_str = '{"On": true}'
+        expected_response = {
+            "assetResourceId": f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{f['rg']}"
+            f"/providers/{DEVICEREGISTRY_RP}/namespaces/{f['adr_ns_name']}/assets/{f['asset_name']}",
+            "managementGroupName": f["group_name"],
+            "managementActionName": f["action_name"],
+            "status": "Succeeded",
+            "response": '{"result": "ok"}',
+        }
+        self._register_execute_mocks(
+            mocked_responses,
+            instance_name=f["instance_name"],
+            rg=f["rg"],
+            adr_ns_name=f["adr_ns_name"],
+            asset_name=f["asset_name"],
+            execute_response=expected_response,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload=payload_str,
+            wait_sec=0,
+        )
+
+        assert result == expected_response
+        assert len(mocked_responses.calls) == 2
+
+        # Verify the request body sent to executeAction
+        execute_request = mocked_responses.calls[1]
+        body = json.loads(execute_request.request.body)
+        assert body["managementActionName"] == f["action_name"]
+        assert body["managementGroupName"] == f["group_name"]
+        assert body["payload"] == {"On": True}
+
+    def test_without_payload(self, mocked_cmd, mocked_responses: responses):
+        """Execute without payload — verify payload key absent from request body."""
+        f = self._make_execute_fixtures()
+        expected_response = {
+            "assetResourceId": "some-id",
+            "managementGroupName": f["group_name"],
+            "managementActionName": f["action_name"],
+            "status": "Succeeded",
+        }
+        self._register_execute_mocks(
+            mocked_responses,
+            instance_name=f["instance_name"],
+            rg=f["rg"],
+            adr_ns_name=f["adr_ns_name"],
+            asset_name=f["asset_name"],
+            execute_response=expected_response,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            wait_sec=0,
+        )
+
+        assert result == expected_response
+
+        # Verify no payload in request body
+        execute_request = mocked_responses.calls[1]
+        body = json.loads(execute_request.request.body)
+        assert "payload" not in body
+
+    def test_no_adr_namespace_ref(self, mocked_cmd, mocked_responses: responses):
+        """Instance without adrNamespaceRef raises ValidationError."""
         instance_name = generate_random_string()
         rg = generate_random_string()
 
-        # Build instance without adrNamespaceRef
         instance_response = {
             "id": (
                 f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{rg}"
@@ -2885,9 +4361,8 @@ class TestShow:
             ),
             "name": instance_name,
             "location": "eastus",
-            "extendedLocation": _make_extended_location(),
+            "extendedLocation": MOCK_EXTENDED_LOCATION,
             "properties": {
-                "version": MIN_INSTANCE_VERSION_MGMT_ACTIONS,
                 "provisioningState": "Succeeded",
             },
         }
@@ -2899,7 +4374,1252 @@ class TestShow:
         )
 
         provider = MgmtActions(cmd=mocked_cmd)
-        result = provider.show(name=instance_name, resource_group_name=rg)
+        with pytest.raises(ValidationError, match="Instance does not have an ADR namespace reference"):
+            provider.execute(
+                instance_name=instance_name,
+                resource_group_name=rg,
+                asset_name="some-asset",
+                group_name="some-group",
+                action_name="some-action",
+                wait_sec=0,
+            )
 
-        assert result == {"enabled": False}
+        # Only instance GET — no executeAction call
         assert len(mocked_responses.calls) == 1
+
+    def test_action_failed_on_device(self, mocked_cmd, mocked_responses: responses):
+        """LRO completes with status Failed — error details returned, not raised."""
+        f = self._make_execute_fixtures()
+        expected_response = {
+            "assetResourceId": "some-id",
+            "managementGroupName": f["group_name"],
+            "managementActionName": f["action_name"],
+            "status": "Failed",
+            "error": {
+                "code": "DeviceError",
+                "message": "The device rejected the action.",
+            },
+        }
+        self._register_execute_mocks(
+            mocked_responses,
+            instance_name=f["instance_name"],
+            rg=f["rg"],
+            adr_ns_name=f["adr_ns_name"],
+            asset_name=f["asset_name"],
+            execute_response=expected_response,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            wait_sec=0,
+        )
+
+        # Failed status is returned as-is — not raised as an exception
+        assert result["status"] == "Failed"
+        assert result["error"]["code"] == "DeviceError"
+
+    def test_invalid_payload(self, mocked_cmd, mocked_responses: responses):
+        """Invalid JSON payload raises InvalidArgumentValueError before any API call."""
+        f = self._make_execute_fixtures()
+
+        # Only register instance GET — executeAction POST should never fire
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=_build_instance_response(f["instance_name"], f["rg"], adr_namespace_name=f["adr_ns_name"]),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        with pytest.raises(InvalidArgumentValueError, match="Failed to parse JSON input"):
+            provider.execute(
+                instance_name=f["instance_name"],
+                resource_group_name=f["rg"],
+                asset_name=f["asset_name"],
+                group_name=f["group_name"],
+                action_name=f["action_name"],
+                payload="not valid json",
+                wait_sec=0,
+            )
+
+        # Instance GET fires, but executeAction should not
+        assert len(mocked_responses.calls) == 1
+
+    def test_payload_from_file(self, mocker, mocked_cmd, mocked_responses: responses):
+        """Payload resolved from file path via deserialize_json_input."""
+        f = self._make_execute_fixtures()
+        file_content = '{"temperature": {"setpoint": 72}}'
+        mocker.patch(
+            "azext_edge.edge.util.file_operations.read_file_content",
+            return_value=file_content,
+        )
+        expected_response = {
+            "assetResourceId": "some-id",
+            "managementGroupName": f["group_name"],
+            "managementActionName": f["action_name"],
+            "status": "Succeeded",
+        }
+        self._register_execute_mocks(
+            mocked_responses,
+            instance_name=f["instance_name"],
+            rg=f["rg"],
+            adr_ns_name=f["adr_ns_name"],
+            asset_name=f["asset_name"],
+            execute_response=expected_response,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload="somefile.json",
+            wait_sec=0,
+        )
+
+        assert result == expected_response
+
+        # Verify payload was deserialized from file content
+        execute_request = mocked_responses.calls[1]
+        body = json.loads(execute_request.request.body)
+        assert body["payload"] == {"temperature": {"setpoint": 72}}
+
+
+# ---------------------------------------------------------------------------
+# Schema validation tests for execute()
+# ---------------------------------------------------------------------------
+
+
+def _build_namespace_asset_endpoint(
+    namespace_name: str,
+    resource_group_name: str,
+    asset_name: str,
+    subscription_id: Optional[str] = None,
+) -> str:
+    """Build a full management endpoint URL for a namespace asset GET."""
+    sub_id = subscription_id or ZEROED_SUBSCRIPTION
+    return (
+        f"{BASE_URL}/subscriptions/{sub_id}/resourceGroups/{resource_group_name}"
+        f"/providers/{DEVICEREGISTRY_RP}/namespaces/{namespace_name}/assets/{asset_name}"
+        f"?api-version={DEVICEREGISTRY_API_VERSION}"
+    )
+
+
+def _build_schema_version_endpoint(
+    registry_rg: str,
+    registry_name: str,
+    schema_name: str,
+    schema_version: str,
+    subscription_id: Optional[str] = None,
+) -> str:
+    """Build a full management endpoint URL for a schema version GET."""
+    sub_id = subscription_id or ZEROED_SUBSCRIPTION
+    return (
+        f"{BASE_URL}/subscriptions/{sub_id}/resourceGroups/{registry_rg}"
+        f"/providers/{DEVICEREGISTRY_RP}/schemaRegistries/{registry_name}"
+        f"/schemas/{schema_name}/schemaVersions/{schema_version}"
+        f"?api-version={DEVICEREGISTRY_API_VERSION}"
+    )
+
+
+def _build_asset_response_with_schema(
+    asset_name: str,
+    group_name: str,
+    action_name: str,
+    schema_name: str,
+    schema_version: str,
+) -> dict:
+    """Build a namespace asset GET response with requestMessageSchemaReference in status."""
+    return {
+        "name": asset_name,
+        "properties": {
+            "provisioningState": "Succeeded",
+            "status": {
+                "managementGroups": [
+                    {
+                        "name": group_name,
+                        "actions": [
+                            {
+                                "name": action_name,
+                                "requestMessageSchemaReference": {
+                                    "schemaName": schema_name,
+                                    "schemaVersion": schema_version,
+                                },
+                            }
+                        ],
+                    }
+                ]
+            },
+        },
+    }
+
+
+def _build_schema_version_response(schema_content: str) -> dict:
+    """Build a schema version GET response with stringified JSON Schema."""
+    return {
+        "properties": {
+            "schemaContent": schema_content,
+        },
+    }
+
+
+class _SchemaTestBase:
+    """Shared fixtures and helpers for schema-related execute() tests."""
+
+    SCHEMA_NAME = "temperatureSchema"
+    SCHEMA_VERSION = "1"
+    REGISTRY_NAME = "mySchemaRegistry"
+
+    def _make_fixtures(self) -> dict:
+        instance_name = generate_random_string()
+        rg = generate_random_string()
+        adr_ns_name = f"{instance_name}-adr-ns"
+        asset_name = generate_random_string()
+        group_name = generate_random_string()
+        action_name = generate_random_string()
+        return {
+            "instance_name": instance_name,
+            "rg": rg,
+            "adr_ns_name": adr_ns_name,
+            "asset_name": asset_name,
+            "group_name": group_name,
+            "action_name": action_name,
+        }
+
+    def _build_instance_with_registry(self, f: dict) -> dict:
+        """Build instance response with schemaRegistryRef."""
+        resp = _build_instance_response(f["instance_name"], f["rg"], adr_namespace_name=f["adr_ns_name"])
+        registry_id = (
+            f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{f['rg']}"
+            f"/providers/{DEVICEREGISTRY_RP}/schemaRegistries/{self.REGISTRY_NAME}"
+        )
+        resp["properties"]["schemaRegistryRef"] = {"resourceId": registry_id}
+        return resp
+
+    def _build_execute_action_endpoint(
+        self,
+        namespace_name: str,
+        resource_group_name: str,
+        asset_name: str,
+    ) -> str:
+        sub_id = ZEROED_SUBSCRIPTION
+        return (
+            f"{BASE_URL}/subscriptions/{sub_id}/resourceGroups/{resource_group_name}"
+            f"/providers/{DEVICEREGISTRY_RP}/namespaces/{namespace_name}"
+            f"/assets/{asset_name}/executeAction"
+            f"?api-version={DEVICEREGISTRY_API_VERSION}"
+        )
+
+    def _register_schema_resolution_mocks(
+        self,
+        mocked_responses: responses,
+        f: dict,
+        schema_content: str,
+    ) -> None:
+        """Register mocks for schema resolution: Instance GET → Asset GET → Schema Version GET."""
+        # Instance GET
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=self._build_instance_with_registry(f),
+            status=200,
+        )
+        # Asset GET
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_namespace_asset_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=_build_asset_response_with_schema(
+                f["asset_name"], f["group_name"], f["action_name"],
+                self.SCHEMA_NAME, self.SCHEMA_VERSION,
+            ),
+            status=200,
+        )
+        # Schema Version GET
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_schema_version_endpoint(
+                f["rg"], self.REGISTRY_NAME, self.SCHEMA_NAME, self.SCHEMA_VERSION,
+            ),
+            json=_build_schema_version_response(schema_content),
+            status=200,
+        )
+
+
+class TestExecutePayloadValidation(_SchemaTestBase):
+    """Tests for payload-against-schema validation in execute().
+
+    Schema resolution is soft-fail during normal execution — if any step
+    in the chain fails, validation is skipped and executeAction proceeds.
+    """
+
+    def _register_full_validation_mocks(
+        self,
+        mocked_responses: responses,
+        f: dict,
+        schema_content: str,
+        execute_response: dict,
+    ) -> None:
+        """Register all mocks for a full validation+execution flow.
+
+        Order: Instance GET → Asset GET → Schema Version GET → executeAction POST
+        """
+        self._register_schema_resolution_mocks(mocked_responses, f, schema_content)
+        # executeAction POST
+        mocked_responses.add(
+            method=responses.POST,
+            url=self._build_execute_action_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=execute_response,
+            status=200,
+        )
+
+    def test_validation_passes(self, mocked_cmd, mocked_responses: responses):
+        """Schema resolved and payload conforms → executeAction called normally."""
+        f = self._make_fixtures()
+        schema = json.dumps({
+            "type": "object",
+            "properties": {"temperature": {"type": "number"}},
+        })
+        execute_response = {"status": "Succeeded"}
+        self._register_full_validation_mocks(mocked_responses, f, schema, execute_response)
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload='{"temperature": 72}',
+            wait_sec=0,
+        )
+
+        assert result == execute_response
+        # 4 calls: Instance GET, Asset GET, Schema Version GET, executeAction POST
+        assert len(mocked_responses.calls) == 4
+
+    def test_validation_fails(self, mocked_cmd, mocked_responses: responses):
+        """Schema resolved, payload violates schema → InvalidArgumentValueError before POST."""
+        f = self._make_fixtures()
+        schema = json.dumps({
+            "type": "object",
+            "properties": {"temperature": {"type": "number"}},
+            "required": ["temperature"],
+            "additionalProperties": False,
+        })
+        # Register all mocks except POST (validation should fail before it)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=self._build_instance_with_registry(f),
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_namespace_asset_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=_build_asset_response_with_schema(
+                f["asset_name"], f["group_name"], f["action_name"],
+                self.SCHEMA_NAME, self.SCHEMA_VERSION,
+            ),
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_schema_version_endpoint(
+                f["rg"], self.REGISTRY_NAME, self.SCHEMA_NAME, self.SCHEMA_VERSION,
+            ),
+            json=_build_schema_version_response(schema),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        with pytest.raises(InvalidArgumentValueError, match="payload"):
+            provider.execute(
+                instance_name=f["instance_name"],
+                resource_group_name=f["rg"],
+                asset_name=f["asset_name"],
+                group_name=f["group_name"],
+                action_name=f["action_name"],
+                payload='{"badField": "wrong"}',
+                wait_sec=0,
+            )
+
+        # 3 calls: Instance GET, Asset GET, Schema Version GET — no POST
+        assert len(mocked_responses.calls) == 3
+
+    def test_no_payload_validates_empty_object(self, mocked_cmd, mocked_responses: responses):
+        """No payload → schema resolved, {} validated against it, executeAction proceeds."""
+        f = self._make_fixtures()
+        schema = json.dumps({
+            "type": "object",
+            "properties": {"temperature": {"type": "number"}},
+        })
+        execute_response = {"status": "Succeeded"}
+        self._register_full_validation_mocks(mocked_responses, f, schema, execute_response)
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            wait_sec=0,
+        )
+
+        assert result == execute_response
+        # 4 calls: Instance GET, Asset GET, Schema Version GET, executeAction POST
+        assert len(mocked_responses.calls) == 4
+
+    def test_no_payload_required_fields_fails(self, mocked_cmd, mocked_responses: responses):
+        """No payload + schema has required fields → InvalidArgumentValueError before POST."""
+        f = self._make_fixtures()
+        schema = json.dumps({
+            "type": "object",
+            "properties": {"mode": {"type": "string"}},
+            "required": ["mode"],
+        })
+        # Register all mocks except POST (validation should fail before it)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=self._build_instance_with_registry(f),
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_namespace_asset_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=_build_asset_response_with_schema(
+                f["asset_name"], f["group_name"], f["action_name"],
+                self.SCHEMA_NAME, self.SCHEMA_VERSION,
+            ),
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_schema_version_endpoint(
+                f["rg"], self.REGISTRY_NAME, self.SCHEMA_NAME, self.SCHEMA_VERSION,
+            ),
+            json=_build_schema_version_response(schema),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        with pytest.raises(InvalidArgumentValueError, match="payload"):
+            provider.execute(
+                instance_name=f["instance_name"],
+                resource_group_name=f["rg"],
+                asset_name=f["asset_name"],
+                group_name=f["group_name"],
+                action_name=f["action_name"],
+                wait_sec=0,
+            )
+
+        # 3 calls: Instance GET, Asset GET, Schema Version GET — no POST
+        assert len(mocked_responses.calls) == 3
+
+    def test_no_validate_skips_resolution(self, mocked_cmd, mocked_responses: responses):
+        """no_validate=True → _resolve_request_schema not called, executeAction proceeds."""
+        f = self._make_fixtures()
+        execute_response = {"status": "Succeeded"}
+        # Only register instance GET and executeAction POST — no schema mocks
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=self._build_instance_with_registry(f),
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.POST,
+            url=self._build_execute_action_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=execute_response,
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload='{"temperature": 72}',
+            no_validate=True,
+            wait_sec=0,
+        )
+
+        assert result == execute_response
+        # 2 calls only: Instance GET, executeAction POST
+        assert len(mocked_responses.calls) == 2
+
+    def test_schema_resolution_fails_soft(self, mocked_cmd, mocked_responses: responses):
+        """Asset GET fails → validation skipped, executeAction proceeds."""
+        f = self._make_fixtures()
+        execute_response = {"status": "Succeeded"}
+        # Instance GET (with registry)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=self._build_instance_with_registry(f),
+            status=200,
+        )
+        # Asset GET returns 404
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_namespace_asset_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+        # executeAction POST (should proceed despite schema failure)
+        mocked_responses.add(
+            method=responses.POST,
+            url=self._build_execute_action_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=execute_response,
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload='{"temperature": 72}',
+            wait_sec=0,
+        )
+
+        assert result == execute_response
+        # 3 calls: Instance GET, Asset GET (404), executeAction POST
+        assert len(mocked_responses.calls) == 3
+
+    def test_no_schema_registry_ref(self, mocked_cmd, mocked_responses: responses):
+        """Instance has no schemaRegistryRef → validation skipped, executeAction proceeds."""
+        f = self._make_fixtures()
+        execute_response = {"status": "Succeeded"}
+        # Instance without schemaRegistryRef
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=_build_instance_response(f["instance_name"], f["rg"], adr_namespace_name=f["adr_ns_name"]),
+            status=200,
+        )
+        # executeAction POST
+        mocked_responses.add(
+            method=responses.POST,
+            url=self._build_execute_action_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=execute_response,
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload='{"temperature": 72}',
+            wait_sec=0,
+        )
+
+        assert result == execute_response
+        # 2 calls: Instance GET, executeAction POST — no schema resolution attempted
+        assert len(mocked_responses.calls) == 2
+
+    def test_cross_subscription_registry(self, mocked_cmd, mocked_responses: responses):
+        """Schema registry in different subscription → cross-sub client created, validation works."""
+        f = self._make_fixtures()
+        cross_sub = "11111111-1111-1111-1111-111111111111"
+        schema = json.dumps({
+            "type": "object",
+            "properties": {"temperature": {"type": "number"}},
+        })
+        execute_response = {"status": "Succeeded"}
+
+        # Build instance with cross-subscription registry
+        instance_resp = _build_instance_response(
+            f["instance_name"], f["rg"], adr_namespace_name=f["adr_ns_name"],
+        )
+        registry_id = (
+            f"/subscriptions/{cross_sub}/resourceGroups/{f['rg']}"
+            f"/providers/{DEVICEREGISTRY_RP}/schemaRegistries/{self.REGISTRY_NAME}"
+        )
+        instance_resp["properties"]["schemaRegistryRef"] = {"resourceId": registry_id}
+
+        # Instance GET
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=instance_resp,
+            status=200,
+        )
+        # Asset GET (same subscription as instance — uses self.registry_mgmt_client)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_namespace_asset_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=_build_asset_response_with_schema(
+                f["asset_name"], f["group_name"], f["action_name"],
+                self.SCHEMA_NAME, self.SCHEMA_VERSION,
+            ),
+            status=200,
+        )
+        # Schema Version GET — note cross_sub in the URL (uses cross-sub client)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_schema_version_endpoint(
+                f["rg"], self.REGISTRY_NAME, self.SCHEMA_NAME, self.SCHEMA_VERSION,
+                subscription_id=cross_sub,
+            ),
+            json=_build_schema_version_response(schema),
+            status=200,
+        )
+        # executeAction POST
+        mocked_responses.add(
+            method=responses.POST,
+            url=self._build_execute_action_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=execute_response,
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload='{"temperature": 72}',
+            wait_sec=0,
+        )
+
+        assert result == execute_response
+        # 4 calls: Instance GET, Asset GET, Schema Version GET (cross-sub), executeAction POST
+        assert len(mocked_responses.calls) == 4
+
+    def test_no_matching_action_in_status(self, mocked_cmd, mocked_responses: responses):
+        """Asset status has no matching group/action → validation skipped."""
+        f = self._make_fixtures()
+        execute_response = {"status": "Succeeded"}
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=self._build_instance_with_registry(f),
+            status=200,
+        )
+        # Asset with different group/action in status
+        asset_response = _build_asset_response_with_schema(
+            f["asset_name"], "otherGroup", "otherAction",
+            self.SCHEMA_NAME, self.SCHEMA_VERSION,
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_namespace_asset_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=asset_response,
+            status=200,
+        )
+        # executeAction POST
+        mocked_responses.add(
+            method=responses.POST,
+            url=self._build_execute_action_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=execute_response,
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload='{"temperature": 72}',
+            wait_sec=0,
+        )
+
+        assert result == execute_response
+        # 3 calls: Instance GET, Asset GET, executeAction POST
+        assert len(mocked_responses.calls) == 3
+
+    def test_schema_content_not_json(self, mocked_cmd, mocked_responses: responses):
+        """schemaContent is malformed → validation skipped, executeAction proceeds."""
+        f = self._make_fixtures()
+        execute_response = {"status": "Succeeded"}
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=self._build_instance_with_registry(f),
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_namespace_asset_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=_build_asset_response_with_schema(
+                f["asset_name"], f["group_name"], f["action_name"],
+                self.SCHEMA_NAME, self.SCHEMA_VERSION,
+            ),
+            status=200,
+        )
+        # Schema version with non-JSON content
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_schema_version_endpoint(
+                f["rg"], self.REGISTRY_NAME, self.SCHEMA_NAME, self.SCHEMA_VERSION,
+            ),
+            json=_build_schema_version_response("not valid json {{{"),
+            status=200,
+        )
+        # executeAction POST
+        mocked_responses.add(
+            method=responses.POST,
+            url=self._build_execute_action_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=execute_response,
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload='{"temperature": 72}',
+            wait_sec=0,
+        )
+
+        assert result == execute_response
+        # 4 calls: Instance GET, Asset GET, Schema Version GET, executeAction POST
+        assert len(mocked_responses.calls) == 4
+
+    def test_incomplete_schema_reference(self, mocked_cmd, mocked_responses: responses):
+        """requestMessageSchemaReference missing schemaVersion → validation skipped."""
+        f = self._make_fixtures()
+        execute_response = {"status": "Succeeded"}
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=self._build_instance_with_registry(f),
+            status=200,
+        )
+        # Asset with incomplete schema reference (missing schemaVersion)
+        asset_response = {
+            "name": f["asset_name"],
+            "properties": {
+                "provisioningState": "Succeeded",
+                "status": {
+                    "managementGroups": [
+                        {
+                            "name": f["group_name"],
+                            "actions": [
+                                {
+                                    "name": f["action_name"],
+                                    "requestMessageSchemaReference": {
+                                        "schemaName": self.SCHEMA_NAME,
+                                        # schemaVersion intentionally missing
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+        }
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_namespace_asset_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=asset_response,
+            status=200,
+        )
+        # executeAction POST
+        mocked_responses.add(
+            method=responses.POST,
+            url=self._build_execute_action_endpoint(f["adr_ns_name"], f["rg"], f["asset_name"]),
+            json=execute_response,
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload='{"temperature": 72}',
+            wait_sec=0,
+        )
+
+        assert result == execute_response
+        # 3 calls: Instance GET, Asset GET, executeAction POST
+        assert len(mocked_responses.calls) == 3
+
+    def test_non_jsonschema_format_skips_validation(self, mocked_cmd, mocked_responses: responses):
+        """Schema with non-standard $schema dialect → validation skipped, executeAction proceeds."""
+        f = self._make_fixtures()
+        schema = json.dumps({
+            "$schema": "iot-operations/1.0",
+            "fields": [{"name": "temperature", "type": "float"}],
+        })
+        execute_response = {"status": "Succeeded"}
+        self._register_full_validation_mocks(mocked_responses, f, schema, execute_response)
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload='{"temperature": 72}',
+            wait_sec=0,
+        )
+
+        assert result == execute_response
+        # 4 calls: Instance GET, Asset GET, Schema Version GET, executeAction POST
+        assert len(mocked_responses.calls) == 4
+
+    def test_malformed_jsonschema_skips_validation(self, mocked_cmd, mocked_responses: responses):
+        """Schema with recognized $schema but malformed body → SchemaError caught, executeAction proceeds."""
+        f = self._make_fixtures()
+        # Valid $schema URI but body uses invalid JSON Schema constructs
+        schema = json.dumps({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": "not-a-dict",
+        })
+        execute_response = {"status": "Succeeded"}
+        self._register_full_validation_mocks(mocked_responses, f, schema, execute_response)
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload='{"temperature": 72}',
+            wait_sec=0,
+        )
+
+        assert result == execute_response
+        # 4 calls: Instance GET, Asset GET, Schema Version GET, executeAction POST
+        assert len(mocked_responses.calls) == 4
+
+
+class TestExecuteShowSchema(_SchemaTestBase):
+    """Tests for --show-schema mode.
+
+    When show_schema=True, the command resolves the request schema and returns
+    it without executing the action. Failures are hard (ResourceNotFoundError)
+    because the user explicitly requested the schema.
+    """
+
+    def test_show_schema_returns_schema(self, mocked_cmd, mocked_responses: responses):
+        """show_schema=True → resolves full chain → returns parsed JSON Schema dict."""
+        f = self._make_fixtures()
+        schema_dict = {
+            "type": "object",
+            "properties": {"temperature": {"type": "number"}},
+        }
+        self._register_schema_resolution_mocks(mocked_responses, f, json.dumps(schema_dict))
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            show_schema=True,
+            wait_sec=0,
+        )
+
+        assert result == schema_dict
+        # 3 calls: Instance GET, Asset GET, Schema Version GET — no executeAction POST
+        assert len(mocked_responses.calls) == 3
+
+    def test_show_schema_resolution_fails(self, mocked_cmd, mocked_responses: responses):
+        """show_schema=True, no schemaRegistryRef → ResourceNotFoundError."""
+        f = self._make_fixtures()
+        # Instance without schemaRegistryRef
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_iotops_endpoint(f["instance_name"], f["rg"]),
+            json=_build_instance_response(f["instance_name"], f["rg"], adr_namespace_name=f["adr_ns_name"]),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        with pytest.raises(ResourceNotFoundError, match="Could not resolve the request schema"):
+            provider.execute(
+                instance_name=f["instance_name"],
+                resource_group_name=f["rg"],
+                asset_name=f["asset_name"],
+                group_name=f["group_name"],
+                action_name=f["action_name"],
+                show_schema=True,
+                wait_sec=0,
+            )
+
+        # 1 call: Instance GET only
+        assert len(mocked_responses.calls) == 1
+
+    def test_show_schema_ignores_payload(self, mocked_cmd, mocked_responses: responses):
+        """show_schema=True + payload → payload ignored, schema returned."""
+        f = self._make_fixtures()
+        schema_dict = {
+            "type": "object",
+            "properties": {"temperature": {"type": "number"}},
+        }
+        self._register_schema_resolution_mocks(mocked_responses, f, json.dumps(schema_dict))
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            payload='{"temperature": 72}',
+            show_schema=True,
+            wait_sec=0,
+        )
+
+        assert result == schema_dict
+        # 3 calls: Instance GET, Asset GET, Schema Version GET — no executeAction POST
+        assert len(mocked_responses.calls) == 3
+
+    def test_show_schema_ignores_no_validate(self, mocked_cmd, mocked_responses: responses):
+        """show_schema=True + no_validate=True → schema returned normally."""
+        f = self._make_fixtures()
+        schema_dict = {
+            "type": "object",
+            "properties": {"temperature": {"type": "number"}},
+        }
+        self._register_schema_resolution_mocks(mocked_responses, f, json.dumps(schema_dict))
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        result = provider.execute(
+            instance_name=f["instance_name"],
+            resource_group_name=f["rg"],
+            asset_name=f["asset_name"],
+            group_name=f["group_name"],
+            action_name=f["action_name"],
+            show_schema=True,
+            no_validate=True,
+            wait_sec=0,
+        )
+
+        assert result == schema_dict
+        # 3 calls: Instance GET, Asset GET, Schema Version GET
+        assert len(mocked_responses.calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# remove_management_endpoint tests
+# ---------------------------------------------------------------------------
+
+
+class TestRemoveManagementEndpoint:
+    """Tests for MgmtActions.remove_management_endpoint().
+
+    Surgical removal of a single management endpoint entry from an ADR namespace
+    via GET + PUT (not PATCH — ARM PATCH deep-merges dicts, can't remove keys).
+    """
+
+    PROMPT_TARGET = "azext_edge.edge.providers.orchestration.mgmt_actions.should_continue_prompt"
+
+    def _make_fixtures(self, num_endpoints: int = 1) -> dict:
+        """Build test fixtures for remove_management_endpoint tests."""
+        ns_name = generate_random_string()
+        rg = generate_random_string()
+        target_key = (
+            f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{rg}"
+            f"/providers/Microsoft.ExtendedLocation/customLocations/my-cl"
+        )
+        endpoints = {}
+        if num_endpoints >= 1:
+            endpoints[target_key] = {
+                "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                "address": "test-ns.eastus-1.ts.eventgrid.azure.net",
+                "scopeId": "test-instance",
+            }
+        if num_endpoints >= 2:
+            other_key = (
+                f"/subscriptions/{ZEROED_SUBSCRIPTION}/resourceGroups/{rg}"
+                f"/providers/Microsoft.ExtendedLocation/customLocations/other-cl"
+            )
+            endpoints[other_key] = {
+                "endpointType": MGMT_ACTIONS_ADR_ENDPOINT_TYPE,
+                "address": "other-ns.eastus-1.ts.eventgrid.azure.net",
+                "scopeId": "other-instance",
+            }
+        else:
+            other_key = None
+
+        return {
+            "ns_name": ns_name,
+            "rg": rg,
+            "target_key": target_key,
+            "other_key": other_key,
+            "endpoints": endpoints,
+        }
+
+    def _build_ns_response(self, f: dict, management_endpoints: dict = None) -> dict:
+        """Build ADR namespace response with optional management endpoints and extra fields."""
+        eps = management_endpoints if management_endpoints is not None else f["endpoints"]
+        resp = _build_adr_namespace_response(
+            f["ns_name"], f["rg"],
+            identity_type="SystemAssigned",
+            principal_id="00000000-0000-0000-0000-bbbbbbbbbbbb",
+            management_endpoints=eps,
+        )
+        # Add tags and messaging to verify preservation in PUT payload
+        resp["tags"] = {"env": "test"}
+        resp["properties"]["messaging"] = {
+            "endpoints": {
+                "myEgEndpoint": {
+                    "address": "https://eg.westeurope-1.eventgrid.azure.net",
+                    "endpointType": "Microsoft.EventGrid",
+                }
+            }
+        }
+        return resp
+
+    def test_happy_path(self, mocked_cmd, mocked_responses: responses, mocker):
+        """Single endpoint entry is removed via PUT."""
+        f = self._make_fixtures(num_endpoints=1)
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+
+        ns_response = self._build_ns_response(f)
+        # GET namespace
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(f["ns_name"], f["rg"]),
+            json=ns_response,
+            status=200,
+        )
+        # PUT namespace (with endpoint removed)
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_adr_endpoint(f["ns_name"], f["rg"]),
+            json=self._build_ns_response(f, management_endpoints={}),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        provider.remove_management_endpoint(
+            namespace_name=f["ns_name"],
+            resource_group_name=f["rg"],
+            endpoint_key=f["target_key"],
+            confirm_yes=True,
+            wait_sec=0,
+        )
+
+        assert len(mocked_responses.calls) == 2
+        assert mocked_responses.calls[0].request.method == "GET"
+        assert mocked_responses.calls[1].request.method == "PUT"
+
+        # Verify PUT payload has empty management.endpoints
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        assert put_body["properties"]["management"]["endpoints"] == {}
+        # Verify identity, tags, messaging preserved
+        assert put_body["identity"] == ns_response["identity"]
+        assert put_body["tags"] == ns_response["tags"]
+        assert put_body["properties"]["messaging"] == ns_response["properties"]["messaging"]
+        assert put_body["location"] == ns_response["location"]
+
+    def test_preserves_other_endpoints(self, mocked_cmd, mocked_responses: responses, mocker):
+        """Only target key removed; sibling entries, identity, tags, messaging survive."""
+        f = self._make_fixtures(num_endpoints=2)
+        mocker.patch(self.PROMPT_TARGET, return_value=True)
+
+        ns_response = self._build_ns_response(f)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(f["ns_name"], f["rg"]),
+            json=ns_response,
+            status=200,
+        )
+        expected_remaining = {f["other_key"]: f["endpoints"][f["other_key"]]}
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_adr_endpoint(f["ns_name"], f["rg"]),
+            json=self._build_ns_response(f, management_endpoints=expected_remaining),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        provider.remove_management_endpoint(
+            namespace_name=f["ns_name"],
+            resource_group_name=f["rg"],
+            endpoint_key=f["target_key"],
+            confirm_yes=True,
+            wait_sec=0,
+        )
+
+        assert len(mocked_responses.calls) == 2
+        put_body = json.loads(mocked_responses.calls[1].request.body)
+        remaining_endpoints = put_body["properties"]["management"]["endpoints"]
+        assert f["target_key"] not in remaining_endpoints
+        assert f["other_key"] in remaining_endpoints
+        assert remaining_endpoints[f["other_key"]] == f["endpoints"][f["other_key"]]
+        # Verify identity, tags, messaging preserved
+        assert put_body["identity"] == ns_response["identity"]
+        assert put_body["tags"] == ns_response["tags"]
+        assert put_body["properties"]["messaging"] == ns_response["properties"]["messaging"]
+
+    def test_endpoint_key_not_found(self, mocked_cmd, mocked_responses: responses):
+        """Specified key not in management.endpoints — early return, no PUT."""
+        f = self._make_fixtures(num_endpoints=1)
+        ns_response = self._build_ns_response(f)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(f["ns_name"], f["rg"]),
+            json=ns_response,
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        provider.remove_management_endpoint(
+            namespace_name=f["ns_name"],
+            resource_group_name=f["rg"],
+            endpoint_key="/nonexistent/key",
+            confirm_yes=True,
+            wait_sec=0,
+        )
+
+        # Only the GET call, no PUT
+        assert len(mocked_responses.calls) == 1
+
+    def test_empty_management_endpoints(self, mocked_cmd, mocked_responses: responses):
+        """Namespace has no management endpoints — early return, no PUT."""
+        f = self._make_fixtures(num_endpoints=0)
+        ns_response = self._build_ns_response(f, management_endpoints={})
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(f["ns_name"], f["rg"]),
+            json=ns_response,
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        provider.remove_management_endpoint(
+            namespace_name=f["ns_name"],
+            resource_group_name=f["rg"],
+            endpoint_key=f["target_key"],
+            confirm_yes=True,
+            wait_sec=0,
+        )
+
+        assert len(mocked_responses.calls) == 1
+
+    def test_no_management_property(self, mocked_cmd, mocked_responses: responses):
+        """Namespace has no management property at all — early return, no PUT."""
+        f = self._make_fixtures(num_endpoints=0)
+        ns_response = _build_adr_namespace_response(
+            f["ns_name"], f["rg"],
+            identity_type="SystemAssigned",
+            management_endpoints=None,  # No management property in response
+        )
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(f["ns_name"], f["rg"]),
+            json=ns_response,
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        provider.remove_management_endpoint(
+            namespace_name=f["ns_name"],
+            resource_group_name=f["rg"],
+            endpoint_key=f["target_key"],
+            confirm_yes=True,
+            wait_sec=0,
+        )
+
+        assert len(mocked_responses.calls) == 1
+
+    def test_confirmation_cancel(self, mocked_cmd, mocked_responses: responses, mocker):
+        """User cancels at prompt — no PUT executed."""
+        f = self._make_fixtures(num_endpoints=1)
+        mock_prompt = mocker.patch(self.PROMPT_TARGET, return_value=False)
+
+        ns_response = self._build_ns_response(f)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(f["ns_name"], f["rg"]),
+            json=ns_response,
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        provider.remove_management_endpoint(
+            namespace_name=f["ns_name"],
+            resource_group_name=f["rg"],
+            endpoint_key=f["target_key"],
+            confirm_yes=None,
+            wait_sec=0,
+        )
+
+        mock_prompt.assert_called_once_with(None)
+        # Only the GET call, no PUT
+        assert len(mocked_responses.calls) == 1
+
+    def test_yes_flag(self, mocked_cmd, mocked_responses: responses, mocker):
+        """confirm_yes=True skips prompt, direct PUT."""
+        f = self._make_fixtures(num_endpoints=1)
+        mock_prompt = mocker.patch(self.PROMPT_TARGET, return_value=True)
+
+        ns_response = self._build_ns_response(f)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(f["ns_name"], f["rg"]),
+            json=ns_response,
+            status=200,
+        )
+        mocked_responses.add(
+            method=responses.PUT,
+            url=_build_adr_endpoint(f["ns_name"], f["rg"]),
+            json=self._build_ns_response(f, management_endpoints={}),
+            status=200,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        provider.remove_management_endpoint(
+            namespace_name=f["ns_name"],
+            resource_group_name=f["rg"],
+            endpoint_key=f["target_key"],
+            confirm_yes=True,
+            wait_sec=0,
+        )
+
+        mock_prompt.assert_called_once_with(True)
+        assert len(mocked_responses.calls) == 2
+
+    def test_namespace_not_found(self, mocked_cmd, mocked_responses: responses, mocker):
+        """ADR namespace returns 404 — HttpResponseError propagated."""
+        f = self._make_fixtures(num_endpoints=1)
+        mocked_responses.add(
+            method=responses.GET,
+            url=_build_adr_endpoint(f["ns_name"], f["rg"]),
+            json={"error": {"code": "ResourceNotFound"}},
+            status=404,
+        )
+
+        provider = MgmtActions(cmd=mocked_cmd)
+        with pytest.raises(HttpResponseError):
+            provider.remove_management_endpoint(
+                namespace_name=f["ns_name"],
+                resource_group_name=f["rg"],
+                endpoint_key=f["target_key"],
+                confirm_yes=True,
+                wait_sec=0,
+            )

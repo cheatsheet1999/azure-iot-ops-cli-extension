@@ -25,6 +25,7 @@ from azext_edge.edge.providers.check.base.resource import (
     calculate_status,
     combine_statuses,
     decorate_resource_status,
+    get_resources_grouped_by_namespace,
     process_resource_property_by_type,
     validate_runtime_resource_ref,
 )
@@ -974,3 +975,35 @@ def test_validate_runtime_resource_ref(mocker, name, namespace, ref_type, ref_ob
     is_valid = validate_runtime_resource_ref(name, namespace, ref_type)
 
     assert is_valid == expected_is_valid
+
+
+@pytest.mark.parametrize(
+    "resources",
+    [
+        None,
+        [],
+    ],
+)
+def test_get_resources_grouped_by_namespace_none_or_empty(resources):
+    """Regression test: when cluster returns 403, get_namespaced_pods_by_prefix returns None.
+    get_resources_grouped_by_namespace must not raise AttributeError on None or []."""
+    result = list(get_resources_grouped_by_namespace(resources))
+    assert not result
+
+
+@pytest.mark.parametrize(
+    "get_resources_return_value",
+    [
+        None,
+        {"items": None},
+        {"items": []},
+    ],
+)
+def test_get_resources_by_name_none_or_empty(mocker, get_resources_return_value):
+    """Regression test: when cluster returns 403, get_resources() can return None.
+    get_resources_by_name must not raise AttributeError on None result."""
+    api_info_patch = mocker.patch("azext_edge.edge.providers.edge_api.EdgeResourceApi")
+    api_info_patch.get_resources.return_value = get_resources_return_value
+
+    result = get_resources_by_name(api_info_patch, "asset", None)
+    assert not result

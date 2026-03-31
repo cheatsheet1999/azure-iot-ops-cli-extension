@@ -318,25 +318,31 @@ class TestConnectorMetadataValidator(unittest.TestCase):
             endpoint_version="1.0",
         )
 
-        invalid_config = {"filter": 123}  # Should be string
+        invalid_event = {"name": "test", "eventConfiguration": json.dumps({"filter": 123})}  # filter should be string
 
         with self.assertRaises(ValidationError):
-            validator.validate_event(invalid_config)
+            validator.validate_event(invalid_event)
 
-    def test_validate_event_autofill_destination_single_supported(self):
+    def test_validate_event_no_autofill_destination_when_absent(self):
+        """Event without destinations must not get destinations injected.
+
+        validate_event passes the event dict itself (not parsed config) to
+        _validate_and_apply_destination, so any auto-fill would corrupt the
+        API payload with an incomplete destination object.
+        """
         self.mock_get_metadata.return_value = ONVIF_METADATA
-        mock_cmd = Mock()
         validator = ConnectorMetadataValidator(
-            cmd=mock_cmd,
+            cmd=Mock(),
             resource_group_name="test-rg",
             instance_name="test-instance",
             endpoint_type="Microsoft.Onvif",
             endpoint_version="1.0",
         )
 
-        config = {"filter": "Topic = 'motion'"}
-        validator.validate_event(config)
-        self.assertEqual(config.get("destination"), "Mqtt")
+        event = {"name": "test", "eventConfiguration": json.dumps({"filter": "Topic = 'motion'"})}
+        validator.validate_event(event)
+        # destinations should NOT be auto-filled by the validator
+        self.assertNotIn("destinations", event)
 
     def test_validate_event_destination_not_supported(self):
         self.mock_get_metadata.return_value = ONVIF_METADATA
@@ -349,28 +355,33 @@ class TestConnectorMetadataValidator(unittest.TestCase):
             endpoint_version="1.0",
         )
 
+        event = {
+            "name": "test",
+            "eventConfiguration": json.dumps({"filter": "Topic = 'motion'"}),
+            "destinations": [{"target": "Storage"}]
+        }
         with self.assertRaises(ValidationError):
-            validator.validate_event({"filter": "Topic = 'motion'", "destination": "Storage"})
+            validator.validate_event(event)
 
-    def test_validate_event_autofill_destination_prefers_mqtt_when_multiple(self):
+    def test_validate_event_no_autofill_destination_when_multiple_supported(self):
         metadata = copy.deepcopy(ONVIF_METADATA)
         metadata["inboundEndpoints"][0]["eventGroups"]["events"]["destinations"]["supportedDestinations"] = [
             "Storage",
             "Mqtt",
         ]
         self.mock_get_metadata.return_value = metadata
-        mock_cmd = Mock()
         validator = ConnectorMetadataValidator(
-            cmd=mock_cmd,
+            cmd=Mock(),
             resource_group_name="test-rg",
             instance_name="test-instance",
             endpoint_type="Microsoft.Onvif",
             endpoint_version="1.0",
         )
 
-        config = {"filter": "Topic = 'motion'"}
-        validator.validate_event(config)
-        self.assertEqual(config.get("destination"), "Mqtt")
+        event = {"name": "test", "eventConfiguration": json.dumps({"filter": "Topic = 'motion'"})}
+        validator.validate_event(event)
+        # destinations should NOT be auto-filled even with multiple supported types
+        self.assertNotIn("destinations", event)
 
     def test_get_schema_traversal(self):
         self.mock_get_metadata.return_value = ONVIF_METADATA
@@ -834,7 +845,7 @@ class TestValidateDestination(unittest.TestCase):
         metadata["inboundEndpoints"][0]["eventGroups"]["events"]["destinations"] = destinations
         return metadata
 
-    def test_validate_destination_uses_default_destination(self):
+    def test_validate_destination_no_autofill_even_with_default(self):
         metadata = self._create_metadata_with_destinations(
             supported_destinations=["Mqtt", "Storage", "BrokerStateStore"],
             default_destination="Storage"
@@ -849,11 +860,12 @@ class TestValidateDestination(unittest.TestCase):
             endpoint_version="1.0",
         )
 
-        config = {"filter": "Topic = 'motion'"}
-        validator.validate_event(config)
-        self.assertEqual(config.get("destination"), "Storage")
+        event = {"name": "test", "eventConfiguration": json.dumps({"filter": "Topic = 'motion'"})}
+        validator.validate_event(event)
+        # Should NOT auto-fill destinations even when defaultDestination is defined
+        self.assertNotIn("destinations", event)
 
-    def test_validate_destination_fallback_first_when_mqtt_absent(self):
+    def test_validate_destination_no_autofill_when_mqtt_absent(self):
         metadata = self._create_metadata_with_destinations(
             supported_destinations=["Storage", "BrokerStateStore"]  # No Mqtt
         )
@@ -867,9 +879,10 @@ class TestValidateDestination(unittest.TestCase):
             endpoint_version="1.0",
         )
 
-        config = {"filter": "Topic = 'motion'"}
-        validator.validate_event(config)
-        self.assertEqual(config.get("destination"), "Storage")
+        event = {"name": "test", "eventConfiguration": json.dumps({"filter": "Topic = 'motion'"})}
+        validator.validate_event(event)
+        # Should NOT auto-fill destinations even when Mqtt is absent
+        self.assertNotIn("destinations", event)
 
     def test_validate_destination_explicit_overrides_default(self):
         metadata = self._create_metadata_with_destinations(
@@ -886,9 +899,14 @@ class TestValidateDestination(unittest.TestCase):
             endpoint_version="1.0",
         )
 
-        config = {"filter": "Topic = 'motion'", "destination": "Mqtt"}
-        validator.validate_event(config)
-        self.assertEqual(config.get("destination"), "Mqtt")
+        event = {
+            "name": "test",
+            "eventConfiguration": json.dumps({"filter": "Topic = 'motion'"}),
+            "destinations": [{"target": "Mqtt"}]
+        }
+        validator.validate_event(event)
+        # Explicit destinations should be preserved
+        self.assertEqual(event.get("destinations"), [{"target": "Mqtt"}])
 
     def test_validate_destination_no_destinations_defined(self):
         metadata = copy.deepcopy(ONVIF_METADATA)
@@ -904,9 +922,65 @@ class TestValidateDestination(unittest.TestCase):
             endpoint_version="1.0",
         )
 
-        config = {"filter": "Topic = 'motion'"}
-        validator.validate_event(config)
-        self.assertIsNone(config.get("destination"))
+        event = {"name": "test", "eventConfiguration": json.dumps({"filter": "Topic = 'motion'"})}
+        validator.validate_event(event)
+        # No destinations should be added when none defined in metadata
+        self.assertIsNone(event.get("destinations"))
+
+    def test_validate_destination_complete_destination_preserved(self):
+        """A destination with both target and configuration should pass through unchanged."""
+        metadata = self._create_metadata_with_destinations(
+            supported_destinations=["Mqtt"]
+        )
+        self.mock_get_metadata.return_value = metadata
+
+        validator = ConnectorMetadataValidator(
+            cmd=Mock(),
+            resource_group_name="test-rg",
+            instance_name="test-instance",
+            endpoint_type="Microsoft.Onvif",
+            endpoint_version="1.0",
+        )
+
+        full_dest = {
+            "target": "Mqtt",
+            "configuration": {"topic": "test/topic", "retain": "Never", "qos": "Qos1", "ttl": 60}
+        }
+        event = {
+            "name": "test",
+            "eventConfiguration": json.dumps({"filter": "Topic = 'motion'"}),
+            "destinations": [full_dest]
+        }
+        validator.validate_event(event)
+        # Complete destination should be preserved as-is
+        self.assertEqual(event["destinations"], [full_dest])
+
+    def test_validate_destination_target_only_accepted(self):
+        """A destination with only target (no configuration) should be accepted by the validator.
+
+        The validator only checks target against supportedDestinations.
+        Whether configuration is required is the API's responsibility.
+        """
+        metadata = self._create_metadata_with_destinations(
+            supported_destinations=["Mqtt"]
+        )
+        self.mock_get_metadata.return_value = metadata
+
+        validator = ConnectorMetadataValidator(
+            cmd=Mock(),
+            resource_group_name="test-rg",
+            instance_name="test-instance",
+            endpoint_type="Microsoft.Onvif",
+            endpoint_version="1.0",
+        )
+
+        event = {
+            "name": "test",
+            "eventConfiguration": json.dumps({"filter": "Topic = 'motion'"}),
+            "destinations": [{"target": "Mqtt"}]
+        }
+        validator.validate_event(event)
+        self.assertEqual(event["destinations"], [{"target": "Mqtt"}])
 
 
 class TestGetEndpointMetadata(unittest.TestCase):
@@ -1155,6 +1229,280 @@ class TestMakeCacheKey(unittest.TestCase):
         key2 = validator2._make_metadata_cache_key()
 
         self.assertEqual(key1, key2)
+
+
+class TestValidateStream(unittest.TestCase):
+    """Tests for validate_stream method."""
+
+    def setUp(self):
+        self.patcher = patch(
+            "azext_edge.edge.providers.adr.validator.ConnectorMetadataValidator._get_metadata"
+        )
+        self.mock_get_metadata = self.patcher.start()
+        self.mock_get_metadata.return_value = None  # No metadata needed for field validation
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def _create_validator(self):
+        return ConnectorMetadataValidator(
+            cmd=Mock(),
+            resource_group_name="test-rg",
+            instance_name="test-instance",
+            endpoint_type="Microsoft.Custom",
+            endpoint_version="1.0",
+        )
+
+    def test_validate_stream_valid(self):
+        """Valid stream should pass validation."""
+        validator = self._create_validator()
+        stream = {"name": "my-stream"}
+        validator.validate_stream(stream)  # Should not raise
+
+    def test_validate_stream_valid_max_length_name(self):
+        """Stream with max length name (128 chars) should pass."""
+        validator = self._create_validator()
+        stream = {"name": "a" * 128}
+        validator.validate_stream(stream)  # Should not raise
+
+    def test_validate_stream_missing_name(self):
+        """Stream without name should fail."""
+        validator = self._create_validator()
+        stream = {}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_stream(stream)
+        self.assertIn("name is required", str(cm.exception))
+
+    def test_validate_stream_empty_name(self):
+        """Stream with empty name should fail."""
+        validator = self._create_validator()
+        stream = {"name": ""}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_stream(stream)
+        self.assertIn("name is required", str(cm.exception))
+
+    def test_validate_stream_name_too_long(self):
+        """Stream with name > 128 chars should fail."""
+        validator = self._create_validator()
+        stream = {"name": "a" * 129}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_stream(stream)
+        self.assertIn("at most 128 characters", str(cm.exception))
+
+
+class TestValidateManagementGroup(unittest.TestCase):
+    """Tests for validate_management_group method."""
+
+    def setUp(self):
+        self.patcher = patch(
+            "azext_edge.edge.providers.adr.validator.ConnectorMetadataValidator._get_metadata"
+        )
+        self.mock_get_metadata = self.patcher.start()
+        self.mock_get_metadata.return_value = None
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def _create_validator(self):
+        return ConnectorMetadataValidator(
+            cmd=Mock(),
+            resource_group_name="test-rg",
+            instance_name="test-instance",
+            endpoint_type="Microsoft.OpcUa",
+            endpoint_version="1.0",
+        )
+
+    def test_validate_management_group_valid(self):
+        """Valid management group should pass validation."""
+        validator = self._create_validator()
+        mgmt_group = {"name": "my-group"}
+        validator.validate_management_group(mgmt_group)  # Should not raise
+
+    def test_validate_management_group_with_optional_fields(self):
+        """Management group with all optional fields should pass."""
+        validator = self._create_validator()
+        mgmt_group = {
+            "name": "my-group",
+            "defaultTopic": "/contoso/mgmt",
+            "defaultTimeoutInSeconds": 30
+        }
+        validator.validate_management_group(mgmt_group)  # Should not raise
+
+    def test_validate_management_group_missing_name(self):
+        """Management group without name should fail."""
+        validator = self._create_validator()
+        mgmt_group = {}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_management_group(mgmt_group)
+        self.assertIn("name is required", str(cm.exception))
+
+    def test_validate_management_group_empty_name(self):
+        """Management group with empty name should fail."""
+        validator = self._create_validator()
+        mgmt_group = {"name": ""}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_management_group(mgmt_group)
+        self.assertIn("name is required", str(cm.exception))
+
+    def test_validate_management_group_name_too_long(self):
+        """Management group with name > 128 chars should fail."""
+        validator = self._create_validator()
+        mgmt_group = {"name": "a" * 129}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_management_group(mgmt_group)
+        self.assertIn("at most 128 characters", str(cm.exception))
+
+    def test_validate_management_group_default_topic_too_long(self):
+        """Management group with defaultTopic > 128 chars should fail."""
+        validator = self._create_validator()
+        mgmt_group = {"name": "my-group", "defaultTopic": "a" * 129}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_management_group(mgmt_group)
+        self.assertIn("defaultTopic must be at most 128 characters", str(cm.exception))
+
+    def test_validate_management_group_negative_timeout(self):
+        """Management group with negative timeout should fail."""
+        validator = self._create_validator()
+        mgmt_group = {"name": "my-group", "defaultTimeoutInSeconds": -1}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_management_group(mgmt_group)
+        self.assertIn("non-negative integer", str(cm.exception))
+
+    def test_validate_management_group_invalid_timeout_type(self):
+        """Management group with non-integer timeout should fail."""
+        validator = self._create_validator()
+        mgmt_group = {"name": "my-group", "defaultTimeoutInSeconds": "30"}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_management_group(mgmt_group)
+        self.assertIn("non-negative integer", str(cm.exception))
+
+
+class TestValidateAction(unittest.TestCase):
+    """Tests for validate_action method."""
+
+    def setUp(self):
+        self.patcher = patch(
+            "azext_edge.edge.providers.adr.validator.ConnectorMetadataValidator._get_metadata"
+        )
+        self.mock_get_metadata = self.patcher.start()
+        self.mock_get_metadata.return_value = None
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def _create_validator(self):
+        return ConnectorMetadataValidator(
+            cmd=Mock(),
+            resource_group_name="test-rg",
+            instance_name="test-instance",
+            endpoint_type="Microsoft.OpcUa",
+            endpoint_version="1.0",
+        )
+
+    def test_validate_action_valid(self):
+        """Valid action should pass validation."""
+        validator = self._create_validator()
+        action = {"name": "my-action", "targetUri": "ns=2;s=MyMethod"}
+        validator.validate_action(action)  # Should not raise
+
+    def test_validate_action_with_all_optional_fields(self):
+        """Action with all optional fields should pass."""
+        validator = self._create_validator()
+        action = {
+            "name": "my-action",
+            "targetUri": "ns=2;s=MyMethod",
+            "topic": "/contoso/action",
+            "timeoutInSeconds": 30,
+            "actionType": "Call"
+        }
+        validator.validate_action(action)  # Should not raise
+
+    def test_validate_action_missing_name(self):
+        """Action without name should fail."""
+        validator = self._create_validator()
+        action = {"targetUri": "ns=2;s=MyMethod"}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_action(action)
+        self.assertIn("name is required", str(cm.exception))
+
+    def test_validate_action_empty_name(self):
+        """Action with empty name should fail."""
+        validator = self._create_validator()
+        action = {"name": "", "targetUri": "ns=2;s=MyMethod"}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_action(action)
+        self.assertIn("name is required", str(cm.exception))
+
+    def test_validate_action_name_too_long(self):
+        """Action with name > 128 chars should fail."""
+        validator = self._create_validator()
+        action = {"name": "a" * 129, "targetUri": "ns=2;s=MyMethod"}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_action(action)
+        self.assertIn("name must be at most 128 characters", str(cm.exception))
+
+    def test_validate_action_missing_target_uri(self):
+        """Action without targetUri should fail."""
+        validator = self._create_validator()
+        action = {"name": "my-action"}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_action(action)
+        self.assertIn("targetUri is required", str(cm.exception))
+
+    def test_validate_action_empty_target_uri(self):
+        """Action with empty targetUri should fail."""
+        validator = self._create_validator()
+        action = {"name": "my-action", "targetUri": ""}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_action(action)
+        self.assertIn("targetUri is required", str(cm.exception))
+
+    def test_validate_action_target_uri_too_long(self):
+        """Action with targetUri > 512 chars should fail."""
+        validator = self._create_validator()
+        action = {"name": "my-action", "targetUri": "a" * 513}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_action(action)
+        self.assertIn("targetUri must be at most 512 characters", str(cm.exception))
+
+    def test_validate_action_topic_too_long(self):
+        """Action with topic > 128 chars should fail."""
+        validator = self._create_validator()
+        action = {"name": "my-action", "targetUri": "ns=2;s=MyMethod", "topic": "a" * 129}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_action(action)
+        self.assertIn("topic must be at most 128 characters", str(cm.exception))
+
+    def test_validate_action_negative_timeout(self):
+        """Action with negative timeout should fail."""
+        validator = self._create_validator()
+        action = {"name": "my-action", "targetUri": "ns=2;s=MyMethod", "timeoutInSeconds": -1}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_action(action)
+        self.assertIn("non-negative integer", str(cm.exception))
+
+    def test_validate_action_invalid_timeout_type(self):
+        """Action with non-integer timeout should fail."""
+        validator = self._create_validator()
+        action = {"name": "my-action", "targetUri": "ns=2;s=MyMethod", "timeoutInSeconds": "30"}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_action(action)
+        self.assertIn("non-negative integer", str(cm.exception))
+
+    def test_validate_action_valid_action_types(self):
+        """Action with valid actionType values should pass."""
+        validator = self._create_validator()
+        for action_type in ["Call", "Read", "Write"]:
+            action = {"name": "my-action", "targetUri": "ns=2;s=MyMethod", "actionType": action_type}
+            validator.validate_action(action)  # Should not raise
+
+    def test_validate_action_invalid_action_type(self):
+        """Action with invalid actionType should fail."""
+        validator = self._create_validator()
+        action = {"name": "my-action", "targetUri": "ns=2;s=MyMethod", "actionType": "Invalid"}
+        with self.assertRaises(ValidationError) as cm:
+            validator.validate_action(action)
+        self.assertIn("must be one of", str(cm.exception))
 
 
 if __name__ == "__main__":

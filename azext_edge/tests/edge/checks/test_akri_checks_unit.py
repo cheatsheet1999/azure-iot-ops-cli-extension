@@ -37,6 +37,21 @@ def test_check_akri_by_resource_types(ops_service, mocker, mock_resource_types, 
 
 
 @pytest.mark.parametrize("detail_level", ResourceOutputDetailLevel.list())
+@pytest.mark.parametrize("resource_name", [None, "akri-*"])
+def test_evaluate_core_service_runtime_none_pods(mocker, detail_level, resource_name):
+    """Regression test: when cluster returns 403, get_namespaced_pods_by_prefix returns None or [].
+    The check should not raise AttributeError and should complete gracefully."""
+    for return_value in [None, []]:
+        mocker.patch(
+            "azext_edge.edge.providers.check.akri.get_namespaced_pods_by_prefix",
+            return_value=return_value,
+        )
+        # Should not raise AttributeError: 'NoneType' object has no attribute 'sort'
+        result = evaluate_core_service_runtime(detail_level=detail_level, resource_name=resource_name)
+        assert result["name"] == "evalCoreServiceRuntime"
+
+
+@pytest.mark.parametrize("detail_level", ResourceOutputDetailLevel.list())
 @pytest.mark.parametrize("resource_name", [None, "akri-*", "AKRI-*"])
 @pytest.mark.parametrize(
     "pods, namespace_conditions, namespace_evaluations",
@@ -104,3 +119,22 @@ def test_evaluate_core_service_runtime(
         target[namespace]["conditions"] = [] if not target[namespace]["conditions"] else target[namespace]["conditions"]
         assert_conditions(target[namespace], namespace_conditions)
         assert_evaluations(target[namespace], namespace_evaluations)
+
+
+def test_evaluate_core_service_runtime_no_pods(mocker):
+    """When Akri runtime pods are missing, it is always unexpected.
+    The check should return an error eval with an informative message instead of 0 checks."""
+    mocker.patch(
+        "azext_edge.edge.providers.check.akri.get_namespaced_pods_by_prefix",
+        return_value=[],
+    )
+    result = evaluate_core_service_runtime()
+
+    assert result["name"] == "evalCoreServiceRuntime"
+    target = result["targets"][CoreServiceResourceKinds.RUNTIME_RESOURCE.value]
+    assert "_all_" in target
+    assert target["_all_"]["status"] == "error"
+    assert any(
+        "No Akri runtime pods detected." in str(e.get("value", ""))
+        for e in target["_all_"]["evaluations"]
+    )

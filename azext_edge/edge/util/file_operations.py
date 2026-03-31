@@ -16,7 +16,6 @@ from knack.log import get_logger
 logger = get_logger(__name__)
 
 
-# TODO: unit test
 def dump_content_to_file(
     content: List[dict],
     file_name: str,
@@ -24,29 +23,32 @@ def dump_content_to_file(
     fieldnames: Optional[List[str]] = None,
     output_dir: Optional[str] = None,
     replace: bool = False,
-) -> PurePath:
+) -> str:
     output_dir = normalize_dir(output_dir)
     file_path = os.path.join(output_dir, f"{file_name}.{extension}")
     if os.path.exists(file_path):
         if not replace:
             raise FileExistsError(f"File {file_path} already exists. Please choose another file name or add replace.")
         logger.warning(f"The file {file_path} will be overwritten.")
-    if extension.endswith("csv"):
+    if extension == "csv":
+        if not fieldnames and not content:
+            raise InvalidArgumentValueError("No items to export.")
         with open(file_path, "w", newline="", encoding="utf-8") as f:
             if not fieldnames:
-                fieldnames = content[0].keys()
+                fieldnames = list(content[0].keys())
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(content)
         return file_path
 
-    # These let you dump to a string before writing to file
     if extension == "json":
-        content = json.dumps(content, indent=2)
+        serialized = json.dumps(content, indent=2)
     elif extension in ["yaml", "yml"]:
-        content = yaml.dump(content)
+        serialized = yaml.dump(content)
+    else:
+        raise InvalidArgumentValueError(f"Unsupported file extension: {extension}")
     with open(file_path, "w", encoding="utf-8") as f:
-        f.write(content)
+        f.write(serialized)
 
     return file_path
 
@@ -114,6 +116,28 @@ def deserialize_file_content(file_path: str) -> Any:
     if result is not None or valid_extension:
         return result
     raise FileOperationError(f"File contents for {file_path} cannot be read.")
+
+
+def deserialize_json_input(value: str) -> Any:
+    """Deserialize a JSON input that is either a file path or an inline JSON string.
+
+    Attempts to read the value as a file path first. If that fails (file does not exist
+    or is not a file), falls back to treating the raw value as an inline JSON string.
+    Returns the parsed Python object (dict, list, etc.).
+
+    Raises:
+        InvalidArgumentValueError: If the input cannot be parsed as valid JSON.
+    """
+    raw = value
+    try:
+        raw = read_file_content(value)
+    except FileOperationError:
+        pass  # not a file path — treat as inline JSON
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise InvalidArgumentValueError(f"Failed to parse JSON input: {e}") from e
 
 
 def validate_file_extension(file_name: str, expected_exts: set[str]) -> str:

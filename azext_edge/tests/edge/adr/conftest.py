@@ -10,6 +10,152 @@ from typing import Optional
 
 from azext_edge.edge.util.id_tools import parse_resource_id
 from ...generators import generate_random_string, get_zeroed_subscription
+from ...helpers import run
+
+
+@pytest.fixture()
+def require_namespace_init(require_init):
+    """Extends require_init to ensure the instance has an ADR namespace reference.
+
+    If the instance does not have one, the test is skipped. Set up a namespace
+    manually before running these tests — see README or conftest docstring.
+    """
+    if not require_init.get("adrNamespaceRef"):
+        pytest.skip(
+            "Instance does not have an ADR namespace reference (adrNamespaceRef). "
+            "Create one and link it to the instance before running namespace tests. "
+            "See: az iot ops ns create / az iot ops update"
+        )
+    yield require_init
+
+
+@pytest.fixture(scope="module")
+def require_namespace_init_module(require_init_module):
+    """Module-scoped version of require_namespace_init for shared fixtures."""
+    if not require_init_module.get("adrNamespaceRef"):
+        pytest.skip(
+            "Instance does not have an ADR namespace reference (adrNamespaceRef). "
+            "Create one and link it to the instance before running namespace tests. "
+            "See: az iot ops ns create / az iot ops update"
+        )
+    yield require_init_module
+
+
+@pytest.fixture(scope="session")
+def require_namespace_init_session(require_init_session):
+    """Session-scoped version of require_namespace_init for shared fixtures."""
+    if not require_init_session.get("adrNamespaceRef"):
+        pytest.skip(
+            "Instance does not have an ADR namespace reference (adrNamespaceRef). "
+            "Create one and link it to the instance before running namespace tests. "
+            "See: az iot ops ns create / az iot ops update"
+        )
+    yield require_init_session
+
+
+@pytest.fixture(scope="session")
+def shared_device(require_namespace_init_session, tracked_resources):
+    """Single shared device for the entire test session."""
+    instance_name = require_namespace_init_session["instanceName"]
+    resource_group = require_namespace_init_session["resourceGroup"]
+    device_name = f"dev-{generate_random_string(8, force_lower=True)}"
+    result = run(
+        f"az iot ops ns device create --name {device_name} "
+        f"--instance {instance_name} -g {resource_group}"
+    )
+    if isinstance(result, dict) and "id" in result:
+        tracked_resources.append(result["id"])
+    yield device_name
+
+
+@pytest.fixture(scope="session")
+def endpoint_cache():
+    """Session-scoped cache for endpoint names keyed by (type, address)."""
+    yield {}
+
+
+@pytest.fixture(scope="module")
+def format_test_asset_cache():
+    """Module-scoped cache for assets shared across format variants."""
+    yield {}
+
+
+# Default endpoint addresses per asset type
+_DEFAULT_ENDPOINT_ADDRESSES = {
+    "custom": "http://192.168.1.100:8000/custom/service",
+    "opcua": "opc.tcp://192.168.1.200:4840/OPCUA/Server",
+    "media": "rtsp://192.168.1.200:554/stream1",
+    "onvif": "http://192.168.1.100:8080/onvif/device",
+    "rest": "https://api.example.com/rest",
+    "sse": "https://events.example.com/stream",
+    "mqtt": "aio-broker:18883",
+}
+
+
+@pytest.fixture(scope="module")
+def asset_factory(require_namespace_init_module, shared_device, tracked_resources):
+    """Module-scoped factory that lazily creates and caches device endpoints + assets per type.
+
+    Returns a dict with keys: ``name``, ``endpointName``, ``instanceName``,
+    ``resourceGroup``, ``customLocationId``.
+
+    Usage in tests::
+
+        def test_something(asset_factory, tracked_files):
+            info = asset_factory("custom")
+            asset_name = info["name"]
+            instance_name = info["instanceName"]
+            resource_group = info["resourceGroup"]
+    """
+    cache = {}
+
+    def get_or_create(asset_type, endpoint_type=None, endpoint_address=None):
+        if asset_type in cache:
+            return cache[asset_type]
+
+        endpoint_type = endpoint_type or asset_type
+        endpoint_address = endpoint_address or _DEFAULT_ENDPOINT_ADDRESSES.get(endpoint_type)
+        if not endpoint_address:
+            raise ValueError(
+                f"No default endpoint address for type '{endpoint_type}'. "
+                f"Pass endpoint_address explicitly."
+            )
+
+        instance_name = require_namespace_init_module["instanceName"]
+        resource_group = require_namespace_init_module["resourceGroup"]
+
+        # Create endpoint on the shared device
+        endpoint_name = f"{endpoint_type}-{generate_random_string(8)}"
+        endpoint_cmd = (
+            f"az iot ops ns device endpoint inbound add {endpoint_type} --name {endpoint_name} "
+            f"--instance {instance_name} -g {resource_group} --device {shared_device} "
+            f"--endpoint-address '{endpoint_address}'"
+        )
+        if endpoint_type == "custom":
+            endpoint_cmd += " --endpoint-type custom"
+        run(endpoint_cmd)
+
+        # Create asset
+        asset_name = f"{asset_type}-{generate_random_string(8, force_lower=True)}"
+        result = run(
+            f"az iot ops ns asset {asset_type} create --name {asset_name} "
+            f"--instance {instance_name} -g {resource_group} "
+            f"--device {shared_device} --endpoint {endpoint_name}"
+        )
+        if isinstance(result, dict) and "id" in result:
+            tracked_resources.append(result["id"])
+
+        info = {
+            "name": asset_name,
+            "endpointName": endpoint_name,
+            "instanceName": instance_name,
+            "resourceGroup": resource_group,
+            "customLocationId": require_namespace_init_module.get("customLocationId"),
+        }
+        cache[asset_type] = info
+        return info
+
+    yield get_or_create
 
 
 @pytest.fixture()
@@ -96,6 +242,26 @@ def mocked_get_namespace_for_instance(mocker):
         mocker.patch(target, mock)
 
     yield mock
+
+
+@pytest.fixture()
+def mocked_connector_metadata_validator(mocker):
+    """Mock the ConnectorMetadataValidator to avoid actual validation during tests."""
+    mock_validator_instance = mocker.Mock()
+    mock_validator_instance.validate_dataset = mocker.Mock(return_value=None)
+    mock_validator_instance.validate_datapoint = mocker.Mock(return_value=None)
+    mock_validator_instance.validate_event = mocker.Mock(return_value=None)
+    mock_validator_instance.validate_event_group = mocker.Mock(return_value=None)
+
+    mock_validator_class = mocker.Mock(return_value=mock_validator_instance)
+    mock_validator_class.from_asset = mocker.Mock(return_value=mock_validator_instance)
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.ConnectorMetadataValidator",
+        mock_validator_class
+    )
+
+    yield mock_validator_instance
 
 
 @pytest.fixture()

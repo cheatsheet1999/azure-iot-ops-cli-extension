@@ -268,6 +268,7 @@ def add_inbound_onvif_device_endpoint(
     endpoint_version: Optional[str] = None,
     accept_invalid_hostnames: Optional[bool] = False,
     accept_invalid_certificates: Optional[bool] = False,
+    fallback_to_username_token_auth: Optional[bool] = False,
     password_reference: Optional[str] = None,
     username_reference: Optional[str] = None,
     replace: Optional[bool] = False,
@@ -285,6 +286,7 @@ def add_inbound_onvif_device_endpoint(
         username_reference=username_reference,
         accept_invalid_hostnames=accept_invalid_hostnames,
         accept_invalid_certificates=accept_invalid_certificates,
+        fallback_to_username_token_auth=fallback_to_username_token_auth,
         replace=replace,
         **kwargs
     )
@@ -315,6 +317,7 @@ def add_inbound_opcua_device_endpoint(
     security_policy: Optional[str] = None,
     security_mode: Optional[str] = None,
     run_asset_discovery: Optional[bool] = False,
+    sync_properties_into_state_store: Optional[bool] = False,
     password_reference: Optional[str] = None,
     username_reference: Optional[str] = None,
     replace: Optional[bool] = False,
@@ -347,6 +350,7 @@ def add_inbound_opcua_device_endpoint(
         security_policy=security_policy,
         security_mode=security_mode,
         run_asset_discovery=run_asset_discovery,
+        sync_properties_into_state_store=sync_properties_into_state_store,
         replace=replace,
         **kwargs
     )
@@ -428,6 +432,9 @@ def add_inbound_mqtt_device_endpoint(
     endpoint_name: str,
     endpoint_address: str,
     endpoint_version: Optional[str] = None,
+    asset_level: Optional[int] = 1,
+    topic_filter: Optional[str] = None,
+    topic_mapping_prefix: Optional[str] = None,
     replace: Optional[bool] = False,
     **kwargs
 ):
@@ -439,6 +446,9 @@ def add_inbound_mqtt_device_endpoint(
         endpoint_type=DeviceEndpointType.MQTT.value,
         endpoint_address=endpoint_address,
         endpoint_version=endpoint_version,
+        asset_level=asset_level,
+        topic_filter=topic_filter,
+        topic_mapping_prefix=topic_mapping_prefix,
         replace=replace,
         **kwargs
     )
@@ -686,9 +696,13 @@ def create_namespace_opcua_asset(
     dataset_sampling_interval: Optional[int] = None,
     dataset_queue_size: Optional[int] = None,
     dataset_key_frame_count: Optional[int] = None,
+    dataset_start_instance: Optional[str] = None,
     dataset_destinations: Optional[str] = None,
     events_publishing_interval: Optional[int] = None,
     events_queue_size: Optional[int] = None,
+    events_start_instance: Optional[str] = None,
+    events_filter_type: Optional[str] = None,
+    events_filter_clauses: Optional[List[List[str]]] = None,
     event_destinations: Optional[str] = None,
     # other params
     asset_type_refs: Optional[List[str]] = None,
@@ -722,9 +736,13 @@ def create_namespace_opcua_asset(
         opcua_dataset_sampling_interval=dataset_sampling_interval,
         opcua_dataset_queue_size=dataset_queue_size,
         opcua_dataset_key_frame_count=dataset_key_frame_count,
+        opcua_dataset_start_instance=dataset_start_instance,
         dataset_destinations=dataset_destinations,
         opcua_event_publishing_interval=events_publishing_interval,
         opcua_event_queue_size=events_queue_size,
+        opcua_event_start_instance=events_start_instance,
+        opcua_event_filter_type=events_filter_type,
+        opcua_event_filter_clauses=events_filter_clauses,
         event_destinations=event_destinations,
         description=description,
         disabled=disabled,
@@ -1125,9 +1143,13 @@ def update_namespace_opcua_asset(
     dataset_sampling_interval: Optional[int] = None,
     dataset_queue_size: Optional[int] = None,
     dataset_key_frame_count: Optional[int] = None,
+    dataset_start_instance: Optional[str] = None,
     dataset_destinations: Optional[str] = None,
     events_publishing_interval: Optional[int] = None,
     events_queue_size: Optional[int] = None,
+    events_start_instance: Optional[str] = None,
+    events_filter_type: Optional[str] = None,
+    events_filter_clauses: Optional[List[List[str]]] = None,
     event_destinations: Optional[str] = None,
     # other params
     asset_type_refs: Optional[List[str]] = None,
@@ -1159,9 +1181,13 @@ def update_namespace_opcua_asset(
         opcua_dataset_sampling_interval=dataset_sampling_interval,
         opcua_dataset_queue_size=dataset_queue_size,
         opcua_dataset_key_frame_count=dataset_key_frame_count,
+        opcua_dataset_start_instance=dataset_start_instance,
         dataset_destinations=dataset_destinations,
         opcua_event_publishing_interval=events_publishing_interval,
         opcua_event_queue_size=events_queue_size,
+        opcua_event_start_instance=events_start_instance,
+        opcua_event_filter_type=events_filter_type,
+        opcua_event_filter_clauses=events_filter_clauses,
         event_destinations=event_destinations,
         description=description,
         disabled=disabled,
@@ -1410,6 +1436,7 @@ def add_namespace_opcua_asset_dataset(
     opcua_dataset_sampling_interval: Optional[int] = None,
     opcua_dataset_queue_size: Optional[int] = None,
     opcua_dataset_key_frame_count: Optional[int] = None,
+    opcua_dataset_start_instance: Optional[str] = None,
     type_ref: Optional[str] = None,
     replace: Optional[bool] = False,
     **kwargs
@@ -1426,6 +1453,7 @@ def add_namespace_opcua_asset_dataset(
         opcua_dataset_sampling_interval=opcua_dataset_sampling_interval,
         opcua_dataset_queue_size=opcua_dataset_queue_size,
         opcua_dataset_key_frame_count=opcua_dataset_key_frame_count,
+        opcua_dataset_start_instance=opcua_dataset_start_instance,
         replace=replace,
         **kwargs
     )
@@ -1577,6 +1605,7 @@ def update_namespace_opcua_asset_dataset(
     opcua_dataset_sampling_interval: Optional[int] = None,
     opcua_dataset_queue_size: Optional[int] = None,
     opcua_dataset_key_frame_count: Optional[int] = None,
+    opcua_dataset_start_instance: Optional[str] = None,
     **kwargs
 ) -> dict:
     return NamespaceAssets(cmd).update_dataset(
@@ -1591,6 +1620,7 @@ def update_namespace_opcua_asset_dataset(
         opcua_dataset_sampling_interval=opcua_dataset_sampling_interval,
         opcua_dataset_queue_size=opcua_dataset_queue_size,
         opcua_dataset_key_frame_count=opcua_dataset_key_frame_count,
+        opcua_dataset_start_instance=opcua_dataset_start_instance,
         **kwargs
     )
 
@@ -1672,6 +1702,142 @@ def remove_namespace_asset_dataset(
         dataset_name=dataset_name,
         **kwargs
     )
+
+
+# EXPORT/IMPORT FACTORY FUNCTIONS
+
+
+def _make_export_func(method_name: str):
+    """Factory that generates a typed export command function."""
+    def export_func(
+        cmd, asset_name: str, instance_name: str, instance_resource_group: str,
+        extension: str = "json", output_dir: str = ".", replace: bool = False,
+    ) -> dict:
+        return getattr(NamespaceAssets(cmd), method_name)(
+            asset_name=asset_name, instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+            extension=extension, output_dir=output_dir, replace=replace,
+        )
+    return export_func
+
+
+def _make_import_func(method_name: str):
+    """Factory that generates a typed import command function."""
+    def import_func(
+        cmd, asset_name: str, instance_name: str, instance_resource_group: str,
+        file_path: str, replace: bool = False, **kwargs
+    ) -> List[dict]:
+        return getattr(NamespaceAssets(cmd), method_name)(
+            asset_name=asset_name, instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+            file_path=file_path, replace=replace, **kwargs
+        )
+    return import_func
+
+
+def _make_datapoint_export_func(method_name: str):
+    """Factory that generates a typed datapoint export command function."""
+    def export_func(
+        cmd, asset_name: str, dataset_name: str, instance_name: str,
+        instance_resource_group: str, extension: str = "json",
+        output_dir: str = ".", replace: bool = False,
+    ) -> dict:
+        return getattr(NamespaceAssets(cmd), method_name)(
+            asset_name=asset_name, dataset_name=dataset_name,
+            instance_name=instance_name, instance_resource_group=instance_resource_group,
+            extension=extension, output_dir=output_dir, replace=replace,
+        )
+    return export_func
+
+
+def _make_datapoint_import_func(method_name: str):
+    """Factory that generates a typed datapoint import command function."""
+    def import_func(
+        cmd, asset_name: str, dataset_name: str, instance_name: str,
+        instance_resource_group: str, file_path: str,
+        replace: bool = False, **kwargs
+    ) -> List[dict]:
+        return getattr(NamespaceAssets(cmd), method_name)(
+            asset_name=asset_name, dataset_name=dataset_name,
+            instance_name=instance_name, instance_resource_group=instance_resource_group,
+            file_path=file_path, replace=replace, **kwargs
+        )
+    return import_func
+
+
+def _make_event_export_func(method_name: str):
+    """Factory that generates a typed event export command function."""
+    def export_func(
+        cmd, asset_name: str, event_group_name: str, instance_name: str,
+        instance_resource_group: str, extension: str = "json",
+        output_dir: str = ".", replace: bool = False,
+    ) -> dict:
+        return getattr(NamespaceAssets(cmd), method_name)(
+            asset_name=asset_name, event_group_name=event_group_name,
+            instance_name=instance_name, instance_resource_group=instance_resource_group,
+            extension=extension, output_dir=output_dir, replace=replace,
+        )
+    return export_func
+
+
+def _make_event_import_func(method_name: str):
+    """Factory that generates a typed event import command function."""
+    def import_func(
+        cmd, asset_name: str, event_group_name: str, instance_name: str,
+        instance_resource_group: str, file_path: str,
+        replace: bool = False, **kwargs
+    ) -> List[dict]:
+        return getattr(NamespaceAssets(cmd), method_name)(
+            asset_name=asset_name, event_group_name=event_group_name,
+            instance_name=instance_name, instance_resource_group=instance_resource_group,
+            file_path=file_path, replace=replace, **kwargs
+        )
+    return import_func
+
+
+def _make_mgmt_action_export_func(method_name: str):
+    """Factory that generates a typed management group action export command function."""
+    def export_func(
+        cmd, asset_name: str, instance_name: str, instance_resource_group: str,
+        group_name: str, extension: str = "json",
+        output_dir: str = ".", replace: bool = False,
+    ) -> dict:
+        return getattr(NamespaceAssets(cmd), method_name)(
+            asset_name=asset_name, instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+            group_name=group_name,
+            extension=extension, output_dir=output_dir, replace=replace,
+        )
+    return export_func
+
+
+def _make_mgmt_action_import_func(method_name: str):
+    """Factory that generates a typed management group action import command function."""
+    def import_func(
+        cmd, asset_name: str, instance_name: str, instance_resource_group: str,
+        group_name: str, file_path: str,
+        replace: bool = False, **kwargs
+    ) -> List[dict]:
+        return getattr(NamespaceAssets(cmd), method_name)(
+            asset_name=asset_name, instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+            group_name=group_name,
+            file_path=file_path, replace=replace, **kwargs
+        )
+    return import_func
+
+
+# DATASET EXPORT/IMPORT
+export_namespace_custom_asset_dataset = _make_export_func("export_datasets")
+export_namespace_opcua_asset_dataset = _make_export_func("export_datasets")
+export_namespace_rest_asset_dataset = _make_export_func("export_datasets")
+export_namespace_sse_asset_dataset = _make_export_func("export_datasets")
+export_namespace_mqtt_asset_dataset = _make_export_func("export_datasets")
+import_namespace_custom_asset_dataset = _make_import_func("import_datasets")
+import_namespace_opcua_asset_dataset = _make_import_func("import_datasets")
+import_namespace_rest_asset_dataset = _make_import_func("import_datasets")
+import_namespace_sse_asset_dataset = _make_import_func("import_datasets")
+import_namespace_mqtt_asset_dataset = _make_import_func("import_datasets")
 
 
 # ASSET DATASET DATAPOINT COMMANDS
@@ -1765,6 +1931,35 @@ def remove_namespace_asset_dataset_point(
     )
 
 
+# DATAPOINT EXPORT/IMPORT
+export_namespace_custom_asset_dataset_point = _make_datapoint_export_func("export_dataset_datapoints")
+export_namespace_opcua_asset_dataset_point = _make_datapoint_export_func("export_dataset_datapoints")
+import_namespace_custom_asset_dataset_point = _make_datapoint_import_func("import_dataset_datapoints")
+import_namespace_opcua_asset_dataset_point = _make_datapoint_import_func("import_dataset_datapoints")
+
+
+# EVENT-GROUP EXPORT/IMPORT
+export_namespace_custom_asset_event_group = _make_export_func("export_event_groups")
+export_namespace_opcua_asset_event_group = _make_export_func("export_event_groups")
+export_namespace_onvif_asset_event_group = _make_export_func("export_event_groups")
+export_namespace_sse_asset_event_group = _make_export_func("export_event_groups")
+import_namespace_custom_asset_event_group = _make_import_func("import_event_groups")
+import_namespace_opcua_asset_event_group = _make_import_func("import_event_groups")
+import_namespace_onvif_asset_event_group = _make_import_func("import_event_groups")
+import_namespace_sse_asset_event_group = _make_import_func("import_event_groups")
+
+
+# EVENT EXPORT/IMPORT
+export_namespace_custom_asset_event_group_event = _make_event_export_func("export_event_group_events")
+export_namespace_opcua_asset_event_group_event = _make_event_export_func("export_event_group_events")
+export_namespace_onvif_asset_event_group_event = _make_event_export_func("export_event_group_events")
+export_namespace_sse_asset_event_group_event = _make_event_export_func("export_event_group_events")
+import_namespace_custom_asset_event_group_event = _make_event_import_func("import_event_group_events")
+import_namespace_opcua_asset_event_group_event = _make_event_import_func("import_event_group_events")
+import_namespace_onvif_asset_event_group_event = _make_event_import_func("import_event_group_events")
+import_namespace_sse_asset_event_group_event = _make_event_import_func("import_event_group_events")
+
+
 # ASSET EVENT GROUP COMMANDS
 def add_namespace_custom_asset_event_group(
     cmd,
@@ -1804,6 +1999,9 @@ def add_namespace_opcua_asset_event_group(
     event_destinations: Optional[str] = None,
     opcua_event_publishing_interval: Optional[int] = None,
     opcua_event_queue_size: Optional[int] = None,
+    opcua_event_start_instance: Optional[str] = None,
+    opcua_event_filter_type: Optional[str] = None,
+    opcua_event_filter_clauses: Optional[List[List[str]]] = None,
     replace: Optional[bool] = False,
     **kwargs
 ) -> dict:
@@ -1817,6 +2015,9 @@ def add_namespace_opcua_asset_event_group(
         event_destinations=event_destinations,
         opcua_event_publishing_interval=opcua_event_publishing_interval,
         opcua_event_queue_size=opcua_event_queue_size,
+        opcua_event_start_instance=opcua_event_start_instance,
+        opcua_event_filter_type=opcua_event_filter_type,
+        opcua_event_filter_clauses=opcua_event_filter_clauses,
         replace=replace,
         **kwargs
     )
@@ -1934,6 +2135,9 @@ def update_namespace_opcua_asset_event_group(
     event_destinations: Optional[str] = None,
     opcua_event_publishing_interval: Optional[int] = None,
     opcua_event_queue_size: Optional[int] = None,
+    opcua_event_start_instance: Optional[str] = None,
+    opcua_event_filter_type: Optional[str] = None,
+    opcua_event_filter_clauses: Optional[List[List[str]]] = None,
     **kwargs
 ) -> dict:
     return NamespaceAssets(cmd).update_event_group(
@@ -1946,6 +2150,9 @@ def update_namespace_opcua_asset_event_group(
         event_destinations=event_destinations,
         opcua_event_publishing_interval=opcua_event_publishing_interval,
         opcua_event_queue_size=opcua_event_queue_size,
+        opcua_event_start_instance=opcua_event_start_instance,
+        opcua_event_filter_type=opcua_event_filter_type,
+        opcua_event_filter_clauses=opcua_event_filter_clauses,
         **kwargs
     )
 
@@ -2042,7 +2249,6 @@ def add_namespace_custom_asset_event_group_event(
     )
 
 
-# TODO: not exposed for now but this will be supported in the near future
 def add_namespace_opcua_asset_event_group_event(
     cmd,
     asset_name: str,
@@ -2053,6 +2259,8 @@ def add_namespace_opcua_asset_event_group_event(
     data_source: Optional[str] = None,
     queue_size: Optional[int] = None,
     sampling_interval: Optional[int] = None,
+    opcua_event_filter_type: Optional[str] = None,
+    opcua_event_filter_clauses: Optional[List[List[str]]] = None,
     replace: Optional[bool] = False,
     **kwargs
 ) -> dict:
@@ -2066,6 +2274,36 @@ def add_namespace_opcua_asset_event_group_event(
         data_source=data_source,
         queue_size=queue_size,
         sampling_interval=sampling_interval,
+        opcua_event_filter_type=opcua_event_filter_type,
+        opcua_event_filter_clauses=opcua_event_filter_clauses,
+        replace=replace,
+        **kwargs
+    )
+
+
+def add_namespace_onvif_asset_event_group_event(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    group_name: str,
+    event_name: str,
+    data_source: Optional[str] = None,
+    event_destinations: Optional[str] = None,
+    type_ref: Optional[str] = None,
+    replace: Optional[bool] = False,
+    **kwargs
+) -> dict:
+    return NamespaceAssets(cmd).add_event_group_event(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        group_name=group_name,
+        event_name=event_name,
+        asset_type=DeviceEndpointType.ONVIF.value,
+        data_source=data_source,
+        event_destinations=event_destinations,
+        type_ref=type_ref,
         replace=replace,
         **kwargs
     )
@@ -2319,6 +2557,13 @@ def remove_namespace_asset_stream(
     )
 
 
+# STREAM EXPORT/IMPORT
+export_namespace_custom_asset_stream = _make_export_func("export_streams")
+export_namespace_media_asset_stream = _make_export_func("export_streams")
+import_namespace_custom_asset_stream = _make_import_func("import_streams")
+import_namespace_media_asset_stream = _make_import_func("import_streams")
+
+
 # MANAGEMENT GROUP COMMANDS
 def add_namespace_custom_asset_management_group(
     cmd,
@@ -2531,6 +2776,15 @@ def remove_namespace_asset_management_group(
     )
 
 
+# MANAGEMENT GROUP EXPORT/IMPORT
+export_namespace_custom_asset_management_group = _make_export_func("export_management_groups")
+export_namespace_opcua_asset_management_group = _make_export_func("export_management_groups")
+export_namespace_onvif_asset_management_group = _make_export_func("export_management_groups")
+import_namespace_custom_asset_management_group = _make_import_func("import_management_groups")
+import_namespace_opcua_asset_management_group = _make_import_func("import_management_groups")
+import_namespace_onvif_asset_management_group = _make_import_func("import_management_groups")
+
+
 # MANAGEMENT GROUP ACTION COMMANDS
 def add_namespace_custom_asset_management_group_action(
     cmd,
@@ -2665,3 +2919,10 @@ def remove_namespace_asset_management_group_action(
         action_name=action_name,
         **kwargs
     )
+
+
+# MANAGEMENT GROUP ACTION EXPORT/IMPORT
+export_namespace_custom_asset_management_group_action = _make_mgmt_action_export_func("export_management_group_actions")
+export_namespace_opcua_asset_management_group_action = _make_mgmt_action_export_func("export_management_group_actions")
+import_namespace_custom_asset_management_group_action = _make_mgmt_action_import_func("import_management_group_actions")
+import_namespace_opcua_asset_management_group_action = _make_mgmt_action_import_func("import_management_group_actions")
