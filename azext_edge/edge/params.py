@@ -1553,6 +1553,46 @@ def load_iotops_arguments(self, _):
             help="IoT Operations instance name.",
         )
 
+    with self.argument_context("iot ops secretsync secret") as context:
+        context.argument(
+            "instance_name",
+            options_list=["--instance", "-i", "-n"],
+            help="IoT Operations instance name.",
+        )
+
+    with self.argument_context("iot ops secretsync secret set") as context:
+        context.argument(
+            "secret_sync_name",
+            options_list=["--secret-sync-name"],
+            help="Name for the SecretSync ARM resource and the resulting K8s secret.",
+        )
+        context.argument(
+            "secret_map",
+            options_list=["--secret-map"],
+            action="append",
+            help="AKV secret mapping in the format `<akv-secret-name>=<target-key>`. "
+            "Repeatable. The AKV secret must exist.",
+        )
+
+    with self.argument_context("iot ops secretsync secret list") as context:
+        context.argument(
+            "secret_sync_name",
+            options_list=["--secret-sync-name"],
+            help="Name of the SecretSync resource.",
+        )
+
+    with self.argument_context("iot ops secretsync secret remove") as context:
+        context.argument(
+            "secret_sync_name",
+            options_list=["--secret-sync-name"],
+            help="Name of the SecretSync resource.",
+        )
+        context.argument(
+            "secret_name",
+            options_list=["--secret-name"],
+            help="AKV secret name (sourcePath value) to remove from the SecretSync.",
+        )
+
     with self.argument_context("iot ops mgmt-actions") as context:
         context.argument(
             "instance_name",

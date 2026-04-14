@@ -8,6 +8,7 @@ import re
 from contextlib import nullcontext
 from typing import Dict, Iterable, List, Optional
 
+import yaml
 from azure.cli.core.azclierror import (
     AzureResponseError,
     InvalidArgumentValueError,
@@ -21,6 +22,7 @@ from rich.console import Console
 from ....util.az_client import (
     ResourceIdContainer,
     get_iotops_mgmt_client,
+    get_keyvault_client,
     get_msi_mgmt_client,
     get_ssc_mgmt_client,
     get_tenant_id,
@@ -38,6 +40,7 @@ from ..common import (
     CONTRIBUTOR_ROLE_ID,
     CUSTOM_LOCATIONS_API_VERSION,
     KEYVAULT_CLOUD_API_VERSION,
+    KEYVAULT_URL,
     IdentityUsageType,
     MANAGED_IDENTITY_API_VERSION,
 )
@@ -416,6 +419,7 @@ class Instances(Queryable):
                     "properties": {
                         "clientId": mi_user_assigned["properties"]["clientId"],
                         "keyvaultName": keyvault_resource_id_container.resource_name,
+                        "keyvaultResourceId": keyvault_resource_id_container.resource_id,
                         "tenantId": get_tenant_id(),
                     },
                     **spc_kwargs,
@@ -516,6 +520,281 @@ class Instances(Queryable):
             resource_group_name=parsed_resource_id.resource_group_name,
             azure_key_vault_secret_provider_class_name=parsed_resource_id.resource_name,
         )
+
+    def set_secretsync_secret(
+        self,
+        name: str,
+        resource_group_name: str,
+        secret_sync_name: str,
+        secret_map: List[str],
+        **kwargs,
+    ) -> dict:
+        with console.status("Working..."):
+            # Step 1: Resolve the instance's defaultSecretProviderClassRef → fetch the SPC
+            spc = self.get_default_spc(instance_name=name, resource_group_name=resource_group_name)
+            spc_name = spc["name"]
+            spc_properties = spc.get("properties", {})
+            keyvault_name = spc_properties["keyvaultName"]
+            keyvault_resource_id = spc_properties.get("keyvaultResourceId")
+
+            # Parse secret_map into akv_name=target_key pairs
+            secret_mappings = []
+            for entry in secret_map:
+                if "=" not in entry:
+                    raise InvalidArgumentValueError(
+                        f"Invalid --secret-map format: '{entry}'. Expected format: <akv-name>=<target-key>."
+                    )
+                akv_name, _, target_key = entry.partition("=")
+                if not akv_name or not target_key:
+                    raise InvalidArgumentValueError(
+                        f"Invalid --secret-map format: '{entry}'. Both <akv-name> and <target-key> are required."
+                    )
+                secret_mappings.append({"akv_name": akv_name, "target_key": target_key})
+
+            # Step 2: Verify each AKV secret exists and detect encoding
+            keyvault_client = get_keyvault_client(subscription_id=self.default_subscription_id)
+            if keyvault_resource_id:
+                kv_resource = self.resource_client.resources.get_by_id(
+                    resource_id=keyvault_resource_id, api_version=KEYVAULT_CLOUD_API_VERSION
+                )
+                vault_url = kv_resource["properties"]["vaultUri"]
+            else:
+                # Fallback for instances where secretsync was enabled prior to this change
+                vault_url = KEYVAULT_URL.format(keyvaultName=keyvault_name)
+            for mapping in secret_mappings:
+                try:
+                    secret_response = keyvault_client.get_secret(
+                        vault_base_url=vault_url,
+                        secret_name=mapping["akv_name"],
+                        secret_version="",
+                    )
+                    tags = secret_response.get("tags") or {}
+                    mapping["needs_hex_encoding"] = tags.get("file-encoding", "").lower() == "hex"
+                except ResourceNotFoundError as e:
+                    akv_name = mapping["akv_name"]
+                    raise InvalidArgumentValueError(
+                        f"AKV secret '{akv_name}' not found in Key Vault '{keyvault_name}'. "
+                        "The secret must exist in the Key Vault before it can be synced."
+                    ) from e
+
+            # Step 3: Add each akv_name to SPC objects YAML (skip if already present)
+            spc_objects = spc_properties.get("objects", "")
+            if spc_objects:
+                objects_obj = yaml.safe_load(spc_objects)
+            else:
+                objects_obj = {"array": []}
+
+            existing_object_names = set()
+            for entry in objects_obj.get("array", []):
+                entry_obj = yaml.safe_load(entry)
+                if entry_obj and "objectName" in entry_obj:
+                    existing_object_names.add(entry_obj["objectName"])
+
+            for mapping in secret_mappings:
+                if mapping["akv_name"] not in existing_object_names:
+                    secret_entry = {
+                        "objectName": mapping["akv_name"],
+                        "objectType": "secret",
+                    }
+                    if mapping.get("needs_hex_encoding"):
+                        secret_entry["objectEncoding"] = "hex"
+                    entry_text = yaml.safe_dump(secret_entry, indent=6)
+                    objects_obj["array"].append(entry_text)
+                    existing_object_names.add(mapping["akv_name"])
+
+            spc["properties"]["objects"] = yaml.safe_dump(objects_obj, indent=6).replace("\n- |", "\n    - |")
+
+            # Step 4: Update the SPC via ARM
+            spc_poller = self.ssc_mgmt_client.azure_key_vault_secret_provider_classes.begin_create_or_update(
+                resource_group_name=resource_group_name,
+                azure_key_vault_secret_provider_class_name=spc_name,
+                resource=spc,
+            )
+            wait_for_terminal_state(spc_poller, **kwargs)
+
+            # Step 5: Create or update the SecretSync resource
+            try:
+                secret_sync = self.ssc_mgmt_client.secret_syncs.get(
+                    resource_group_name=resource_group_name,
+                    secret_sync_name=secret_sync_name,
+                )
+            except ResourceNotFoundError:
+                secret_sync = None
+
+            if secret_sync:
+                # Merge new entries into existing SecretSync (add if sourcePath+targetKey pair doesn't exist)
+                existing_mapping = secret_sync.get("properties", {}).get("objectSecretMapping", [])
+                existing_pairs = {(m["sourcePath"], m["targetKey"]) for m in existing_mapping}
+                for mapping in secret_mappings:
+                    pair = (mapping["akv_name"], mapping["target_key"])
+                    if pair not in existing_pairs:
+                        existing_mapping.append({
+                            "sourcePath": mapping["akv_name"],
+                            "targetKey": mapping["target_key"],
+                        })
+                        existing_pairs.add(pair)
+                secret_sync["properties"]["objectSecretMapping"] = existing_mapping
+            else:
+                # Create new SecretSync resource
+                secret_sync = {
+                    "location": spc["location"],
+                    "extendedLocation": spc["extendedLocation"],
+                    "properties": {
+                        "kubernetesSecretType": "Opaque",
+                        "secretProviderClassName": spc_name,
+                        "serviceAccountName": SERVICE_ACCOUNT_SECRETSYNC,
+                        "objectSecretMapping": [
+                            {
+                                "sourcePath": mapping["akv_name"],
+                                "targetKey": mapping["target_key"],
+                            }
+                            for mapping in secret_mappings
+                        ],
+                    },
+                }
+
+            ss_poller = self.ssc_mgmt_client.secret_syncs.begin_create_or_update(
+                resource_group_name=resource_group_name,
+                secret_sync_name=secret_sync_name,
+                resource=secret_sync,
+            )
+            return wait_for_terminal_state(ss_poller, **kwargs)
+
+    def list_secretsync_secrets(
+        self,
+        name: str,
+        resource_group_name: str,
+        secret_sync_name: str,
+    ) -> List[dict]:
+        with console.status("Working..."):
+            # Validate secret sync is enabled on the instance
+            self.get_default_spc(instance_name=name, resource_group_name=resource_group_name)
+
+            secret_sync = self.ssc_mgmt_client.secret_syncs.get(
+                resource_group_name=resource_group_name,
+                secret_sync_name=secret_sync_name,
+            )
+            mappings = secret_sync.get("properties", {}).get("objectSecretMapping") or []
+            if not mappings:
+                logger.warning(f"No secrets found in SecretSync '{secret_sync_name}'.")
+            return mappings
+
+    def remove_secretsync_secret(
+        self,
+        name: str,
+        resource_group_name: str,
+        secret_sync_name: str,
+        secret_name: str,
+        confirm_yes: Optional[bool] = None,
+        **kwargs,
+    ) -> Optional[dict]:
+        should_bail = not should_continue_prompt(confirm_yes=confirm_yes)
+        if should_bail:
+            return
+
+        with console.status("Working...") as status:
+            # Step 1: Fetch the named SecretSync
+            secret_sync = self.ssc_mgmt_client.secret_syncs.get(
+                resource_group_name=resource_group_name,
+                secret_sync_name=secret_sync_name,
+            )
+            mappings = secret_sync.get("properties", {}).get("objectSecretMapping", [])
+            spc_class_name = secret_sync.get("properties", {}).get("secretProviderClassName", "")
+
+            # Find and remove the entries whose sourcePath == secret_name
+            new_mappings = [m for m in mappings if m["sourcePath"] != secret_name]
+            if len(new_mappings) == len(mappings):
+                raise InvalidArgumentValueError(
+                    f"Secret '{secret_name}' not found in SecretSync '{secret_sync_name}'."
+                )
+
+            # Step 2: Ref-count guard — check if any OTHER SecretSync referencing the same SPC
+            #         still uses this secret. Done BEFORE modifying the target SecretSync to
+            #         avoid ARG eventual consistency issues.
+            instance = self.show(name=name, resource_group_name=resource_group_name)
+            resource_map = self.get_resource_map(instance)
+            all_secretsyncs = resource_map.connected_cluster.get_cl_resources_by_type(
+                custom_location_id=instance["extendedLocation"]["name"],
+                resource_types={SECRET_SYNC_RESOURCE_TYPE},
+                show_properties=True,
+            )
+
+            still_referenced = False
+            for ss in all_secretsyncs.get(SECRET_SYNC_RESOURCE_TYPE, []):
+                # Skip the target SecretSync — we only care about other consumers
+                if ss.get("name") == secret_sync_name:
+                    continue
+                # Only consider SecretSyncs that reference the same SPC
+                if ss.get("properties", {}).get("secretProviderClassName") != spc_class_name:
+                    continue
+                ss_mappings = ss.get("properties", {}).get("objectSecretMapping", [])
+                for m in ss_mappings:
+                    if m.get("sourcePath") == secret_name:
+                        still_referenced = True
+                        break
+                if still_referenced:
+                    break
+
+            # Step 3: Modify or delete the SecretSync
+            modified_secret_sync = None
+            if len(new_mappings) == 0:
+                # ARM API doesn't allow empty objectSecretMapping — delete the entire SecretSync
+                status.update(
+                    f"Removing SecretSync resource '{secret_sync_name}', as no secrets left..."
+                )
+                ss_poller = self.ssc_mgmt_client.secret_syncs.begin_delete(
+                    resource_group_name=resource_group_name,
+                    secret_sync_name=secret_sync_name,
+                )
+                wait_for_terminal_state(ss_poller, **kwargs)
+            else:
+                # Update SecretSync with the entry removed
+                secret_sync["properties"]["objectSecretMapping"] = new_mappings
+                status.update(
+                    f"Removing secret reference in SecretSync resource '{secret_sync_name}'..."
+                )
+                ss_poller = self.ssc_mgmt_client.secret_syncs.begin_create_or_update(
+                    resource_group_name=resource_group_name,
+                    secret_sync_name=secret_sync_name,
+                    resource=secret_sync,
+                )
+                modified_secret_sync = wait_for_terminal_state(ss_poller, **kwargs)
+
+            # Step 4: Only remove from SPC if no other SecretSync (using the same SPC) references this secret
+            if not still_referenced:
+                spc = self.ssc_mgmt_client.azure_key_vault_secret_provider_classes.get(
+                    resource_group_name=resource_group_name,
+                    azure_key_vault_secret_provider_class_name=spc_class_name,
+                )
+                spc_properties = spc.get("properties", {})
+                spc_objects = spc_properties.get("objects", "")
+
+                if spc_objects:
+                    objects_obj = yaml.safe_load(spc_objects)
+                    original_len = len(objects_obj.get("array", []))
+                    objects_obj["array"] = [
+                        entry for entry in objects_obj.get("array", [])
+                        if yaml.safe_load(entry).get("objectName") != secret_name
+                    ]
+
+                    if len(objects_obj.get("array", [])) < original_len:
+                        if not objects_obj["array"]:
+                            spc["properties"].pop("objects", None)
+                        else:
+                            spc["properties"]["objects"] = yaml.safe_dump(
+                                objects_obj, indent=6
+                            ).replace("\n- |", "\n    - |")
+
+                        spc_poller = (
+                            self.ssc_mgmt_client.azure_key_vault_secret_provider_classes.begin_create_or_update(
+                                resource_group_name=resource_group_name,
+                                azure_key_vault_secret_provider_class_name=spc["name"],
+                                resource=spc,
+                            )
+                        )
+                        wait_for_terminal_state(spc_poller, **kwargs)
+
+        return modified_secret_sync
 
     def find_existing_resources(
         self,

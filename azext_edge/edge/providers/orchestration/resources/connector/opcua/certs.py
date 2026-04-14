@@ -17,7 +17,7 @@ from knack.log import get_logger
 from rich.console import Console
 import yaml
 
-from ....common import CUSTOM_LOCATIONS_API_VERSION, EXTENSION_TYPE_OPS, X509FileExtension
+from ....common import CUSTOM_LOCATIONS_API_VERSION, EXTENSION_TYPE_OPS, KEYVAULT_URL, X509FileExtension
 from ...instances import SECRET_SYNC_RESOURCE_TYPE, Instances
 from .....orchestration.upgrade2 import calculate_config_delta
 from ......util.file_operations import read_file_content, validate_file_extension
@@ -39,7 +39,6 @@ OPCUA_TRUST_LIST_SECRET_SYNC_NAME = "aio-opc-ua-broker-trust-list"
 OPCUA_ISSUER_LIST_SECRET_SYNC_NAME = "aio-opc-ua-broker-issuer-list"
 OPCUA_CLIENT_CERT_SECRET_SYNC_NAME = "aio-opc-ua-broker-client-certificate"
 SERVICE_ACCOUNT_NAME = "aio-ssc-sa"
-KEYVAULT_URL = "https://{keyvaultName}.vault.azure.net/"
 SECRET_DELETE_MAX_RETRIES = 10
 SECRET_DELETE_RETRY_INTERVAL = 2
 DEFAULT_SECRET_EXPIRATION_DAYS = 180  # Default to 180 days for governance policy compliance

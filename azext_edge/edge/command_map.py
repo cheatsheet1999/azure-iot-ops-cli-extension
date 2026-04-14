@@ -60,6 +60,14 @@ def load_iotops_commands(self, _):
         cmd_group.show_command("list", "secretsync_list")
 
     with self.command_group(
+        "iot ops secretsync secret",
+        command_type=secretsync_resource_ops,
+    ) as cmd_group:
+        cmd_group.command("set", "secretsync_secret_set")
+        cmd_group.command("list", "secretsync_secret_list")
+        cmd_group.command("remove", "secretsync_secret_remove")
+
+    with self.command_group(
         "iot ops mgmt-actions",
         command_type=mgmt_actions_resource_ops,
     ) as cmd_group:

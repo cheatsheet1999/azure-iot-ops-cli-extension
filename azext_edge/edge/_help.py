@@ -2120,6 +2120,79 @@ def load_iotops_help():
     """
 
     helps[
+        "iot ops secretsync secret"
+    ] = """
+        type: group
+        short-summary: Manage individual secrets within SecretSync resources.
+    """
+
+    helps[
+        "iot ops secretsync secret set"
+    ] = """
+        type: command
+        short-summary: Set AKV secret mappings on a SecretSync resource.
+        long-summary: |
+            Resolves the instance's default secret provider class (SPC), verifies each AKV secret exists, adds each secret to the SPC's objects list, and creates or merges entries into the named SecretSync resource.
+
+            If the SecretSync already exists, new secret entries are merged into it. Existing entries with the same AKV secret name will have their target key updated.
+
+            The --secret-sync-name value becomes the K8s secret name. Consumers reference it via `<secret-sync-name>/<target-key>` for device endpoints, or just `<secret-sync-name>` for dataflow endpoints.
+
+        examples:
+        - name: Create a SecretSync for device endpoint x509 cert auth.
+          text: >
+            az iot ops secretsync secret set --instance myInstance -g myRG
+            --secret-sync-name my-certs
+            --secret-map my-tls-cert=certificate --secret-map my-tls-key=privateKey
+        - name: Add another secret to an existing SecretSync (idempotent merge).
+          text: >
+            az iot ops secretsync secret set --instance myInstance -g myRG
+            --secret-sync-name my-certs
+            --secret-map my-intermediate-cert=intermediateCerts
+        - name: Create a SecretSync for SASL-based dataflow endpoint.
+          text: >
+            az iot ops secretsync secret set --instance myInstance -g myRG
+            --secret-sync-name eventhub-sasl
+            --secret-map my-eh-user=username --secret-map my-eh-pass=password
+    """
+
+    helps[
+        "iot ops secretsync secret list"
+    ] = """
+        type: command
+        short-summary: List secrets within a SecretSync resource.
+
+        examples:
+        - name: List secrets in a specific SecretSync resource.
+          text: >
+            az iot ops secretsync secret list --instance myInstance -g myRG
+            --secret-sync-name my-certs
+    """
+
+    helps[
+        "iot ops secretsync secret remove"
+    ] = """
+        type: command
+        short-summary: Remove a specific secret from a SecretSync resource. If all secrets are removed, the SecretSync resource itself is automatically deleted.
+        long-summary: |
+            Removes the secret entry from the SecretSync's objectSecretMapping. If this is the last secret in the SecretSync, the entire SecretSync resource will be deleted since the ARM API does not allow a SecretSync with zero secret mappings.
+
+            Before removing the secret from the shared SPC, a ref-count check is performed across all SecretSyncs in the custom location. The SPC entry is only removed if no other SecretSync still references the same AKV secret. This prevents breaking other consumers of the shared SPC.
+
+            This command does NOT delete the secret from Azure Key Vault.
+
+        examples:
+        - name: Remove a secret from a SecretSync.
+          text: >
+            az iot ops secretsync secret remove --instance myInstance -g myRG
+            --secret-sync-name my-certs --secret-name my-tls-cert
+        - name: Remove a secret without confirmation prompt.
+          text: >
+            az iot ops secretsync secret remove --instance myInstance -g myRG
+            --secret-sync-name my-certs --secret-name my-tls-cert -y
+    """
+
+    helps[
         "iot ops mgmt-actions"
     ] = """
         type: group
