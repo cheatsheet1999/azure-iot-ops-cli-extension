@@ -36,11 +36,11 @@ from ....util.common import (
     url_safe_hash_phrase,
 )
 from ....util.queryable import Queryable
+from ....util.resource_graph import ResourceGraph
 from ..common import (
     CONTRIBUTOR_ROLE_ID,
     CUSTOM_LOCATIONS_API_VERSION,
     KEYVAULT_CLOUD_API_VERSION,
-    KEYVAULT_URL,
     IdentityUsageType,
     MANAGED_IDENTITY_API_VERSION,
 )
@@ -419,7 +419,6 @@ class Instances(Queryable):
                     "properties": {
                         "clientId": mi_user_assigned["properties"]["clientId"],
                         "keyvaultName": keyvault_resource_id_container.resource_name,
-                        "keyvaultResourceId": keyvault_resource_id_container.resource_id,
                         "tenantId": get_tenant_id(),
                     },
                     **spc_kwargs,
@@ -535,7 +534,6 @@ class Instances(Queryable):
             spc_name = spc["name"]
             spc_properties = spc.get("properties", {})
             keyvault_name = spc_properties["keyvaultName"]
-            keyvault_resource_id = spc_properties.get("keyvaultResourceId")
 
             # Parse secret_map into akv_name=target_key pairs
             secret_mappings = []
@@ -551,16 +549,27 @@ class Instances(Queryable):
                     )
                 secret_mappings.append({"akv_name": akv_name, "target_key": target_key})
 
-            # Step 2: Verify each AKV secret exists and detect encoding
-            keyvault_client = get_keyvault_client(subscription_id=self.default_subscription_id)
-            if keyvault_resource_id:
-                kv_resource = self.resource_client.resources.get_by_id(
-                    resource_id=keyvault_resource_id, api_version=KEYVAULT_CLOUD_API_VERSION
+            # Step 2: Resolve vault URL via Resource Graph (authoritative source, cloud-agnostic)
+            # Use ResourceGraph without subscription filter to search across all accessible subscriptions,
+            # since the Key Vault may reside in a different subscription than the IoT Operations instance.
+            graph = ResourceGraph(cmd=self.cmd)
+            kv_query_result = graph.query_resources(
+                query=(
+                    "Resources | where type =~ 'microsoft.keyvault/vaults'"
+                    f" | where name =~ '{keyvault_name}' | project vaultUri = properties.vaultUri, subscriptionId"
+                ),
+            )
+            kv_data = kv_query_result.get("data", [])
+            if not kv_data:
+                raise InvalidArgumentValueError(
+                    f"Key Vault '{keyvault_name}' not found. "
+                    "Ensure it exists and is accessible."
                 )
-                vault_url = kv_resource["properties"]["vaultUri"]
-            else:
-                # Fallback for instances where secretsync was enabled prior to this change
-                vault_url = KEYVAULT_URL.format(keyvaultName=keyvault_name)
+            kv_result = kv_data[0]
+            vault_url = kv_result["vaultUri"]
+            kv_subscription_id = kv_result["subscriptionId"]
+
+            keyvault_client = get_keyvault_client(subscription_id=kv_subscription_id)
             for mapping in secret_mappings:
                 try:
                     secret_response = keyvault_client.get_secret(
