@@ -1487,9 +1487,15 @@ def test_add_inbound_onvif_device_endpoint(
 
 
 @pytest.mark.parametrize("response_status", [200, 400])
-@pytest.mark.parametrize("username_ref, password_ref", [
-    (None, None),              # Anonymous auth
-    ("secretRef:username", "secretRef:password"),  # Username/Password auth
+@pytest.mark.parametrize("cert_ref, key_ref, intermediate_cert_ref, username_ref, password_ref", [
+    (None, None, None, None, None),              # Anonymous auth
+    (None, None, None, "secretRef:username", "secretRef:password"),  # Username/Password auth
+    ("cert-secret/certificate", None, None, None, None),  # Basic certificate auth
+    ("cert-secret/certificate", "cert-secret/privateKey", None, None, None),  # Certificate with key
+    ("cert-secret/certificate", None, "cert-secret/intermediateCerts", None, None),  # Certificate with intermediate
+    (
+        "cert-secret/certificate", "cert-secret/privateKey", "cert-secret/intermediateCerts", None, None
+    ),  # Full certificate chain
 ])
 @pytest.mark.parametrize("req", [
     {},  # Default values, no options specified
@@ -1512,6 +1518,7 @@ def test_add_inbound_onvif_device_endpoint(
         "security_mode": SecurityMode.signandencrypt.value,
         "run_asset_discovery": True,
         "sync_properties_into_state_store": True,
+        "shared": True,
         "endpoint_version": "1.0"
     },
     {   # Partial set of parameters
@@ -1530,6 +1537,9 @@ def test_add_inbound_onvif_device_endpoint(
 def test_add_inbound_opcua_device_endpoint(
     mocked_cmd,
     mocked_responses: responses,
+    cert_ref: Optional[str],
+    key_ref: Optional[str],
+    intermediate_cert_ref: Optional[str],
     username_ref: Optional[str],
     password_ref: Optional[str],
     req: dict,
@@ -1572,6 +1582,7 @@ def test_add_inbound_opcua_device_endpoint(
     security_mode = req.get("security_mode", None)
     run_asset_discovery = req.get("run_asset_discovery", False)
     sync_properties_into_state_store = req.get("sync_properties_into_state_store", False)
+    shared = req.get("shared", False)
 
     # Create original device record with no endpoints
     original_device = get_namespace_device_record(
@@ -1618,12 +1629,24 @@ def test_add_inbound_opcua_device_endpoint(
                 "securityMode": security_mode
             },
             "runAssetDiscovery": run_asset_discovery,
-            "syncPropertiesIntoStateStore": sync_properties_into_state_store
+            "syncPropertiesIntoStateStore": sync_properties_into_state_store,
+            "shared": shared
         })
     }
 
     # Set up authentication structure based on auth type
-    if username_ref and password_ref:
+    if cert_ref:
+        x509_credentials = {"certificateSecretName": cert_ref}
+        if key_ref:
+            x509_credentials["keySecretName"] = key_ref
+        if intermediate_cert_ref:
+            x509_credentials["intermediateCertificatesSecretName"] = intermediate_cert_ref
+
+        expected_endpoint["authentication"] = {
+            "method": ADRAuthModes.certificate.value,
+            "x509Credentials": x509_credentials
+        }
+    elif username_ref and password_ref:
         expected_endpoint["authentication"] = {
             "method": ADRAuthModes.userpass.value,
             "usernamePasswordCredentials": {
@@ -1690,6 +1713,9 @@ def test_add_inbound_opcua_device_endpoint(
                 instance_resource_group=instance_resource_group,
                 endpoint_name=endpoint_name,
                 endpoint_address=endpoint_address,
+                certificate_reference=cert_ref,
+                key_reference=key_ref,
+                intermediate_certificate_reference=intermediate_cert_ref,
                 username_reference=username_ref,
                 password_reference=password_ref,
                 replace=replace,
@@ -1706,6 +1732,9 @@ def test_add_inbound_opcua_device_endpoint(
         instance_resource_group=instance_resource_group,
         endpoint_name=endpoint_name,
         endpoint_address=endpoint_address,
+        certificate_reference=cert_ref,
+        key_reference=key_ref,
+        intermediate_certificate_reference=intermediate_cert_ref,
         username_reference=username_ref,
         password_reference=password_ref,
         replace=replace,
@@ -1734,6 +1763,7 @@ def test_add_inbound_opcua_device_endpoint(
     assert additional_config["keepAliveMilliseconds"] == keep_alive
     assert additional_config["runAssetDiscovery"] == run_asset_discovery
     assert additional_config["syncPropertiesIntoStateStore"] == sync_properties_into_state_store
+    assert additional_config["shared"] == shared
 
     # Validate defaults settings
     assert additional_config["defaults"]["publishingIntervalMilliseconds"] == publishing_interval

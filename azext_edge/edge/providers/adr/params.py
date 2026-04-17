@@ -1007,6 +1007,13 @@ def load_adr_arguments(self, _):
             arg_type=get_three_state_flag(),
             arg_group="Configuration",
         )
+        context.argument(
+            "shared",
+            options_list=["--shared"],
+            help="Whether the endpoint is shared across multiple connectors.",
+            arg_type=get_three_state_flag(),
+            arg_group="Configuration",
+        )
 
     with self.argument_context("iot ops ns device endpoint inbound add mqtt") as context:
         context.argument(
@@ -1842,6 +1849,13 @@ def load_adr_arguments(self, _):
             help=DEST_HELP_EVENT_GROUP_MQTT_ONLY,
             nargs="+",
         )
+        context.argument(
+            "opcua_event_condition_refresh_interval",
+            options_list=["--condition-refresh-int", "--cri"],
+            help="Interval in milliseconds used to request conditionRefresh on the OPC UA server "
+            "for the selected event notifiers in this group. Minimum: -1. Default: -1 (disabled).",
+            type=int,
+        )
 
     with self.argument_context("iot ops ns asset opcua event") as context:
         context.argument(
@@ -2017,6 +2031,13 @@ def load_adr_arguments(self, _):
         context.argument(
             "sampling_interval", options_list=["--sampling-interval", "--si"],
             help="Sampling interval in milliseconds.", type=int,
+        )
+        context.argument(
+            "condition_refresh",
+            options_list=["--condition-refresh", "--cr"],
+            help="If enabled, a ConditionRefresh is requested from the OPC UA server after subscription creation. "
+            "Set to false to opt-out of condition refresh for this event within a group that has it enabled.",
+            arg_type=get_three_state_flag(),
         )
 
     _register_export_import_args(["custom", "media"], "stream", json_yaml_only=True)

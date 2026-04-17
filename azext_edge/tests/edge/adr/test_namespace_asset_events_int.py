@@ -5,6 +5,7 @@
 # ----------------------------------------------------------------------------------------------
 
 from typing import List
+import json
 import pytest
 
 from ...generators import generate_random_string
@@ -200,18 +201,20 @@ def test_namespace_opcua_asset_event_lifecycle_operations(asset_factory):
     publishing_interval = 500
     queue_size = 10
     start_instance = "ns=3;i=3001"
+    condition_refresh_interval = 30000  # milliseconds
 
     event_result = run(
         f"az iot ops ns asset opcua event-group add --asset {asset_name} --instance {instance_name} "
         f"-g {resource_group} --name {event_group_name} "
         f"--destination {event_destinations} --publish-int {publishing_interval} "
-        f"--queue-size {queue_size} --start-inst \"{start_instance}\""
+        f"--queue-size {queue_size} --start-inst \"{start_instance}\" "
+        f"--condition-refresh-int {condition_refresh_interval}"
     )
 
     assert_event_properties(
         event_result,
         name=event_group_name,
-        opcua_configuration={"startInstance": start_instance},
+        opcua_configuration={"startInstance": start_instance, "conditionRefreshInterval": condition_refresh_interval},
     )
 
     # 2. LIST EVENT GROUPS
@@ -239,17 +242,20 @@ def test_namespace_opcua_asset_event_lifecycle_operations(asset_factory):
     updated_data_source = "ns=3;i=1000"
     updated_publishing_interval = 1000
     updated_queue_size = 15
+    updated_condition_refresh_interval = 60000  # milliseconds
 
     updated_event = run(
         f"az iot ops ns asset opcua event-group update --asset {asset_name} --instance {instance_name} "
         f"-g {resource_group} --name {event_group_name} --data-source \"{updated_data_source}\" "
         f"--publish-int {updated_publishing_interval} --queue-size {updated_queue_size} "
+        f"--condition-refresh-int {updated_condition_refresh_interval}"
     )
 
     assert_event_properties(
         updated_event,
         name=event_group_name,
         data_source=updated_data_source,
+        opcua_configuration={"conditionRefreshInterval": updated_condition_refresh_interval},
     )
 
     # 5. CREATE EVENT GROUP WITH REPLACE
@@ -266,7 +272,30 @@ def test_namespace_opcua_asset_event_lifecycle_operations(asset_factory):
         data_source=replaced_data_source
     )
 
-    # 6. REMOVE EVENT GROUP
+    # 6. ADD INDIVIDUAL EVENT WITH CONDITION REFRESH
+    event_name = f"event-{generate_random_string(6, force_lower=True)}"
+    event_result = run(
+        f"az iot ops ns asset opcua event add --asset {asset_name} --instance {instance_name} "
+        f"-g {resource_group} --event-group {event_group_name} --name {event_name} "
+        "--condition-refresh"
+    )
+    assert isinstance(event_result, list)
+    created_event = next((ev for ev in event_result if ev["name"] == event_name), None)
+    assert created_event is not None
+    assert json.loads(created_event["eventConfiguration"])["conditionRefresh"] is True
+
+    # 7. REMOVE INDIVIDUAL EVENT
+    run(
+        f"az iot ops ns asset opcua event remove --asset {asset_name} --instance {instance_name} "
+        f"-g {resource_group} --event-group {event_group_name} --name {event_name}"
+    )
+    remaining_events = run(
+        f"az iot ops ns asset opcua event list --asset {asset_name} --instance {instance_name} "
+        f"-g {resource_group} --event-group {event_group_name}"
+    )
+    assert not any(ev["name"] == event_name for ev in remaining_events)
+
+    # 8. REMOVE EVENT GROUP
     run(
         f"az iot ops ns asset opcua event-group remove --asset {asset_name} --instance {instance_name} "
         f"-g {resource_group} --name {event_group_name}"

@@ -318,6 +318,10 @@ def add_inbound_opcua_device_endpoint(
     security_mode: Optional[str] = None,
     run_asset_discovery: Optional[bool] = False,
     sync_properties_into_state_store: Optional[bool] = False,
+    shared: Optional[bool] = False,
+    certificate_reference: Optional[str] = None,
+    key_reference: Optional[str] = None,
+    intermediate_certificate_reference: Optional[str] = None,
     password_reference: Optional[str] = None,
     username_reference: Optional[str] = None,
     replace: Optional[bool] = False,
@@ -331,6 +335,9 @@ def add_inbound_opcua_device_endpoint(
         endpoint_type=DeviceEndpointType.OPCUA.value,
         endpoint_address=endpoint_address,
         endpoint_version=endpoint_version,
+        certificate_reference=certificate_reference,
+        key_reference=key_reference,
+        intermediate_certificate_reference=intermediate_certificate_reference,
         password_reference=password_reference,
         username_reference=username_reference,
         application_name=application_name,
@@ -351,6 +358,7 @@ def add_inbound_opcua_device_endpoint(
         security_mode=security_mode,
         run_asset_discovery=run_asset_discovery,
         sync_properties_into_state_store=sync_properties_into_state_store,
+        shared=shared,
         replace=replace,
         **kwargs
     )
@@ -2002,6 +2010,7 @@ def add_namespace_opcua_asset_event_group(
     opcua_event_start_instance: Optional[str] = None,
     opcua_event_filter_type: Optional[str] = None,
     opcua_event_filter_clauses: Optional[List[List[str]]] = None,
+    opcua_event_condition_refresh_interval: Optional[int] = None,
     replace: Optional[bool] = False,
     **kwargs
 ) -> dict:
@@ -2018,6 +2027,7 @@ def add_namespace_opcua_asset_event_group(
         opcua_event_start_instance=opcua_event_start_instance,
         opcua_event_filter_type=opcua_event_filter_type,
         opcua_event_filter_clauses=opcua_event_filter_clauses,
+        opcua_event_condition_refresh_interval=opcua_event_condition_refresh_interval,
         replace=replace,
         **kwargs
     )
@@ -2138,6 +2148,7 @@ def update_namespace_opcua_asset_event_group(
     opcua_event_start_instance: Optional[str] = None,
     opcua_event_filter_type: Optional[str] = None,
     opcua_event_filter_clauses: Optional[List[List[str]]] = None,
+    opcua_event_condition_refresh_interval: Optional[int] = None,
     **kwargs
 ) -> dict:
     return NamespaceAssets(cmd).update_event_group(
@@ -2153,6 +2164,7 @@ def update_namespace_opcua_asset_event_group(
         opcua_event_start_instance=opcua_event_start_instance,
         opcua_event_filter_type=opcua_event_filter_type,
         opcua_event_filter_clauses=opcua_event_filter_clauses,
+        opcua_event_condition_refresh_interval=opcua_event_condition_refresh_interval,
         **kwargs
     )
 
@@ -2261,6 +2273,7 @@ def add_namespace_opcua_asset_event_group_event(
     sampling_interval: Optional[int] = None,
     opcua_event_filter_type: Optional[str] = None,
     opcua_event_filter_clauses: Optional[List[List[str]]] = None,
+    condition_refresh: Optional[bool] = None,
     replace: Optional[bool] = False,
     **kwargs
 ) -> dict:
@@ -2276,6 +2289,7 @@ def add_namespace_opcua_asset_event_group_event(
         sampling_interval=sampling_interval,
         opcua_event_filter_type=opcua_event_filter_type,
         opcua_event_filter_clauses=opcua_event_filter_clauses,
+        condition_refresh=condition_refresh,
         replace=replace,
         **kwargs
     )

@@ -19,6 +19,11 @@
             "type": "string",
             "default": null
         },
+        "conditionRefreshInterval": {
+            "type": "integer",
+            "minimum": -1,
+            "default": -1
+        },
         "eventFilter": {
             "type": "object",
             "properties": {

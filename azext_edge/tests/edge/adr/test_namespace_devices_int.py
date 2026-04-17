@@ -167,6 +167,9 @@ def test_namespace_device_lifecycle_operations(require_namespace_init, tracked_r
     sub_max_items = 10
     security_policy = "Basic256Sha256"
     security_mode = "signAndEncrypt"
+    certificate_reference = "secretRef:certificate"
+    key_reference = "secretRef:privateKey"
+    intermediate_cert_reference = "secretRef:intermediateCerts"
 
     result = run(
         f"az iot ops ns device endpoint inbound add opcua --device {device_name_2} "
@@ -180,7 +183,9 @@ def test_namespace_device_lifecycle_operations(require_namespace_init, tracked_r
         f"--session-backoff {reconnect_exponential_backoff} "
         f"--session-tracing --subscription-lifetime {sub_lifetime} "
         f"--subscription-max-items {sub_max_items} --accept-certs "
-
+        "--shared "
+        f"--cert-ref {certificate_reference} --key-ref {key_reference} "
+        f"--intermediate-cert-ref {intermediate_cert_reference} "
     )
     assert_namespace_device_endpoint_props(
         result,
@@ -204,7 +209,11 @@ def test_namespace_device_lifecycle_operations(require_namespace_init, tracked_r
         enable_tracing=True,
         run_asset_discovery=True,
         sync_properties_into_state_store=True,
-        authentication_method="Anonymous",
+        shared=True,
+        authentication_method="Certificate",
+        certificate_reference=certificate_reference,
+        key_reference=key_reference,
+        intermediate_certificate_reference=intermediate_cert_reference,
     )
 
     # Add Custom endpoint
@@ -580,6 +589,8 @@ def assert_namespace_device_opcua_props(
         assert result_config["runAssetDiscovery"] == expected["run_asset_discovery"]
     if "sync_properties_into_state_store" in expected:
         assert result_config["syncPropertiesIntoStateStore"] == expected["sync_properties_into_state_store"]
+    if "shared" in expected:
+        assert result_config["shared"] == expected["shared"]
     # Default
     if "publishing_interval" in expected:
         assert result_config["defaults"]["publishingIntervalMilliseconds"] == expected["publishing_interval"]

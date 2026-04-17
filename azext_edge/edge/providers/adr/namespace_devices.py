@@ -538,6 +538,7 @@ def _process_opcua_configuration(
     security_mode: Optional[str] = None,
     run_asset_discovery: Optional[bool] = False,
     sync_properties_into_state_store: Optional[bool] = False,
+    shared: Optional[bool] = False,
     **_
 ) -> str:
     """
@@ -576,7 +577,8 @@ def _process_opcua_configuration(
             "securityMode": security_mode
         },
         "runAssetDiscovery": run_asset_discovery,
-        "syncPropertiesIntoStateStore": sync_properties_into_state_store
+        "syncPropertiesIntoStateStore": sync_properties_into_state_store,
+        "shared": shared
     }
 
     # Validate the configuration against the schema

@@ -1,18 +1,20 @@
 {
     "$schema": "http://json-schema.org/draft-07/schema#",
-    "$id": "https://azure-iot-operations/schemas/assetendpointprofile/additionalconfiguration/opcua/1.1.0.json",
-    "title": "AIO OPC UA Asset Endpoint Profile Additional Configuration Schema",
-    "description": "Schema for the additional configuration of OPC UA asset endpoint profile in Azure Industrial Operations",
+    "$id": "https://azure-iot-operations/schemas/assetendpointprofile/additionalconfiguration/opcua/1.5.0.json",
+    "title": "AIO OPC UA Device Inbound Endpoint Additional Configuration Schema",
+    "description": "Schema for the additional configuration of OPC UA inbound endpoint of a device in Azure Industrial Operations",
     "type": "object",
     "properties": {
         "applicationName": {
             "type": "string",
-            "default": "OPC UA Broker"
+            "default": "OPC UA Broker",
+            "description": "Name that is used if AIO OPC UA Connector needs to create own (self-signed) certificate"
         },
         "keepAliveMilliseconds": {
             "type": "integer",
             "minimum": 0,
-            "default": 10000
+            "default": 10000,
+            "description": "Keep alive interval, to maintain session between OPC UA server and AIO OPC UA Connector"
         },
         "defaults": {
             "type": "object",
@@ -20,22 +22,26 @@
                 "publishingIntervalMilliseconds": {
                     "type": "integer",
                     "minimum": -1,
-                    "default": 1000
+                    "default": 1000,
+                    "description": "Default interval used to send value changes from OPC UA server to AIO OPC UA Connector"
                 },
                 "samplingIntervalMilliseconds": {
                     "type": "integer",
                     "minimum": -1,
-                    "default": 1000
+                    "default": 1000,
+                    "description": "Default interval used to sample values of observed datapoints on the OPC UA server"
                 },
                 "queueSize": {
                     "type": "integer",
                     "minimum": 0,
-                    "default": 1
+                    "default": 1,
+                    "description": "Default size of the queue that contains datapoint value changes on the OPC UA server"
                 },
                 "keyFrameCount": {
                     "type": "integer",
                     "minimum": 0,
-                    "default": 0
+                    "default": 0,
+                    "description": "Default multiplier of the `publishing interval`, defines which value change should be a keyframe (contains all values, even if they haven't changed)"
                 }
             }
         },
@@ -45,26 +51,31 @@
                 "timeoutMilliseconds": {
                     "type": "integer",
                     "minimum": 0,
-                    "default": 60000
+                    "default": 60000,
+                    "description": "Time after which the session is closed if there was no message from the OPC UA server"
                 },
                 "keepAliveIntervalMilliseconds": {
                     "type": "integer",
                     "minimum": 0,
-                    "default": 10000
+                    "default": 10000,
+                    "description": "Keep alive interval, to maintain session between OPC UA server and AIO OPC UA Connector"
                 },
                 "reconnectPeriodMilliseconds": {
                     "type": "integer",
                     "minimum": 0,
-                    "default": 2000
+                    "default": 2000,
+                    "description": "Default waiting time used in between session reconnects"
                 },
                 "reconnectExponentialBackOffMilliseconds": {
                     "type": "integer",
                     "minimum": -1,
-                    "default": 10000
+                    "default": 10000,
+                    "description": "Exponential backoff time used during session reconnects"
                 },
                 "enableTracingHeaders": {
                     "type": "boolean",
-                    "default": false
+                    "default": false,
+                    "description": "Send W3C tracing information along with OPC UA service calls"
                 }
             }
         },
@@ -74,12 +85,14 @@
                 "maxItems": {
                     "type": "integer",
                     "minimum": 1,
-                    "default": 1000
+                    "default": 1000,
+                    "description": "Maximum number of datapoints/events added to one subscription"
                 },
                 "lifeTimeMilliseconds": {
                     "type": "integer",
                     "minimum": 0,
-                    "default": 60000
+                    "default": 60000,
+                    "description": "Time after which the subscription is closed if there was no message from the OPC UA server"
                 }
             }
         },
@@ -88,7 +101,8 @@
             "properties": {
                 "autoAcceptUntrustedServerCertificates": {
                     "type": "boolean",
-                    "default": false
+                    "default": false,
+                    "description": "Automatically accept untrusted server certificates"
                 },
                 "securityPolicy": {
                     "type": [
@@ -104,7 +118,8 @@
                         "http://opcfoundation.org/UA/SecurityPolicy#Aes256_Sha256_RsaPss",
                         null
                     ],
-                    "default": null
+                    "default": null,
+                    "description": "Security policy used to establish secure channel with the OPC UA server"
                 },
                 "securityMode": {
                     "type": [
@@ -117,13 +132,32 @@
                         "signAndEncrypt",
                         null
                     ],
+                    "default": null,
+                    "description": "Security mode used to communicate within secure channel with the OPC UA server"
+                },
+                "privateKeyPasswordSecretName": {
+                    "type": [
+                        "string",
+                        "null"
+                    ],
                     "default": null
                 }
             }
         },
         "runAssetDiscovery": {
             "type": "boolean",
-            "default": false
+            "default": false,
+            "description": "Automatically run OPC UA asset discovery every 10min"
+        },
+        "syncPropertiesIntoStateStore": {
+            "type": "boolean",
+            "default": false,
+            "description": "Read properties of datapoints and write them into AIO MQTT Distributed State Store"
+        },
+        "shared": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether the endpoint profile is shared across multiple connectors"
         }
     }
 }

@@ -102,6 +102,12 @@ def generate_event_group(
         "opcua_event_publishing_interval": 1500,
         "opcua_event_queue_size": 100,
     }),
+    # OPCUA asset dataset with conditionRefreshInterval
+    ("opcua", add_namespace_opcua_asset_event_group, {
+        "opcua_event_publishing_interval": 1500,
+        "opcua_event_queue_size": 100,
+        "opcua_event_condition_refresh_interval": 60000,
+    }),
     # OPCUA asset dataset with minimal config
     ("opcua", add_namespace_opcua_asset_event_group, {}),
     # ONVIF asset dataset with minimal config
@@ -166,6 +172,10 @@ def test_add_namespace_asset_event_group(
                 opcua_config["publishingInterval"] = config_params["opcua_event_publishing_interval"]
             if "opcua_event_queue_size" in config_params:
                 opcua_config["queueSize"] = config_params["opcua_event_queue_size"]
+            if "opcua_event_condition_refresh_interval" in config_params:
+                opcua_config["conditionRefreshInterval"] = config_params[
+                    "opcua_event_condition_refresh_interval"
+                ]
             expected_group["eventGroupConfiguration"] = json.dumps(opcua_config)
         elif asset_type == "custom":
             expected_group["eventGroupConfiguration"] = config_params.get("event_custom_configuration")
@@ -693,6 +703,11 @@ def test_remove_namespace_asset_event_group(
         "opcua_event_publishing_interval": 2000,
         "opcua_event_queue_size": 10,
     }),
+    # OPCUA asset event with conditionRefreshInterval
+    ("opcua", update_namespace_opcua_asset_event_group, {
+        "opcua_event_publishing_interval": 2000,
+        "opcua_event_condition_refresh_interval": 30000,
+    }),
     # ONVIF asset event
     ("onvif", update_namespace_onvif_asset_event_group, {}),
     # SSE asset event group (event-driven, no sampling intervals)
@@ -778,6 +793,10 @@ def test_update_namespace_asset_event_group(
                 opcua_config["publishingInterval"] = unique_reqs.get("opcua_event_publishing_interval")
             if "opcua_event_queue_size" in unique_reqs:
                 opcua_config["queueSize"] = unique_reqs.get("opcua_event_queue_size")
+            if "opcua_event_condition_refresh_interval" in unique_reqs:
+                opcua_config["conditionRefreshInterval"] = unique_reqs.get(
+                    "opcua_event_condition_refresh_interval"
+                )
             expected_group["eventGroupConfiguration"] = json.dumps(opcua_config)
 
     # Update destinations if specified
@@ -899,6 +918,18 @@ def test_update_namespace_asset_event_group(
         "opcua",
         add_namespace_opcua_asset_event_group_event,
         {"queue_size": 10, "sampling_interval": 500}
+    ),
+    # OPCUA asset event point with conditionRefresh opt-out
+    (
+        "opcua",
+        add_namespace_opcua_asset_event_group_event,
+        {"queue_size": 10, "sampling_interval": 500, "condition_refresh": False}
+    ),
+    # OPCUA asset event point with conditionRefresh enabled
+    (
+        "opcua",
+        add_namespace_opcua_asset_event_group_event,
+        {"condition_refresh": True}
     ),
     # OPCUA asset event point with minimal parameters
     (
@@ -1033,6 +1064,8 @@ def test_add_namespace_asset_event_group_event(
             config["queueSize"] = config_params["queue_size"]
         if "sampling_interval" in config_params:
             config["samplingInterval"] = config_params["sampling_interval"]
+        if "condition_refresh" in config_params:
+            config["conditionRefresh"] = config_params["condition_refresh"]
         if config:
             expected_event["eventConfiguration"] = json.dumps(config)
     elif asset_type == "onvif":

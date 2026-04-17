@@ -1519,6 +1519,7 @@ class NamespaceAssets(Queryable):
         # OPCUA specific
         queue_size: Optional[int] = None,
         sampling_interval: Optional[int] = None,
+        condition_refresh: Optional[bool] = None,
         event_destinations: Optional[List[dict]] = None,
         type_ref: Optional[str] = None,
         replace: bool = False,
@@ -1551,7 +1552,8 @@ class NamespaceAssets(Queryable):
             custom_configuration=custom_configuration,
             event_destinations=event_destinations,
             queue_size=queue_size,
-            sampling_interval=sampling_interval
+            sampling_interval=sampling_interval,
+            condition_refresh=condition_refresh,
         )
         remaining_events.append(event)
         event_group["events"] = remaining_events
@@ -2773,7 +2775,8 @@ def _create_event(
     queue_size: Optional[int] = None,
     sampling_interval: Optional[int] = None,
     custom_configuration: Optional[str] = None,
-    event_destinations: Optional[List[List[str]]] = None
+    event_destinations: Optional[List[List[str]]] = None,
+    condition_refresh: Optional[bool] = None,
 ) -> dict:
     """Helper function to create an event dictionary."""
     event = {
@@ -2798,6 +2801,8 @@ def _create_event(
         additional_configuration["queueSize"] = queue_size
     if sampling_interval is not None:
         additional_configuration["samplingInterval"] = sampling_interval
+    if condition_refresh is not None:
+        additional_configuration["conditionRefresh"] = condition_refresh
     if additional_configuration:
         from .specs import NAMESPACE_ASSET_OPCUA_DATAPOINT_CONFIGURATION_SCHEMA
         ensure_schema_structure(
@@ -3022,6 +3027,7 @@ def _process_opcua_event_configurations_v2(
     opcua_event_start_instance: Optional[str] = None,
     opcua_event_filter_type: Optional[str] = None,
     opcua_event_filter_clauses: Optional[List[List[str]]] = None,  # path (req), type, field
+    opcua_event_condition_refresh_interval: Optional[int] = None,
     **_
 ) -> str:
     from .specs import NAMESPACE_ASSET_OPCUA_EVENT_CONFIGURATION_SCHEMA_V2
@@ -3033,6 +3039,8 @@ def _process_opcua_event_configurations_v2(
         result["queueSize"] = opcua_event_queue_size
     if opcua_event_start_instance is not None:
         result["startInstance"] = opcua_event_start_instance
+    if opcua_event_condition_refresh_interval is not None:
+        result["conditionRefreshInterval"] = opcua_event_condition_refresh_interval
 
     if opcua_event_filter_type or opcua_event_filter_clauses:
         result["eventFilter"] = {}

@@ -14,6 +14,10 @@
             "type": "integer",
             "minimum": 0,
             "default": 1
+        },
+        "conditionRefresh": {
+            "type": "boolean",
+            "default": false
         }
     }
 }
