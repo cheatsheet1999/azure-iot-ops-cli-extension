@@ -1582,9 +1582,10 @@ class MgmtActions(Queryable):
         SystemAssigned MI; when mi_resource is provided, a UserAssigned MI is
         configured instead using clientId and tenantId from the resolved UAMI resource.
 
-        When the endpoint already exists, compares host and authentication against the
-        desired state. If either differs (e.g., re-enabling with a different EG namespace
-        or switching between SAMI/UAMI), the endpoint is updated via PUT.
+        When the endpoint already exists, compares host, authentication, and
+        clientIdPrefix against the desired state. If any differ (e.g., re-enabling with
+        a different EG namespace, switching between SAMI/UAMI, or a stale/missing
+        clientIdPrefix), the endpoint is updated via PUT.
         """
         endpoint_name = get_mgmt_actions_resource_name("eg", instance_resource_id)
 
@@ -1601,11 +1602,13 @@ class MgmtActions(Queryable):
             existing_mqtt = existing.get("properties", {}).get("mqttSettings", {})
             existing_host = existing_mqtt.get("host", "")
             existing_auth = existing_mqtt.get("authentication", {})
+            existing_client_id_prefix = existing_mqtt.get("clientIdPrefix", "")
 
-            # Compare host and auth — update if either differs
+            # Compare host, auth, and clientIdPrefix — update if any differ
             host_matches = existing_host == eg_ctx.mqtt_hostname
             auth_matches = existing_auth == desired_authentication
-            if host_matches and auth_matches:
+            client_id_prefix_matches = existing_client_id_prefix == instance_name
+            if host_matches and auth_matches and client_id_prefix_matches:
                 logger.info(
                     "Dataflow endpoint '%s' already exists on instance '%s' with matching configuration.",
                     endpoint_name,
@@ -1614,10 +1617,12 @@ class MgmtActions(Queryable):
                 return {"name": endpoint_name, "authentication": existing_auth, "exists": True}
 
             logger.info(
-                "Dataflow endpoint '%s' exists but configuration differs (host_match=%s, auth_match=%s). Updating.",
+                "Dataflow endpoint '%s' exists but configuration differs "
+                "(host_match=%s, auth_match=%s, client_id_prefix_match=%s). Updating.",
                 endpoint_name,
                 host_matches,
                 auth_matches,
+                client_id_prefix_matches,
             )
         except ResourceNotFoundError:
             existing = None
@@ -1628,6 +1633,7 @@ class MgmtActions(Queryable):
                 "endpointType": MQTT_ENDPOINT_TYPE,
                 "mqttSettings": {
                     "host": eg_ctx.mqtt_hostname,
+                    "clientIdPrefix": instance_name,
                     "authentication": desired_authentication,
                     "tls": {
                         "mode": "Enabled",
