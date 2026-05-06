@@ -6,6 +6,7 @@
 
 from .brokers import Brokers
 from .clusters import ConnectedClusters
+from .dataflow_graphs import DataFlowGraphs
 from .dataflows import DataFlowEndpoints, DataFlowProfiles
 from .instances import Instances
 from .registryendpoints import RegistryEndpoints
@@ -17,6 +18,7 @@ __all__ = [
     "Brokers",
     "ConnectedClusters",
     "DataFlowEndpoints",
+    "DataFlowGraphs",
     "DataFlowProfiles",
     "Instances",
     "RegistryEndpoints",

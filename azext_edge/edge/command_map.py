@@ -12,6 +12,7 @@ from azure.cli.core.commands import CliCommandType
 schema_resource_ops = CliCommandType(operations_tmpl="azext_edge.edge.commands_schema#{}")
 mq_resource_ops = CliCommandType(operations_tmpl="azext_edge.edge.commands_mq#{}")
 dataflow_resource_ops = CliCommandType(operations_tmpl="azext_edge.edge.commands_dataflow#{}")
+dataflowgraph_resource_ops = CliCommandType(operations_tmpl="azext_edge.edge.commands_dataflowgraph#{}")
 registry_endpoint_resource_ops = CliCommandType(operations_tmpl="azext_edge.edge.commands_registry_endpoints#{}")
 edge_resource_ops = CliCommandType(operations_tmpl="azext_edge.edge.commands_edge#{}")
 secretsync_resource_ops = CliCommandType(operations_tmpl="azext_edge.edge.commands_secretsync#{}")
@@ -145,6 +146,15 @@ def load_iotops_commands(self, _):
         cmd_group.command("list", "list_dataflows")
         cmd_group.command("apply", "apply_dataflow")
         cmd_group.command("delete", "delete_dataflow")
+
+    with self.command_group(
+        "iot ops dataflowgraph",
+        command_type=dataflowgraph_resource_ops,
+    ) as cmd_group:
+        cmd_group.show_command("show", "show_dataflow_graph")
+        cmd_group.command("list", "list_dataflow_graphs")
+        cmd_group.command("apply", "apply_dataflow_graph")
+        cmd_group.command("delete", "delete_dataflow_graph")
 
     with self.command_group(
         "iot ops dataflow profile",

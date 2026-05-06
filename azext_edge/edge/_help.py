@@ -747,6 +747,121 @@ def load_iotops_help():
     """
 
     helps[
+        "iot ops dataflowgraph"
+    ] = """
+        type: group
+        short-summary: DataflowGraph management.
+    """
+
+    helps[
+        "iot ops dataflowgraph apply"
+    ] = """
+        type: command
+        short-summary: Create or replace a DataflowGraph associated with a dataflow profile.
+        long-summary: |
+          An example of the config file format is as follows:
+
+          ```
+          {
+            "mode": "Enabled",
+            "nodes": [
+              {
+                "name": "source-mqtt",
+                "nodeType": "Source",
+                "sourceSettings": {
+                  "endpointRef": "default-broker",
+                  "dataSources": ["sensors/temperature/#"]
+                }
+              },
+              {
+                "name": "dest-broker",
+                "nodeType": "Destination",
+                "destinationSettings": {
+                  "endpointRef": "my-kafka-endpoint",
+                  "dataDestination": "telemetry/temperature"
+                }
+              },
+              {
+                "name": "dest-otel",
+                "nodeType": "Destination",
+                "destinationSettings": {
+                  "endpointRef": "my-otel-endpoint",
+                  "dataDestination": "telemetry/all"
+                }
+              },
+              {
+                "name": "graph-processor",
+                "nodeType": "Graph",
+                "graphSettings": {
+                  "registryEndpointRef": "my-registry-endpoint",
+                  "artifact": "my-processing-module:1.0.0"
+                }
+              }
+            ],
+            "nodeConnections": [
+              { "from": { "name": "source-mqtt" }, "to": { "name": "graph-processor" } },
+              { "from": { "name": "graph-processor" }, "to": { "name": "dest-broker" } },
+              { "from": { "name": "graph-processor" }, "to": { "name": "dest-otel" } }
+            ]
+          }
+          ```
+
+          The above example defines a graph with an MQTT source flowing through a Graph processing
+          node that fans out to a Kafka destination and an OpenTelemetry destination. Graph nodes
+          reference an artifact (format: `<name>:<version>`) from a registry endpoint.
+          Supported nodeTypes are: Source, Destination, and Graph. Data flow graphs support only
+          MQTT, Kafka, and OpenTelemetry endpoints. The file can also be the full ARM resource
+          wrapper (properties is auto-extracted). extendedLocation is always auto-populated from
+          --instance and -g and must not be included in the file.
+
+          When used with apply the above content will create or replace a target DataflowGraph resource.
+
+        examples:
+        - name: Create or replace a DataflowGraph 'mygraph' associated with a profile 'myprofile' using a config file.
+          text: >
+            az iot ops dataflowgraph apply -n mygraph -p myprofile -i myinstance -g myresourcegroup --config-file /path/to/graph/config.json
+    """
+
+    helps[
+        "iot ops dataflowgraph delete"
+    ] = """
+        type: command
+        short-summary: Delete a DataflowGraph associated with a dataflow profile.
+
+        examples:
+        - name: Delete a DataflowGraph 'mygraph' associated with a profile 'myprofile'.
+          text: >
+            az iot ops dataflowgraph delete -n mygraph -p myprofile -i mycluster-ops-instance -g myresourcegroup
+        - name: Delete a DataflowGraph 'mygraph' without a confirmation prompt.
+          text: >
+            az iot ops dataflowgraph delete -n mygraph -p myprofile -i mycluster-ops-instance -g myresourcegroup -y
+    """
+
+    helps[
+        "iot ops dataflowgraph show"
+    ] = """
+        type: command
+        short-summary: Show details of a DataflowGraph associated with a dataflow profile.
+
+        examples:
+        - name: Show details of a DataflowGraph 'mygraph' associated with a profile 'myprofile'.
+          text: >
+            az iot ops dataflowgraph show -n mygraph -p myprofile -i mycluster-ops-instance -g myresourcegroup
+    """
+
+    helps[
+        "iot ops dataflowgraph list"
+    ] = """
+        type: command
+        short-summary: List DataflowGraphs associated with a dataflow profile.
+
+        examples:
+        - name: Enumerate DataflowGraphs associated with the profile 'myprofile'.
+          text: >
+            az iot ops dataflowgraph list -p myprofile -i mycluster-ops-instance -g myresourcegroup
+    """
+
+    helps[
         "iot ops registry"
     ] = """
         type: group
