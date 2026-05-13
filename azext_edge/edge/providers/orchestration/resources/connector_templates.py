@@ -1043,16 +1043,30 @@ class ConnectorTemplates(Queryable):
 
         # Extract image settings from metadata
         registry, image_name = self._split_image_reference(connector_metadata_ref)
-        image_tag = metadata.get("version", "")
+        image_settings = metadata.get("imageConfigurationSettings", {})
+
+        # Build tagDigestSettings: prefer tag, then digest, then fall back to version
+        if "tag" in image_settings:
+            tag_digest_settings = {
+                "tagDigestType": "Tag",
+                "tag": image_settings["tag"]
+            }
+        elif "digest" in image_settings:
+            tag_digest_settings = {
+                "tagDigestType": "Digest",
+                "digest": image_settings["digest"]
+            }
+        else:
+            tag_digest_settings = {
+                "tagDigestType": "Tag",
+                "tag": metadata.get("version", "")
+            }
 
         # Build image configuration settings
         # API expects imageName WITHOUT registry reference
         image_config_settings = {
             "imageName": image_name,
-            "tagDigestSettings": {
-                "tagDigestType": "Tag",
-                "tag": image_tag
-            }
+            "tagDigestSettings": tag_digest_settings
         }
 
         # Add registry settings if we have a registry
