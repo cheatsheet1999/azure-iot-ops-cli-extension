@@ -7,11 +7,18 @@
 import json
 from typing import Protocol, Dict
 
+from azure.cli.core.azclierror import InvalidArgumentValueError
+
 from ....util import read_file_content
 
 
 def get_file_config(file_path: str) -> dict:
-    config = json.loads(read_file_content(file_path=file_path))
+    try:
+        config = json.loads(read_file_content(file_path=file_path))
+    except json.JSONDecodeError as e:
+        raise InvalidArgumentValueError(
+            f"Failed to parse config file provided via '--config-file' as JSON: {file_path}: {e}"
+        ) from e
     if "properties" in config:
         config = config["properties"]
     return config

@@ -195,6 +195,26 @@ def test_dataflow_graph_list(mocked_cmd, mocked_responses: responses, records: i
 # ---------------------------------------------------------------------------
 
 
+def test_dataflow_graph_apply_invalid_json_config(
+    mocked_cmd,
+    mocked_get_file_config: Mock,
+):
+    mocked_get_file_config.return_value = "bad json {"
+
+    with pytest.raises(InvalidArgumentValueError) as exc:
+        apply_dataflow_graph(
+            cmd=mocked_cmd,
+            dataflow_graph_name=generate_random_string(),
+            profile_name=generate_random_string(),
+            instance_name=generate_random_string(),
+            resource_group_name=generate_random_string(),
+            config_file="config.json",
+        )
+
+    assert "--config-file" in exc.value.error_msg
+    assert "config.json" in exc.value.error_msg
+
+
 @pytest.mark.parametrize(
     "scenario",
     [
@@ -287,6 +307,7 @@ def test_dataflow_graph_apply(
     mocked_get_file_config: Mock,
     scenario: dict,
 ):
+
     graph_name = generate_random_string()
     profile_name = generate_random_string()
     instance_name = "myinstance"
