@@ -794,7 +794,11 @@ def load_iotops_help():
                 "nodeType": "Graph",
                 "graphSettings": {
                   "registryEndpointRef": "my-registry-endpoint",
-                  "artifact": "my-processing-module:1.0.0"
+                  "artifact": "my-processing-module:1.0.0",
+                  "configuration": [
+                    { "key": "paramName", "value": "paramValue" },
+                    { "key": "anotherParam", "value": "anotherValue" }
+                  ]
                 }
               }
             ],
@@ -808,7 +812,11 @@ def load_iotops_help():
 
           The above example defines a graph with an MQTT source flowing through a Graph processing
           node that fans out to a Kafka destination and an OpenTelemetry destination. Graph nodes
-          reference an artifact (format: `<name>:<version>`) from a registry endpoint.
+          reference an artifact (format: `<name>:<version>`) from a registry endpoint. The
+          example above includes graphSettings.configuration only to illustrate the format when
+          an artifact requires configuration parameters; in that case, supply them as a list of
+          {"key", "value"} string pairs. Omit graphSettings.configuration entirely when no
+          configuration is needed.
           Supported nodeTypes are: Source, Destination, and Graph. Data flow graphs support only
           MQTT, Kafka, and OpenTelemetry endpoints. The file can also be the full ARM resource
           wrapper (properties is auto-extracted). extendedLocation is always auto-populated from

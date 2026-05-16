@@ -130,6 +130,8 @@ def test_dataflow_graph(dataflow_graph_test_setup, tracked_resources, tracked_fi
     registry_endpoints = run(f"az iot ops registry list -g {rg} -i {instance}")
     if registry_endpoints:
         registry_ep = registry_endpoints[0]["name"]
+
+        # Sub-case 1: Graph node without configuration
         updated_nodes = nodes + [
             {
                 "name": "graph-node",
@@ -144,16 +146,49 @@ def test_dataflow_graph(dataflow_graph_test_setup, tracked_resources, tracked_fi
             {"from": {"name": "source-node"}, "to": {"name": "graph-node"}},
             {"from": {"name": "graph-node"}, "to": {"name": "dest-node"}},
         ]
-        updated_config_path = _write_graph_config(nodes=updated_nodes, node_connections=updated_connections)
-        tracked_files.append(updated_config_path)
+        config_path_no_cfg = _write_graph_config(nodes=updated_nodes, node_connections=updated_connections)
+        tracked_files.append(config_path_no_cfg)
 
         updated_graph = run(
             f"az iot ops dataflowgraph apply -n {graph_name} -g {rg} -i {instance} "
-            f"--profile {profile_name} --config-file {updated_config_path}"
+            f"--profile {profile_name} --config-file {config_path_no_cfg}"
         )
         assert_dataflow_graph(graph=updated_graph, name=graph_name, resource_group=rg)
         node_names = [n["name"] for n in updated_graph.get("properties", {}).get("nodes", [])]
         assert "graph-node" in node_names
+
+        # Sub-case 2: Graph node with configuration entries
+        nodes_with_cfg = nodes + [
+            {
+                "name": "graph-node",
+                "nodeType": "Graph",
+                "graphSettings": {
+                    "registryEndpointRef": registry_ep,
+                    "artifact": "my-module:1.0.0",
+                    "configuration": [
+                        {"key": "param1", "value": "value1"},
+                        {"key": "param2", "value": "value2"},
+                    ],
+                },
+            }
+        ]
+        config_path_with_cfg = _write_graph_config(nodes=nodes_with_cfg, node_connections=updated_connections)
+        tracked_files.append(config_path_with_cfg)
+
+        graph_with_cfg = run(
+            f"az iot ops dataflowgraph apply -n {graph_name} -g {rg} -i {instance} "
+            f"--profile {profile_name} --config-file {config_path_with_cfg}"
+        )
+        assert_dataflow_graph(graph=graph_with_cfg, name=graph_name, resource_group=rg)
+        graph_node = next(
+            (n for n in graph_with_cfg.get("properties", {}).get("nodes", []) if n["name"] == "graph-node"),
+            None,
+        )
+        assert graph_node is not None
+        cfg_entries = graph_node.get("graphSettings", {}).get("configuration", [])
+        cfg_keys = [e["key"] for e in cfg_entries]
+        assert "param1" in cfg_keys
+        assert "param2" in cfg_keys
 
     # DELETE
     run(f"az iot ops dataflowgraph delete -n {graph_name} -g {rg} -i {instance} --profile {profile_name} -y")
