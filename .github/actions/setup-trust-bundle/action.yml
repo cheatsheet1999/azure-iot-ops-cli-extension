@@ -16,7 +16,9 @@ runs:
           --create-namespace \
           --version v1.13.6 \
           --set installCRDs=true \
-          --set startupapicheck.timeout=5m
+          --set startupapicheck.timeout=5m \
+          --set featureGates="LiteralCertificateSubject=true" \
+          --set webhook.featureGates="LiteralCertificateSubject=true"
 
         kubectl create namespace azure-iot-operations
 
