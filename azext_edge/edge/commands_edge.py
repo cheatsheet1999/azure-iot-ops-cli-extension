@@ -186,6 +186,7 @@ def create_instance(
     # Tags
     tags: Optional[dict] = None,
     skip_sr_ra: Optional[bool] = None,
+    custom_sr_role_id: Optional[str] = None,
     no_progress: Optional[bool] = None,
     no_preflight: Optional[bool] = None,
     health_checks_max: int = DEFAULT_HEALTH_CHECKS_MAX,
@@ -238,6 +239,7 @@ def create_instance(
         persist_mode=persist_mode,
         tags=tags,
         skip_sr_ra=skip_sr_ra,
+        custom_sr_role_id=custom_sr_role_id,
         health_checks_max=health_checks_max,
         health_checks_interval=health_checks_interval,
         **kwargs,

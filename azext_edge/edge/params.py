@@ -1270,6 +1270,16 @@ def load_iotops_arguments(self, _):
             arg_type=get_three_state_flag(),
             help="When used the role assignment between the IoT Operations extension "
             "system-managed identity and schema registry will be skipped.",
+            arg_group="Role Assignment",
+        )
+        context.argument(
+            "custom_sr_role_id",
+            options_list=["--custom-sr-role-id"],
+            help="Fully qualified role definition Id in the following format: "
+            "/subscriptions/{subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/{roleId}. "
+            "When provided, overrides the default role used for the IoT Operations extension "
+            "system-managed identity role assignment against the schema registry.",
+            arg_group="Role Assignment",
         )
         context.argument(
             "cluster_namespace",

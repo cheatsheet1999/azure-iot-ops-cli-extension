@@ -38,7 +38,7 @@ from ....util.common import (
 from ....util.queryable import Queryable
 from ....util.resource_graph import ResourceGraph
 from ..common import (
-    CONTRIBUTOR_ROLE_ID,
+    AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID,
     CUSTOM_LOCATIONS_API_VERSION,
     KEYVAULT_CLOUD_API_VERSION,
     IdentityUsageType,
@@ -319,7 +319,7 @@ class Instances(Queryable):
                     role_def_id=custom_sr_role_id
                     or ROLE_DEF_FORMAT_STR.format(
                         subscription_id=schema_registry_id_parts.subscription_id,
-                        role_id=CONTRIBUTOR_ROLE_ID,
+                        role_id=AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID,
                     ),
                     principal_type=PrincipalType.SERVICE_PRINCIPAL.value,
                 )
@@ -329,7 +329,9 @@ class Instances(Queryable):
                         error_str=str(http_exc),
                         sp_name=mi_resource_id_container.resource_name,
                         sp_id=mi_resource["properties"]["principalId"],
-                        expected_role="Contributor",
+                        expected_role=custom_sr_role_id
+                        if custom_sr_role_id
+                        else "Azure Device Registry Administrator",
                         scope=schema_registry_id,
                     )
                 )

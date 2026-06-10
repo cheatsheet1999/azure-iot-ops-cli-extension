@@ -22,7 +22,7 @@ from azext_edge.edge.commands_edge import (
 )
 from azext_edge.edge.commands_secretsync import secretsync_disable, secretsync_enable
 from azext_edge.edge.providers.orchestration.common import (
-    CONTRIBUTOR_ROLE_ID,
+    AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID,
     IdentityUsageType,
 )
 from azext_edge.edge.providers.orchestration.resources import Instances
@@ -1429,9 +1429,9 @@ def test_add_mi_user_assigned(
         if custom_sr_role_id:
             assert schema_ra_payload["properties"]["roleDefinitionId"] == custom_sr_role_id
         else:
-            # Should use default Contributor role
+            # Should use default Azure Device Registry Administrator role
             expected_role_id = (
                 f"/subscriptions/{ZEROED_SUBSCRIPTION}/providers/Microsoft.Authorization/roleDefinitions"
-                f"/{CONTRIBUTOR_ROLE_ID}"
+                f"/{AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID}"
             )
             assert schema_ra_payload["properties"]["roleDefinitionId"] == expected_role_id

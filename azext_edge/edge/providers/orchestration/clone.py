@@ -49,9 +49,9 @@ from ...util.az_client import (
 )
 from ...util.id_tools import is_valid_resource_id, parse_resource_id
 from .common import (
+    AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID,
     CLONE_INSTANCE_VERS_MAX,
     CLONE_INSTANCE_VERS_MIN,
-    CONTRIBUTOR_ROLE_ID,
     CUSTOM_LOCATIONS_API_VERSION,
     EXTENSION_TYPE_ACS,
     EXTENSION_TYPE_OPS,
@@ -1746,7 +1746,8 @@ def get_role_assignment():
         ),
         "properties": {
             "roleDefinitionId": (
-                f"[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '{CONTRIBUTOR_ROLE_ID}')]"
+                "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', "
+                f"'{AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID}')]"
             ),
             "principalId": "[parameters('principalId')]",
             "principalType": "ServicePrincipal",

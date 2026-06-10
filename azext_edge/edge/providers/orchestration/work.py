@@ -35,7 +35,7 @@ from ...util.az_client import (
 )
 from ...util.common import insert_newlines
 from .common import (
-    CONTRIBUTOR_ROLE_ID,
+    AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID,
     DEFAULT_HEALTH_CHECKS_INTERVAL,
     DEFAULT_HEALTH_CHECKS_MAX,
     EXTENSION_MONIKER_CM,
@@ -46,7 +46,7 @@ from .common import (
     PROVISIONING_STATE_SUCCESS,
     ClusterConnectStatus,
 )
-from .permissions import ROLE_DEF_FORMAT_STR, PermissionManager, PrincipalType
+from .permissions import ROLE_DEF_FORMAT_STR, PermissionManager, PrincipalType, get_ra_user_error_msg
 from .resource_map import IoTOperationsResourceMap
 from .resources.custom_locations import CustomLocations
 from .rp_namespace import HEALTH_PROVIDER, register_providers
@@ -81,17 +81,6 @@ class WorkRecord:
 
 # Baked-in time for CL service to catch up.
 CATCH_UP_SEC = 7
-
-
-# TODO - @digimaun - make common
-def get_user_msg_warn_ra(prefix: str, principal_id: str, scope: str) -> str:
-    return (
-        f"{prefix}\n\n"
-        f"The IoT Operations arc extension with principal Id '{principal_id}' needs\n"
-        "'Contributor' or equivalent roles against scope:\n"
-        f"'{scope}'\n\n"
-        "Please handle this step before continuing."
-    )
 
 
 class WorkDisplay:
@@ -273,21 +262,26 @@ class WorkManager:
 
         try:
             schema_registry_id_parts = parse_resource_id(self._targets.schema_registry_resource_id)
+            effective_role_def_id = self._custom_sr_role_id or ROLE_DEF_FORMAT_STR.format(
+                subscription_id=schema_registry_id_parts.subscription_id,
+                role_id=AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID,
+            )
             self.permission_manager.apply_role_assignment(
                 scope=self._targets.schema_registry_resource_id,
                 principal_id=ops_ext_principal_id,
-                role_def_id=ROLE_DEF_FORMAT_STR.format(
-                    subscription_id=schema_registry_id_parts.subscription_id,
-                    role_id=CONTRIBUTOR_ROLE_ID,
-                ),
+                role_def_id=effective_role_def_id,
                 principal_type=PrincipalType.SERVICE_PRINCIPAL.value,
                 headers=self._headers,
             )
         except HttpResponseError as e:
             self._warnings.append(
-                get_user_msg_warn_ra(
-                    prefix=f"Role assignment failed with:\n{get_api_error_str(e)}",
-                    principal_id=ops_ext_principal_id,
+                get_ra_user_error_msg(
+                    error_str=get_api_error_str(e),
+                    sp_name="IoT Operations arc extension",
+                    sp_id=ops_ext_principal_id,
+                    expected_role=(
+                        self._custom_sr_role_id if self._custom_sr_role_id else "Azure Device Registry Administrator"
+                    ),
                     scope=self._targets.schema_registry_resource_id,
                 )
             )
@@ -354,6 +348,7 @@ class WorkManager:
         self._ops_ext_dependencies = None
         self._ops_ext = None
         self._skip_sr_ra = kwargs.pop("skip_sr_ra", False)
+        self._custom_sr_role_id = kwargs.pop("custom_sr_role_id", None)
         self._health_checks_max = kwargs.pop("health_checks_max", DEFAULT_HEALTH_CHECKS_MAX)
         self._health_checks_interval = kwargs.pop("health_checks_interval", DEFAULT_HEALTH_CHECKS_INTERVAL)
 

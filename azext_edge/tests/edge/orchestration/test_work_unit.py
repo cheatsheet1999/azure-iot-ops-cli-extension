@@ -42,7 +42,7 @@ from azext_edge.edge.common import (
 from azext_edge.edge.providers.base import DEFAULT_NAMESPACE
 from azext_edge.edge.providers.orchestration.common import (
     ARM_ENDPOINT,
-    CONTRIBUTOR_ROLE_ID,
+    AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID,
     DEFAULT_HEALTH_CHECKS_INTERVAL,
     EXTENSION_TYPE_CM,
     EXTENSION_TYPE_OPS,
@@ -416,10 +416,11 @@ class ServiceGenerator:
                 ops_ext_identity = self._get_extension_identity()
                 assert request_kpis.params["api-version"] == ExpectedAPIVersion.AUTHORIZATION.value
                 body = json.loads(request_kpis.body_str)
-                assert body["properties"]["roleDefinitionId"] == ROLE_DEF_FORMAT_STR.format(
+                expected_role_def_id = self.scenario.get("custom_sr_role_id") or ROLE_DEF_FORMAT_STR.format(
                     subscription_id=ZEROED_SUBSCRIPTION,
-                    role_id=CONTRIBUTOR_ROLE_ID,
+                    role_id=AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID,
                 )
+                assert body["properties"]["roleDefinitionId"] == expected_role_def_id
                 assert body["properties"]["principalId"] == ops_ext_identity["principalId"]
                 assert body["properties"]["principalType"] == "ServicePrincipal"
                 self.call_map[CallKey.PUT_SCHEMA_REGISTRY_RA].append(request_kpis)
@@ -1110,7 +1111,7 @@ def assert_cluster_prechecks(mock_prechecks: Dict[str, Mock], target_scenario: d
         ),
         build_target_scenario(
             apiControl={CallKey.PUT_SCHEMA_REGISTRY_RA: {"code": 400, "body": {"status": "Failed"}}},
-            warnings=[(0, "Role assignment failed with:\nOperation returned an invalid status 'Bad Request'")],
+            warnings=[(0, "Role assignment failed with:\n\nOperation returned an invalid status 'Bad Request'")],
         ),
         build_target_scenario(
             apiControl={
@@ -1149,6 +1150,12 @@ def assert_cluster_prechecks(mock_prechecks: Dict[str, Mock], target_scenario: d
         ),
         build_target_scenario(
             skip_sr_ra=True,
+        ),
+        build_target_scenario(
+            custom_sr_role_id=ROLE_DEF_FORMAT_STR.format(
+                subscription_id=ZEROED_SUBSCRIPTION,
+                role_id=generate_random_string(),
+            ),
         ),
         # Basic unavailable scenario for create flow
         build_target_scenario(
@@ -1434,6 +1441,10 @@ def test_iot_ops_create(
     skip_sr_ra = target_scenario.get("skip_sr_ra")
     sr_ra_calls = int(not bool(skip_sr_ra))
     create_call_kwargs["skip_sr_ra"] = skip_sr_ra
+
+    custom_sr_role_id = target_scenario.get("custom_sr_role_id")
+    if custom_sr_role_id:
+        create_call_kwargs["custom_sr_role_id"] = custom_sr_role_id
 
     exc_meta: Optional[ExceptionMeta] = target_scenario.get("raises")
     if exc_meta:

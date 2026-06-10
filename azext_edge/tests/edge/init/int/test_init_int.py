@@ -13,10 +13,16 @@ from knack.log import get_logger
 
 from azext_edge.edge.common import DEFAULT_BROKER, DEFAULT_BROKER_LISTENER
 from azext_edge.edge.util.common import assemble_nargs_to_dict
-from azext_edge.edge.providers.orchestration.common import EXTENSION_TYPE_CM, EXTENSION_TYPE_SSC
+from azext_edge.edge.providers.orchestration.common import (
+    AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID,
+    CONTRIBUTOR_ROLE_ID,
+    EXTENSION_TYPE_CM,
+    EXTENSION_TYPE_OPS,
+    EXTENSION_TYPE_SSC,
+)
 
 from ....generators import generate_random_string
-from ....helpers import process_additional_args, run, strip_quotes
+from ....helpers import assert_role_assignment, process_additional_args, run, strip_quotes
 
 logger = get_logger(__name__)
 
@@ -230,9 +236,11 @@ def assert_aio_instance(
         extension_result = run(f"az rest --method GET --url {extension_result['nextLink']}")
         extensions.extend(extension_result["value"])
     iot_ops_ext = None
+    iot_ops_ext_principal_id = None
     for ext in extensions:
-        if ext["properties"]["extensionType"] == "microsoft.iotoperations":
+        if ext["properties"]["extensionType"] == EXTENSION_TYPE_OPS:
             iot_ops_ext = ext
+            iot_ops_ext_principal_id = ext.get("identity", {}).get("principalId")
 
     if ops_config:
         ops_config = assemble_nargs_to_dict(ops_config.split())
@@ -259,6 +267,15 @@ def assert_aio_instance(
     assert instance_props.get("description") == description
     assert instance_props["schemaRegistryRef"] == {"resourceId": schema_registry_id}
     assert instance_props["adrNamespaceRef"] == {"resourceId": adr_namespace_id}
+
+    # Verify the schema registry role assignment includes Azure Device Registry Administrator
+    assert iot_ops_ext_principal_id, "IoT Operations extension is missing 'identity.principalId'."
+    assert_role_assignment(
+        scope=schema_registry_id,
+        assignee=iot_ops_ext_principal_id,
+        expected_role_ids=AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID,
+        disallowed_role_ids=CONTRIBUTOR_ROLE_ID,
+    )
 
     tree = run(f"az iot ops show -n {instance_name} -g {resource_group} --tree")
     assert expected_custom_location in tree

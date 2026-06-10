@@ -44,6 +44,7 @@ from azext_edge.edge.providers.orchestration.clone import (
     get_fc_name,
 )
 from azext_edge.edge.providers.orchestration.common import (
+    AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID,
     EXTENSION_MONIKER_ACS,
     EXTENSION_MONIKER_CM,
     EXTENSION_MONIKER_OPS,
@@ -2043,7 +2044,7 @@ class CloneAssertor:
         )
         assert sr_ra_def["properties"]["roleDefinitionId"] == (
             "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', "
-            "'b24988ac-6180-42a0-ab88-20f7382dd24c')]"
+            f"'{AZURE_DEVICE_REGISTRY_ADMINISTRATOR_ROLE_ID}')]"
         )
         assert sr_ra_def["properties"]["principalId"] == "[parameters('principalId')]"
         assert sr_ra_def["properties"]["principalType"] == "ServicePrincipal"
