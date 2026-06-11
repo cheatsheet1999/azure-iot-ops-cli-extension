@@ -13,6 +13,7 @@ from .specs import MediaFormat, MediaTaskType, SecurityPolicy, SecurityMode
 from .common import (
     ActionType,
     ADRAuthModes,
+    EndpointTemplateMode,
     FileType,
     TopicRetain,
 )
@@ -771,41 +772,48 @@ def load_adr_arguments(self, _):
             "for connector pods to be created - without it, devices will not have associated connector pods "
             "even if a connector template is deployed.",
         )
-        # TODO: add description of how to use these in the wiki
         context.argument(
             "certificate_reference",
             options_list=["--certificate-ref", "--cert-ref"],
-            help="Reference for the certificate used in authentication.",
+            help="Reference for the certificate used in authentication. "
+            "Supported by 1P types: OpcUa, REST, SSE, MQTT. Not supported by Media or Onvif. "
+            "For custom connector types, depends on the connector implementation.",
             arg_group="Authentication",
         )
         context.argument(
             "key_reference",
             options_list=["--key-ref"],
-            help="Private key reference for certificate authentication.",
+            help="Private key reference for certificate authentication. "
+            "Supported by 1P types: OpcUa, REST, SSE, MQTT. Not supported by Media or Onvif. "
+            "For custom connector types, depends on the connector implementation.",
             arg_group="Authentication",
         )
         context.argument(
             "intermediate_certificate_reference",
             options_list=["--intermediate-cert-ref", "--icr"],
-            help="Intermediate certificates reference for certificate authentication.",
+            help="Intermediate certificates reference for certificate authentication. "
+            "Supported by 1P types: OpcUa, REST, SSE, MQTT. Not supported by Media or Onvif. "
+            "For custom connector types, depends on the connector implementation.",
             arg_group="Authentication",
         )
         context.argument(
             "password_reference",
             options_list=["--password-ref", "--pass-ref"],
-            help="Reference for the password used in authentication.",
+            help="Reference for the password used in authentication. Supported by all 1P connector types.",
             arg_group="Authentication",
         )
         context.argument(
             "username_reference",
             options_list=["--username-ref", "--user-ref"],
-            help="Reference for the username used in authentication.",
+            help="Reference for the username used in authentication. Supported by all 1P connector types.",
             arg_group="Authentication",
         )
         context.argument(
             "trust_list",
             options_list=["--trust-list"],
-            help="List of trusted certificates for the endpoint.",
+            help="List of trusted certificates for the endpoint. "
+            "Supported by 1P types: OpcUa, REST, SSE, MQTT. Not supported by Media or Onvif. "
+            "For custom connector types, depends on the connector implementation.",
         )
         context.argument(
             "replace",
@@ -837,6 +845,69 @@ def load_adr_arguments(self, _):
             help="Space-separated list of endpoint names to remove from the device.",
             nargs="+",
             action="extend",
+        )
+
+    with self.argument_context("iot ops ns device endpoint inbound apply") as context:
+        context.argument(
+            "connector_type",
+            options_list=["--connector-type", "--ct"],
+            help="Connector type for the inbound endpoint (e.g. 'Microsoft.OpcUa', 'Microsoft.Onvif'). "
+            "For all types except Microsoft.OpcUa, the matching connector template must exist "
+            "in the instance unless --skip-connector-check is used.",
+        )
+        context.argument(
+            "device_name",
+            options_list=["--device", "-d"],
+            help="Device name. Required unless --show-template is used.",
+        )
+        context.argument(
+            "endpoint_name",
+            options_list=["--name", "-n"],
+            help="Endpoint name. Required unless --show-template is used.",
+        )
+        context.argument(
+            "endpoint_address",
+            options_list=["--endpoint-address", "--address"],
+            help="Endpoint address to connect to. Required unless --show-template is used.",
+        )
+        context.argument(
+            "endpoint_config",
+            options_list=["--endpoint-config", "--ec"],
+            help="Inline JSON string or path to a JSON/YAML file (.json, .yaml, .yml) containing "
+            "connector-specific endpoint configuration. The template can be discovered with --show-template. "
+            "When the connector schema uses JSON Schema Draft-07, the config is validated against it; "
+            "other dialects are accepted but validation is skipped. "
+            "Cannot be combined with --skip-connector-check.",
+        )
+        context.argument(
+            "show_template",
+            options_list=["--show-template"],
+            help=(
+                "Show a starter configuration template for the connector type and exit without creating an endpoint. "
+                "config: fields shown with their default values (null if no default); "
+                "output is directly usable as --endpoint-config input. "
+                "oneOf fields with multiple variants collapse to the first non-null variant and emit a warning — "
+                "run with schema mode to see all options. "
+                "allOf fields merge all non-null sub-schemas into one flat object. "
+                "schema: every field includes type, default, and constraints (min, max, enum, pattern); "
+                "oneOf/allOf fields show all variants so you can inspect the full schema. "
+                "Draft-07 $ref pointers (#/definitions/...) are resolved inline in both modes."
+            ),
+            arg_type=get_enum_type(EndpointTemplateMode),
+        )
+        context.argument(
+            "skip_connector_check",
+            options_list=["--skip-connector-check", "--scc"],
+            help="Skip validation that a connector template exists for the connector type. "
+            "The endpoint version will not be auto-resolved and no schema validation is performed. "
+            "Cannot be combined with --endpoint-config.",
+            arg_type=get_three_state_flag(),
+        )
+        context.argument(
+            "no_replace",
+            options_list=["--no-replace"],
+            help="Prevent replacing an existing endpoint with the same name. By default, apply upserts the endpoint.",
+            arg_type=get_three_state_flag(),
         )
 
     with self.argument_context("iot ops ns device endpoint inbound add custom") as context:

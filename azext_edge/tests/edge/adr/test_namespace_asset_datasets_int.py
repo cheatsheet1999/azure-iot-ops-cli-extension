@@ -4,11 +4,14 @@
 # Licensed under the MIT License. See License file in the project root for license information.
 # ----------------------------------------------------------------------------------------------
 
+import json
 import pytest
 from typing import List
 
+from azure.cli.core.azclierror import CLIInternalError
+
 from ...generators import generate_random_string
-from ...helpers import run, wait_for_expected_count
+from ...helpers import create_file, run, wait_for_expected_count
 from .namespace_helpers import create_config_file, assert_point_properties, assert_dataset_properties
 
 
@@ -117,7 +120,7 @@ def test_namespace_custom_asset_dataset_lifecycle_operations(
     dataset = run(
         f"az iot ops ns asset custom dataset add --asset {asset_name} "
         f"--instance {instance_name} -g {resource_group} --name {dataset_name_2} "
-        f"--data-source {data_source} "
+        f"--data-source '{data_source}' "
         f"--config {custom_config_path} --replace"
     )
 
@@ -843,3 +846,310 @@ def test_namespace_mqtt_asset_dataset_lifecycle_operations(asset_factory):
 
     remaining_dataset_names = [dataset["name"] for dataset in datasets_list_after_remove]
     assert dataset_name_1 not in remaining_dataset_names
+
+
+# ---------------------------------------------------------------------------
+# Helpers for generalized (connector-agnostic) tests
+# ---------------------------------------------------------------------------
+
+def _save_json_to_file(content: dict, tracked_files: List[str]) -> str:
+    """Serialize content to a temp JSON file and return its path."""
+    return create_file(
+        file_name=f"template_{generate_random_string(6)}.json",
+        module_file=__file__,
+        tracked_files=tracked_files,
+        content=json.dumps(content),
+    )
+
+
+def _try_show_template(cmd: str) -> dict:
+    """Run a --show-template command and return the parsed result.
+
+    Returns an empty dict if the command fails (e.g. no connector template installed).
+    """
+    try:
+        return run(cmd) or {}
+    except CLIInternalError:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Generalized dataset / datapoint commands — OPC UA (bundled metadata)
+# ---------------------------------------------------------------------------
+
+def test_generalized_dataset_lifecycle_opcua(asset_factory, tracked_files: List[str]):
+    """Full lifecycle of generalized dataset + datapoint commands on an OPC UA asset.
+
+    Flow:
+      1. --show-template config  →  discover schema
+      2. Fill connector-specific values in the returned template
+      3. Use filled template as --dataset-config / --datapoint-config
+      4. CRUD: add / show / list / update / remove
+      5. Export round-trip
+    """
+    info = asset_factory("opcua")
+    asset_name = info["name"]
+    instance_name = info["instanceName"]
+    resource_group = info["resourceGroup"]
+    dataset_name = f"gen-ds-{generate_random_string(6, force_lower=True)}"
+    dataset_name_2 = f"gen-ds2-{generate_random_string(6, force_lower=True)}"
+    datapoint_name = f"gen-dp-{generate_random_string(6, force_lower=True)}"
+    data_source = "ns=2;s=Temperature"
+    dp_data_source = "ns=2;s=Temperature.Value"
+
+    # 1. SHOW-TEMPLATE – dataset
+    dataset_template = run(
+        f"az iot ops ns asset dataset add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {dataset_name} --show-template config"
+    )
+    assert isinstance(dataset_template, dict)
+    assert "connectorType" in dataset_template
+    assert "datasetConfig" in dataset_template
+
+    dataset_config = dataset_template.copy()
+    dataset_config["datasetConfig"]["datasetConfiguration"] = {
+        "publishingInterval": 1000,
+        "samplingInterval": 500,
+        "queueSize": 5,
+    }
+    dataset_config["datasetConfig"].pop("destinations", None)
+    dataset_config_file = _save_json_to_file(dataset_config, tracked_files)
+
+    # 2. ADD dataset with config
+    added_dataset = run(
+        f"az iot ops ns asset dataset add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {dataset_name} --data-source '{data_source}' "
+        f"--dataset-config {dataset_config_file}"
+    )
+    assert_dataset_properties(
+        added_dataset, name=dataset_name, data_source=data_source,
+        opcua_configuration={"publishingInterval": 1000},
+    )
+
+    # 3. SHOW dataset
+    shown_dataset = run(
+        f"az iot ops ns asset dataset show --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --name {dataset_name}"
+    )
+    assert_dataset_properties(shown_dataset, name=dataset_name, data_source=data_source)
+
+    # 4. LIST datasets
+    datasets_list = run(
+        f"az iot ops ns asset dataset list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group}"
+    )
+    assert any(d["name"] == dataset_name for d in datasets_list)
+
+    # 5. ADD a second dataset
+    added_dataset_2 = run(
+        f"az iot ops ns asset dataset add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {dataset_name_2} --data-source '{data_source}'"
+    )
+    assert_dataset_properties(added_dataset_2, name=dataset_name_2)
+    dataset_names = [d["name"] for d in run(
+        f"az iot ops ns asset dataset list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group}"
+    )]
+    assert dataset_name in dataset_names and dataset_name_2 in dataset_names
+
+    # 6. UPDATE dataset
+    updated_source = "ns=2;s=Temperature.Updated"
+    dataset_config["datasetConfig"]["datasetConfiguration"]["publishingInterval"] = 2000
+    updated_config_file = _save_json_to_file(dataset_config, tracked_files)
+    updated_dataset = run(
+        f"az iot ops ns asset dataset update --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {dataset_name} --data-source '{updated_source}' "
+        f"--dataset-config {updated_config_file}"
+    )
+    assert_dataset_properties(
+        updated_dataset, name=dataset_name, data_source=updated_source,
+        opcua_configuration={"publishingInterval": 2000},
+    )
+
+    # 7. SHOW-TEMPLATE – datapoint
+    datapoint_template = run(
+        f"az iot ops ns asset datapoint add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--dataset {dataset_name} --name {datapoint_name} "
+        f"--data-source '{dp_data_source}' --show-template config"
+    )
+    assert isinstance(datapoint_template, dict)
+    assert "connectorType" in datapoint_template
+    assert "datapointConfig" in datapoint_template
+
+    datapoint_config = datapoint_template.copy()
+    datapoint_config["datapointConfig"]["datapointConfiguration"] = {
+        "samplingInterval": 200,
+        "queueSize": 3,
+    }
+    datapoint_config_file = _save_json_to_file(datapoint_config, tracked_files)
+
+    # 8. ADD datapoint with config
+    added_datapoints = run(
+        f"az iot ops ns asset datapoint add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--dataset {dataset_name} --name {datapoint_name} "
+        f"--data-source '{dp_data_source}' --datapoint-config {datapoint_config_file}"
+    )
+    assert_point_properties(added_datapoints, name=datapoint_name, data_source=dp_data_source)
+
+    # 9. LIST datapoints
+    dp_list = run(
+        f"az iot ops ns asset datapoint list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --dataset {dataset_name}"
+    )
+    assert any(dp["name"] == datapoint_name for dp in dp_list)
+
+    # 10. REPLACE datapoint
+    replaced_dp_source = "ns=2;s=Temperature.Replaced"
+    replaced_datapoints = run(
+        f"az iot ops ns asset datapoint add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--dataset {dataset_name} --name {datapoint_name} "
+        f"--data-source '{replaced_dp_source}' --replace"
+    )
+    assert_point_properties(replaced_datapoints, name=datapoint_name, data_source=replaced_dp_source)
+
+    # 11. EXPORT datasets
+    export_result = run(
+        f"az iot ops ns asset dataset export --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --output-dir /tmp --replace"
+    )
+    assert export_result["dataset_count"] >= 1
+    tracked_files.append(export_result["file_path"])
+
+    # 12. EXPORT datapoints
+    dp_export_result = run(
+        f"az iot ops ns asset datapoint export --asset {asset_name} "
+        f"--dataset {dataset_name} --instance {instance_name} -g {resource_group} "
+        f"--output-dir /tmp --replace"
+    )
+    assert dp_export_result["datapoint_count"] >= 1
+    tracked_files.append(dp_export_result["file_path"])
+
+    # 13. REMOVE datapoint
+    run(
+        f"az iot ops ns asset datapoint remove --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--dataset {dataset_name} --name {datapoint_name}"
+    )
+    dp_list_after = run(
+        f"az iot ops ns asset datapoint list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --dataset {dataset_name}"
+    )
+    assert not any(dp["name"] == datapoint_name for dp in (dp_list_after or []))
+
+    # 14. REMOVE datasets
+    for ds in [dataset_name, dataset_name_2]:
+        run(
+            f"az iot ops ns asset dataset remove --asset {asset_name} "
+            f"--instance {instance_name} -g {resource_group} --name {ds}"
+        )
+    remaining = [d["name"] for d in (run(
+        f"az iot ops ns asset dataset list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group}"
+    ) or [])]
+    assert dataset_name not in remaining and dataset_name_2 not in remaining
+
+
+# ---------------------------------------------------------------------------
+# Generalized dataset / datapoint commands — MQTT (connector template required)
+# ---------------------------------------------------------------------------
+
+def test_generalized_dataset_lifecycle_mqtt(asset_factory, tracked_files: List[str]):
+    """Generalized dataset + datapoint lifecycle on an MQTT asset.
+
+    --show-template is attempted first. If no connector template is installed,
+    the template step is skipped and basic add/update/remove is tested without config.
+    """
+    info = asset_factory("mqtt")
+    asset_name = info["name"]
+    instance_name = info["instanceName"]
+    resource_group = info["resourceGroup"]
+    dataset_name = f"gen-ds-{generate_random_string(6, force_lower=True)}"
+    datapoint_name = f"gen-dp-{generate_random_string(6, force_lower=True)}"
+    data_source = "mqtt/temperature"
+    dp_data_source = "mqtt/temperature/value"
+
+    base_cmd = f"--asset {asset_name} --instance {instance_name} -g {resource_group}"
+
+    # 1. SHOW-TEMPLATE – dataset (best-effort)
+    dataset_config_file = None
+    dataset_template = _try_show_template(
+        f"az iot ops ns asset dataset add {base_cmd} "
+        f"--name {dataset_name} --show-template config"
+    )
+    if dataset_template:
+        assert "connectorType" in dataset_template
+        assert "datasetConfig" in dataset_template
+        dataset_config_file = _save_json_to_file(dataset_template, tracked_files)
+
+    # 2. ADD dataset
+    add_cmd = (
+        f"az iot ops ns asset dataset add {base_cmd} "
+        f"--name {dataset_name} --data-source '{data_source}'"
+    )
+    if dataset_config_file:
+        add_cmd += f" --dataset-config {dataset_config_file}"
+    added_dataset = run(add_cmd)
+    assert_dataset_properties(added_dataset, name=dataset_name, data_source=data_source)
+
+    # 3. SHOW dataset
+    shown = run(f"az iot ops ns asset dataset show {base_cmd} --name {dataset_name}")
+    assert_dataset_properties(shown, name=dataset_name)
+
+    # 4. LIST datasets
+    datasets_list = run(f"az iot ops ns asset dataset list {base_cmd}")
+    assert any(d["name"] == dataset_name for d in datasets_list)
+
+    # 5. UPDATE dataset
+    updated_source = "mqtt/temperature/updated"
+    updated_dataset = run(
+        f"az iot ops ns asset dataset update {base_cmd} "
+        f"--name {dataset_name} --data-source {updated_source}"
+    )
+    assert_dataset_properties(updated_dataset, name=dataset_name, data_source=updated_source)
+
+    # 6. SHOW-TEMPLATE – datapoint (best-effort)
+    datapoint_config_file = None
+    datapoint_template = _try_show_template(
+        f"az iot ops ns asset datapoint add {base_cmd} "
+        f"--dataset {dataset_name} --name {datapoint_name} "
+        f"--data-source '{dp_data_source}' --show-template config"
+    )
+    if datapoint_template:
+        assert "connectorType" in datapoint_template
+        assert "datapointConfig" in datapoint_template
+        datapoint_config_file = _save_json_to_file(datapoint_template, tracked_files)
+
+    # 7. ADD datapoint
+    dp_add_cmd = (
+        f"az iot ops ns asset datapoint add {base_cmd} "
+        f"--dataset {dataset_name} --name {datapoint_name} "
+        f"--data-source '{dp_data_source}'"
+    )
+    if datapoint_config_file:
+        dp_add_cmd += f" --datapoint-config {datapoint_config_file}"
+    added_datapoints = run(dp_add_cmd)
+    assert_point_properties(added_datapoints, name=datapoint_name, data_source=dp_data_source)
+
+    # 8. LIST datapoints
+    dp_list = run(f"az iot ops ns asset datapoint list {base_cmd} --dataset {dataset_name}")
+    assert any(dp["name"] == datapoint_name for dp in dp_list)
+
+    # 9. REMOVE datapoint
+    run(
+        f"az iot ops ns asset datapoint remove {base_cmd} "
+        f"--dataset {dataset_name} --name {datapoint_name}"
+    )
+    dp_list_after = run(f"az iot ops ns asset datapoint list {base_cmd} --dataset {dataset_name}")
+    assert not any(dp["name"] == datapoint_name for dp in (dp_list_after or []))
+
+    # 10. REMOVE dataset
+    run(f"az iot ops ns asset dataset remove {base_cmd} --name {dataset_name}")
+    datasets_after = run(f"az iot ops ns asset dataset list {base_cmd}")
+    assert not any(d["name"] == dataset_name for d in (datasets_after or []))

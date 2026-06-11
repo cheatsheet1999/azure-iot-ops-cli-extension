@@ -10,8 +10,9 @@ import json
 import pytest
 import responses
 
-from azure.cli.core.azclierror import InvalidArgumentValueError
+from azure.cli.core.azclierror import InvalidArgumentValueError, RequiredArgumentMissingError
 from azext_edge.edge.commands_namespaces import (
+    create_namespace_asset,
     create_namespace_custom_asset,
     create_namespace_media_asset,
     create_namespace_onvif_asset,
@@ -21,6 +22,7 @@ from azext_edge.edge.commands_namespaces import (
     create_namespace_mqtt_asset,
     show_namespace_asset,
     delete_namespace_asset,
+    update_namespace_asset,
     update_namespace_custom_asset,
     update_namespace_media_asset,
     update_namespace_onvif_asset,
@@ -992,3 +994,716 @@ def assert_asset_properties(result_props: dict, expected: dict):
     for key in expected_configs:
         assert key in result_props
         assert result_props[key] == expected_configs[key]
+
+
+# ---------------------------------------------------------------------------
+# Tests for the generalized create_namespace_asset command
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reqs", [
+    {},
+    {
+        "asset_type_refs": ["typeRef1", "typeRef2"],
+        "attributes": ["key1=value1", "key2=value2"],
+        "description": "Test description",
+        "disabled": True,
+        "display_name": "Test Display Name",
+        "documentation_uri": "http://docs.example.com",
+        "external_asset_id": "ext-id-001",
+        "hardware_revision": "HW-1.0",
+        "manufacturer": "Contoso",
+        "manufacturer_uri": "http://contoso.com",
+        "model": "Model-X",
+        "product_code": "PROD-001",
+        "serial_number": "SN-001",
+        "software_revision": "SW-1.0",
+        "tags": {"env": "test"},
+    },
+    {
+        "disabled": False,
+        "model": "Model-Y",
+    },
+])
+@pytest.mark.parametrize("connector_type", [
+    "opcua",
+    "onvif",
+    "rest",
+    "Microsoft.OpcUa",
+    "MyCustomConnector",
+])
+def test_create_namespace_asset_generalized(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    connector_type: str,
+    reqs: dict,
+):
+    """Happy-path tests for the generalized create_namespace_asset command."""
+    asset_name = generate_random_string()
+    instance_name = generate_random_string()
+    instance_resource_group = generate_random_string()
+    device_name = generate_random_string()
+    device_endpoint_name = generate_random_string()
+
+    namespace_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = namespace_resource["name"]
+    namespace_resource_group = namespace_resource["resource_group"]
+
+    # Resolve what endpoint_type the device record should have for this connector_type.
+    # `add_device_get_call()` builds a mocked service value by prepending `Microsoft.`,
+    # so pass the helper the unprefixed built-in type name (for example `OpcUa`,
+    # not `Microsoft.OpcUa`) to avoid producing `Microsoft.Microsoft.<type>`.
+    from azext_edge.edge.providers.adr.namespace_devices import DeviceEndpointType as _DEType
+    normalized = _DEType.get_type_from_keyword(connector_type, return_custom_keyword=False)
+    if normalized in _DEType.list():
+        endpoint_type_for_device = normalized.removeprefix("Microsoft.")
+    else:
+        # Custom / unknown types use the helper-compatible fallback.
+        endpoint_type_for_device = "custom"
+
+    add_device_get_call(
+        mocked_responses=mocked_responses,
+        device_name=device_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+        endpoint_name=device_endpoint_name,
+        endpoint_type=endpoint_type_for_device,
+    )
+
+    # Asset does not exist yet (404 on existence check)
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json={"error": {"code": "NotFound"}},
+        status=404,
+        content_type="application/json",
+    )
+
+    mock_asset_record = get_namespace_asset_record(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+    )
+
+    mocked_responses.add(
+        method=responses.PUT,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json=mock_asset_record,
+        status=200,
+        content_type="application/json",
+    )
+
+    result = create_namespace_asset(
+        cmd=mocked_cmd,
+        connector_type=connector_type,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        asset_name=asset_name,
+        device_name=device_name,
+        device_endpoint_name=device_endpoint_name,
+        wait_sec=0,
+        **reqs,
+    )
+
+    assert result == mock_asset_record
+    # GET device + GET asset (check existence) + PUT asset = 3 calls
+    assert len(mocked_responses.calls) == 3
+
+    put_body = json.loads(mocked_responses.calls[2].request.body)
+    assert put_body["properties"]["deviceRef"]["deviceName"] == device_name
+    assert put_body["properties"]["deviceRef"]["endpointName"] == device_endpoint_name
+    assert put_body.get("tags") == reqs.get("tags")
+
+    mocked_get_namespace_for_instance.assert_called_with(
+        cmd=mocked_cmd,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+    )
+
+
+def test_create_namespace_asset_generalized_with_asset_config(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocker,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+):
+    """When --asset-config is provided, validated config properties appear in the PUT body.
+
+    Mirrors the device endpoint apply test's with_config_file=True case.
+    _load_and_validate_asset_config is mocked so the test does not need the OPC UA
+    metadata file or a real schema; it focuses on the PUT body merging logic.
+    """
+    asset_name = generate_random_string()
+    instance_name = generate_random_string()
+    instance_resource_group = generate_random_string()
+    device_name = generate_random_string()
+    device_endpoint_name = generate_random_string()
+
+    namespace_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = namespace_resource["name"]
+    namespace_resource_group = namespace_resource["resource_group"]
+
+    # Mock _load_and_validate_asset_config to return pre-parsed config props
+    config_props = {"defaultDatasetsConfiguration": '{"publishingInterval": 1000}'}
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._load_and_validate_asset_config",
+        return_value=config_props,
+    )
+
+    add_device_get_call(
+        mocked_responses=mocked_responses,
+        device_name=device_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+        endpoint_name=device_endpoint_name,
+        endpoint_type="opcua",
+    )
+    # Asset does not exist yet
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json={"error": {"code": "NotFound"}},
+        status=404,
+        content_type="application/json",
+    )
+    mock_asset_record = get_namespace_asset_record(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+    )
+    mocked_responses.add(
+        method=responses.PUT,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json=mock_asset_record,
+        status=200,
+        content_type="application/json",
+    )
+
+    result = create_namespace_asset(
+        cmd=mocked_cmd,
+        connector_type="opcua",
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        asset_name=asset_name,
+        device_name=device_name,
+        device_endpoint_name=device_endpoint_name,
+        asset_config='{"defaultDatasetsConfiguration": {"publishingInterval": 1000}}',
+        wait_sec=0,
+    )
+
+    assert result == mock_asset_record
+    # GET device + GET asset (existence check) + PUT asset = 3 calls
+    assert len(mocked_responses.calls) == 3
+
+    put_body = json.loads(mocked_responses.calls[2].request.body)
+    assert put_body["properties"]["defaultDatasetsConfiguration"] == config_props["defaultDatasetsConfiguration"]
+
+
+def test_create_namespace_asset_generalized_asset_already_exists(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+):
+    """create_namespace_asset raises InvalidArgumentValueError if the asset already exists."""
+    asset_name = generate_random_string()
+    instance_name = generate_random_string()
+    instance_resource_group = generate_random_string()
+    device_name = generate_random_string()
+    device_endpoint_name = generate_random_string()
+
+    namespace_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = namespace_resource["name"]
+    namespace_resource_group = namespace_resource["resource_group"]
+
+    add_device_get_call(
+        mocked_responses=mocked_responses,
+        device_name=device_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+        endpoint_name=device_endpoint_name,
+        endpoint_type="opcua",
+    )
+
+    # Asset already exists
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json=get_namespace_asset_record(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        status=200,
+        content_type="application/json",
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="already exists"):
+        create_namespace_asset(
+            cmd=mocked_cmd,
+            connector_type="opcua",
+            instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+            asset_name=asset_name,
+            device_name=device_name,
+            device_endpoint_name=device_endpoint_name,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize("missing_arg, kwargs_override", [
+    ("asset_name", {"asset_name": None}),
+    ("device_name", {"device_name": None}),
+    ("device_endpoint_name", {"device_endpoint_name": None}),
+])
+def test_create_namespace_asset_generalized_missing_required_args(
+    mocked_cmd,
+    missing_arg: str,
+    kwargs_override: dict,
+):
+    """--name, --device, --endpoint are required unless --show-template is used."""
+    base_kwargs = {
+        "connector_type": "opcua",
+        "instance_name": generate_random_string(),
+        "instance_resource_group": generate_random_string(),
+        "asset_name": generate_random_string(),
+        "device_name": generate_random_string(),
+        "device_endpoint_name": generate_random_string(),
+    }
+    base_kwargs.update(kwargs_override)
+
+    with pytest.raises(RequiredArgumentMissingError):
+        create_namespace_asset(cmd=mocked_cmd, **base_kwargs)
+
+
+def test_create_namespace_asset_generalized_show_template_with_config_errors(
+    mocked_cmd,
+    mocked_get_namespace_for_instance,
+):
+    """--show-template and --asset-config together must raise InvalidArgumentValueError."""
+    with pytest.raises(InvalidArgumentValueError, match="--show-template and --asset-config cannot be used together"):
+        create_namespace_asset(
+            cmd=mocked_cmd,
+            connector_type="Microsoft.OpcUa",
+            instance_name="my-instance",
+            instance_resource_group="my-rg",
+            show_template="config",
+            asset_config='{"defaultDatasetsConfiguration": {}}',
+        )
+
+
+@pytest.mark.parametrize("template_mode", ["config", "schema"])
+def test_create_namespace_asset_generalized_show_template(
+    mocked_cmd,
+    mocker,
+    mocked_get_namespace_for_instance,
+    template_mode: str,
+):
+    """--show-template returns config template immediately without creating an asset."""
+    connector_type = "Microsoft.OpcUa"
+    expected_result = {
+        "connectorType": connector_type,
+        "assetConfig": {"defaultDatasetsConfiguration": {"publishingInterval": None}},
+    }
+
+    mock_handle = mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._handle_asset_show_template",
+        return_value=expected_result,
+    )
+
+    instance_name = generate_random_string()
+    instance_resource_group = generate_random_string()
+
+    result = create_namespace_asset(
+        cmd=mocked_cmd,
+        connector_type=connector_type,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        show_template=template_mode,
+    )
+
+    assert result == expected_result
+    mock_handle.assert_called_once_with(
+        connector_type=connector_type,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        template_mode=template_mode,
+        asset_config=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for the generalized update_namespace_asset command
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reqs", [
+    {},
+    {
+        "asset_type_refs": ["typeRef1", "typeRef2"],
+        "attributes": ["key1=value1", "key2=value2"],
+        "description": "Updated description",
+        "disabled": True,
+        "display_name": "Updated Name",
+        "documentation_uri": "http://updated-docs.com",
+        "external_asset_id": "updated-ext-id",
+        "hardware_revision": "HW-2.0",
+        "manufacturer": "UpdatedCo",
+        "manufacturer_uri": "http://updatedco.com",
+        "model": "Model-Z",
+        "product_code": "PROD-002",
+        "serial_number": "SN-002",
+        "software_revision": "SW-2.0",
+        "tags": {"updated": "true"},
+    },
+    {
+        "disabled": False,
+        "description": "Only description updated",
+    },
+])
+def test_update_namespace_asset_generalized(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    reqs: dict,
+):
+    """Happy-path tests for the generalized update_namespace_asset command."""
+    asset_name = generate_random_string()
+    instance_name = generate_random_string()
+    instance_resource_group = generate_random_string()
+
+    namespace_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = namespace_resource["name"]
+    namespace_resource_group = namespace_resource["resource_group"]
+
+    original_asset = get_namespace_asset_record(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+    )
+    # Connector type is read from the device endpoint, not from asset properties
+    asset_device_name = original_asset["properties"]["deviceRef"]["deviceName"]
+    asset_endpoint_name = original_asset["properties"]["deviceRef"]["endpointName"]
+
+    # GET existing asset (by show before update)
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json=original_asset,
+        status=200,
+        content_type="application/json",
+    )
+
+    # GET device to derive connector type from endpoint
+    add_device_get_call(
+        mocked_responses=mocked_responses,
+        device_name=asset_device_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+        endpoint_name=asset_endpoint_name,
+        endpoint_type="opcua",
+    )
+
+    updated_asset = deepcopy(original_asset)
+    if "description" in reqs:
+        updated_asset["properties"]["description"] = reqs["description"]
+
+    # PATCH asset
+    mocked_responses.add(
+        method=responses.PATCH,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json=updated_asset,
+        status=200,
+        content_type="application/json",
+    )
+
+    # GET asset readback (final show)
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json=updated_asset,
+        status=200,
+        content_type="application/json",
+    )
+
+    result = update_namespace_asset(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        wait_sec=0,
+        **reqs,
+    )
+
+    assert result == updated_asset
+    # GET asset (show) + GET device (connector type) + PATCH + GET asset (readback) = 4 calls
+    assert len(mocked_responses.calls) == 4
+
+    patch_body = json.loads(mocked_responses.calls[2].request.body)
+    if reqs:
+        assert "properties" in patch_body or "tags" in patch_body
+
+    if "tags" in reqs:
+        assert patch_body.get("tags") == reqs["tags"]
+
+    # update derives namespace from the asset's ARM id for the PATCH;
+    # get_namespace_for_instance is only called once (via show() to fetch the existing asset)
+    mocked_get_namespace_for_instance.assert_called_once_with(
+        cmd=mocked_cmd,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+    )
+
+
+def test_update_namespace_asset_generalized_with_asset_config(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocker,
+    mocked_get_namespace_for_instance,
+):
+    """When --asset-config is provided on update, validated config properties appear in the PATCH body.
+
+    Mirrors the device endpoint apply test's with_config_file=True case.
+    """
+    asset_name = generate_random_string()
+    instance_name = generate_random_string()
+    instance_resource_group = generate_random_string()
+
+    namespace_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = namespace_resource["name"]
+    namespace_resource_group = namespace_resource["resource_group"]
+
+    config_props = {"defaultEventsConfiguration": '{"publishingInterval": 3000}'}
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._load_and_validate_asset_config",
+        return_value=config_props,
+    )
+
+    original_asset = get_namespace_asset_record(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+    )
+    asset_device_name = original_asset["properties"]["deviceRef"]["deviceName"]
+    asset_endpoint_name = original_asset["properties"]["deviceRef"]["endpointName"]
+
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json=original_asset,
+        status=200,
+        content_type="application/json",
+    )
+    add_device_get_call(
+        mocked_responses=mocked_responses,
+        device_name=asset_device_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+        endpoint_name=asset_endpoint_name,
+        endpoint_type="opcua",
+    )
+
+    updated_asset = deepcopy(original_asset)
+    updated_asset["properties"]["defaultEventsConfiguration"] = config_props["defaultEventsConfiguration"]
+    mocked_responses.add(
+        method=responses.PATCH,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json=updated_asset,
+        status=200,
+        content_type="application/json",
+    )
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json=updated_asset,
+        status=200,
+        content_type="application/json",
+    )
+
+    result = update_namespace_asset(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        asset_config='{"defaultEventsConfiguration": {"publishingInterval": 3000}}',
+        wait_sec=0,
+    )
+
+    assert result == updated_asset
+    # GET (show) + GET device + PATCH + GET (readback) = 4 calls
+    assert len(mocked_responses.calls) == 4
+
+    patch_body = json.loads(mocked_responses.calls[2].request.body)
+    assert patch_body["properties"]["defaultEventsConfiguration"] == config_props["defaultEventsConfiguration"]
+
+
+def test_update_namespace_asset_generalized_show_template_with_config_errors(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_get_namespace_for_instance,
+):
+    """--show-template and --asset-config together must raise InvalidArgumentValueError."""
+    asset_name = generate_random_string()
+    namespace_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = namespace_resource["name"]
+    namespace_resource_group = namespace_resource["resource_group"]
+
+    original_asset = get_namespace_asset_record(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+    )
+    asset_device_name = original_asset["properties"]["deviceRef"]["deviceName"]
+    asset_endpoint_name = original_asset["properties"]["deviceRef"]["endpointName"]
+
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json=original_asset,
+        status=200,
+        content_type="application/json",
+    )
+    add_device_get_call(
+        mocked_responses=mocked_responses,
+        device_name=asset_device_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+        endpoint_name=asset_endpoint_name,
+        endpoint_type="opcua",
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="--show-template and --asset-config cannot be used together"):
+        update_namespace_asset(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="my-instance",
+            instance_resource_group="my-rg",
+            show_template="config",
+            asset_config='{"defaultDatasetsConfiguration": {}}',
+        )
+
+
+@pytest.mark.parametrize("template_mode", ["config", "schema"])
+def test_update_namespace_asset_generalized_show_template(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocker,
+    mocked_get_namespace_for_instance,
+    template_mode: str,
+):
+    """--show-template on update returns config template without patching the asset."""
+    asset_name = generate_random_string()
+    namespace_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = namespace_resource["name"]
+    namespace_resource_group = namespace_resource["resource_group"]
+
+    original_asset = get_namespace_asset_record(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+    )
+    asset_device_name = original_asset["properties"]["deviceRef"]["deviceName"]
+    asset_endpoint_name = original_asset["properties"]["deviceRef"]["endpointName"]
+
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_asset_mgmt_uri(
+            asset_name=asset_name,
+            namespace_name=namespace_name,
+            resource_group_name=namespace_resource_group,
+        ),
+        json=original_asset,
+        status=200,
+        content_type="application/json",
+    )
+    add_device_get_call(
+        mocked_responses=mocked_responses,
+        device_name=asset_device_name,
+        namespace_name=namespace_name,
+        resource_group_name=namespace_resource_group,
+        endpoint_name=asset_endpoint_name,
+        endpoint_type="OpcUa",
+    )
+
+    expected_result = {
+        "connectorType": "Microsoft.OpcUa",
+        "assetConfig": {"defaultDatasetsConfiguration": {}},
+    }
+    mock_handle = mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._handle_asset_show_template",
+        return_value=expected_result,
+    )
+
+    instance_name = generate_random_string()
+    instance_resource_group = generate_random_string()
+
+    result = update_namespace_asset(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        show_template=template_mode,
+    )
+
+    assert result == expected_result
+    # GET asset (show) + GET device (connector type) = 2 calls; no PATCH
+    assert len(mocked_responses.calls) == 2
+    mock_handle.assert_called_once_with(
+        connector_type="Microsoft.OpcUa",
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        template_mode=template_mode,
+        asset_config=None,
+    )

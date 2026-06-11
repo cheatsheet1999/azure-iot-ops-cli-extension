@@ -36,6 +36,15 @@ from .test_namespace_assets_unit import (
     get_namespace_asset_mgmt_uri, get_namespace_asset_record, add_device_get_call
 )
 from ...generators import generate_random_string
+from azext_edge.edge.commands_namespaces import (
+    add_namespace_asset_dataset,
+    update_namespace_asset_dataset,
+    add_namespace_asset_dataset_point,
+)
+from azext_edge.edge.providers.adr.namespace_assets import (
+    _deep_merge_template,
+    _merge_destinations_template,
+)
 
 
 def generate_dataset(dataset_name: Optional[str] = None, num_data_points: int = 0) -> dict:
@@ -2241,3 +2250,629 @@ def test_import_namespace_asset_event_group_events(
     # Verify result is a list of events
     assert isinstance(result, list)
     assert len(result) > 0
+
+
+# ---------------------------------------------------------------------------
+# _deep_merge_template unit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("template, existing, expected", [
+    # Null values in template replaced by existing scalars
+    ({"a": None, "b": 10}, {"a": 5}, {"a": 5, "b": 10}),
+    # Existing keys not in template are added
+    ({"a": None}, {"a": 1, "extra": "hello"}, {"a": 1, "extra": "hello"}),
+    # Nested dict: existing values override nulls recursively
+    ({"nested": {"x": None, "y": 2}}, {"nested": {"x": 99}}, {"nested": {"x": 99, "y": 2}}),
+    # Non-dict existing value for a dict template key: existing wins
+    ({"cfg": {"x": None}}, {"cfg": "raw_string"}, {"cfg": "raw_string"}),
+    # Existing always wins over template (pre-fill semantics: ARM values take precedence)
+    ({"a": 42, "b": None}, {"a": 7, "b": 3}, {"a": 7, "b": 3}),
+    # Empty template: all existing keys are added
+    ({}, {"x": 1, "y": 2}, {"x": 1, "y": 2}),
+])
+def test_deep_merge_template(template, existing, expected):
+    result = _deep_merge_template(template, existing)
+    assert result == expected
+
+
+def test_deep_merge_template_returns_existing_when_template_none():
+    assert _deep_merge_template(None, {"a": 1}) == {"a": 1}
+
+
+def test_deep_merge_template_returns_template_when_existing_none():
+    assert _deep_merge_template({"a": None}, None) == {"a": None}
+
+
+# ---------------------------------------------------------------------------
+# _merge_destinations_template unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_merge_destinations_template_fills_existing_values():
+    template = [
+        {"target": "Mqtt", "configuration": {"topic": None, "qos": None}},
+        {"target": "BrokerStateStore", "configuration": {"key": None}},
+    ]
+    existing = [
+        {"target": "Mqtt", "configuration": {"topic": "my/topic", "qos": "Qos1"}},
+    ]
+    result = _merge_destinations_template(template, existing)
+    mqtt_entry = next(e for e in result if e["target"] == "Mqtt")
+    assert mqtt_entry["configuration"]["topic"] == "my/topic"
+    assert mqtt_entry["configuration"]["qos"] == "Qos1"
+    # Unmatched destination stays as-is (nulls)
+    bss_entry = next(e for e in result if e["target"] == "BrokerStateStore")
+    assert bss_entry["configuration"]["key"] is None
+
+
+def test_merge_destinations_template_no_match_preserves_template():
+    template = [{"target": "Mqtt", "configuration": {"topic": None}}]
+    existing = [{"target": "BrokerStateStore", "configuration": {"key": "k1"}}]
+    result = _merge_destinations_template(template, existing)
+    assert result[0]["configuration"]["topic"] is None
+
+
+def test_merge_destinations_template_empty_existing():
+    template = [{"target": "Mqtt", "configuration": {"topic": None}}]
+    result = _merge_destinations_template(template, [])
+    assert result == template
+
+
+# ---------------------------------------------------------------------------
+# add_namespace_asset_dataset (generalized) unit tests
+# ---------------------------------------------------------------------------
+
+
+def _build_asset_with_connector(
+    asset_name: str,
+    namespace_name: str,
+    resource_group_name: str,
+    connector_type: str = "Custom.Test",
+    datasets: Optional[list] = None,
+) -> dict:
+    """Build a mock asset record pre-wired for the generalized path."""
+    asset = get_namespace_asset_record(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+    )
+    asset["properties"]["datasets"] = datasets or []
+    return asset
+
+
+def _add_device_get_for_generalized(
+    mocked_responses: responses,
+    asset: dict,
+    namespace_name: str,
+    resource_group_name: str,
+    connector_type: str,
+) -> None:
+    """Register GET device mock needed by _get_connector_type_from_asset and _check_device_props."""
+    device_name = asset["properties"]["deviceRef"]["deviceName"]
+    endpoint_name = asset["properties"]["deviceRef"]["endpointName"]
+    add_device_get_call(
+        mocked_responses,
+        device_name=device_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        endpoint_name=endpoint_name,
+        endpoint_type=connector_type,
+    )
+
+
+@pytest.mark.parametrize("has_dataset_config", [False, True])
+@pytest.mark.parametrize("replace, pre_existing", [
+    (False, False),
+    (True, False),
+    (True, True),
+])
+def test_add_namespace_asset_dataset_generalized(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    has_dataset_config: bool,
+    replace: bool,
+    pre_existing: bool,
+):
+    asset_name = "gen-asset"
+    instance_name = "testInstance"
+    instance_resource_group = "testRG"
+    dataset_name = f"ds-{generate_random_string()}"
+    connector_type = "Custom.Test"
+
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    dataset_config_json = json.dumps({
+        "datasetConfiguration": {"publishingInterval": 1000},
+        "destinations": [{"target": "Mqtt", "configuration": {"topic": "t/test"}}],
+    })
+
+    # Build asset with optional pre-existing dataset
+    existing_datasets = [generate_dataset(dataset_name=dataset_name)] if pre_existing else []
+    asset = _build_asset_with_connector(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        connector_type=connector_type,
+        datasets=existing_datasets,
+    )
+
+    # _get_connector_type_from_asset: GET asset + GET device
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
+
+    # _check_device_props(asset_name=...): GET asset + GET device
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
+
+    # Mock _get_connector_metadata if dataset_config provided (called in _load_and_validate_dataset_config)
+    if has_dataset_config:
+        mocker.patch(
+            "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+            return_value={
+                "inboundEndpoints": [{
+                    "endpointType": f"Microsoft.{connector_type}",
+                    "datasets": {
+                        "datasetConfigurationSchema": None,
+                        "destinations": {"supportedDestinations": ["Mqtt"]},
+                    },
+                }]
+            },
+        )
+
+    # PATCH + final GET
+    updated_asset = deepcopy(asset)
+    updated_asset["properties"]["datasets"] = [{"name": dataset_name, "dataSource": "src/test", "dataPoints": []}]
+    mocked_responses.add(
+        responses.PATCH,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        status=200,
+    )
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=updated_asset, status=200,
+    )
+
+    result = add_namespace_asset_dataset(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        dataset_name=dataset_name,
+        data_source="src/test",
+        replace=replace,
+        dataset_config=dataset_config_json if has_dataset_config else None,
+        wait_sec=0,
+    )
+
+    assert result["name"] == dataset_name
+
+
+def test_add_namespace_asset_dataset_generalized_raises_on_duplicate(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    asset_name = "gen-asset"
+    dataset_name = "existing-ds"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        connector_type=connector_type,
+        datasets=[generate_dataset(dataset_name=dataset_name)],
+    )
+
+    # _get_connector_type_from_asset
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
+
+    with pytest.raises(InvalidArgumentValueError, match="already exists"):
+        add_namespace_asset_dataset(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            dataset_name=dataset_name,
+            replace=False,
+            wait_sec=0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# update_namespace_asset_dataset (generalized) unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_update_namespace_asset_dataset_generalized(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    asset_name = "gen-asset"
+    dataset_name = "sensor-ds"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    existing_ds = {
+        "name": dataset_name,
+        "dataSource": "orig/src",
+        "datasetConfiguration": json.dumps({"publishingInterval": 1000}),
+        "destinations": [],
+        "dataPoints": [],
+    }
+    asset = _build_asset_with_connector(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        connector_type=connector_type,
+        datasets=[existing_ds],
+    )
+
+    dataset_config_json = json.dumps({
+        "datasetConfiguration": {"publishingInterval": 5000},
+        "destinations": [{"target": "Mqtt", "configuration": {"topic": "updated/topic"}}],
+    })
+
+    # _get_connector_type_from_asset
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
+    # _check_device_props
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value={
+            "inboundEndpoints": [{
+                "endpointType": f"Microsoft.{connector_type}",
+                "datasets": {"datasetConfigurationSchema": None, "destinations": {"supportedDestinations": ["Mqtt"]}},
+            }]
+        },
+    )
+
+    updated_asset = deepcopy(asset)
+    updated_ds = deepcopy(existing_ds)
+    updated_ds["datasetConfiguration"] = json.dumps({"publishingInterval": 5000})
+    updated_ds["destinations"] = [{"target": "Mqtt", "configuration": {"topic": "updated/topic"}}]
+    updated_asset["properties"]["datasets"] = [updated_ds]
+
+    mocked_responses.add(
+        responses.PATCH,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        status=200,
+    )
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=updated_asset, status=200,
+    )
+
+    result = update_namespace_asset_dataset(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name="inst",
+        instance_resource_group="rg",
+        dataset_name=dataset_name,
+        dataset_config=dataset_config_json,
+        wait_sec=0,
+    )
+
+    assert result["name"] == dataset_name
+    assert json.loads(result["datasetConfiguration"])["publishingInterval"] == 5000
+
+
+def test_update_namespace_asset_dataset_generalized_show_template_config(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    """show_template=config on update should pre-fill existing ARM values into the template."""
+    asset_name = "gen-asset"
+    dataset_name = "sensor-ds"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    existing_ds = {
+        "name": dataset_name,
+        "dataSource": "orig/src",
+        "datasetConfiguration": json.dumps({"publishingInterval": 3000, "bufferSize": 5}),
+        "destinations": [{"target": "Mqtt", "configuration": {"topic": "live/topic", "qos": "Qos1"}}],
+        "dataPoints": [],
+    }
+    asset = _build_asset_with_connector(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        connector_type=connector_type,
+        datasets=[existing_ds],
+    )
+
+    # _get_connector_type_from_asset
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value={
+            "inboundEndpoints": [{
+                "endpointType": f"Microsoft.{connector_type}",
+                "datasets": {
+                    "datasetConfigurationSchema": {
+                        "type": "object",
+                        "properties": {
+                            "publishingInterval": {"type": "integer", "default": 1000},
+                            "bufferSize": {"type": "integer", "default": 10},
+                        }
+                    },
+                    "destinations": {"supportedDestinations": ["Mqtt"]},
+                    "limits": {},
+                    "fields": {"dataSource": {"input": "optional"}, "typeRef": {"input": "unsupported"}},
+                },
+            }]
+        },
+    )
+
+    result = update_namespace_asset_dataset(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name="inst",
+        instance_resource_group="rg",
+        dataset_name=dataset_name,
+        show_template="config",
+        wait_sec=0,
+    )
+
+    # connectorType wrapper present (device mock adds Microsoft. prefix)
+    assert result["connectorType"] == f"Microsoft.{connector_type}"
+    ds_cfg = result["datasetConfig"]["datasetConfiguration"]
+    # Existing ARM values should be pre-filled
+    assert ds_cfg["publishingInterval"] == 3000
+    assert ds_cfg["bufferSize"] == 5
+    # Existing destination topic should be pre-filled
+    dests = result["datasetConfig"]["destinations"]
+    mqtt_dest = next((d for d in dests if d["target"] == "Mqtt"), None)
+    assert mqtt_dest is not None
+    assert mqtt_dest["configuration"]["topic"] == "live/topic"
+
+
+def test_update_namespace_asset_dataset_generalized_raises_if_not_found(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    asset_name = "gen-asset"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        connector_type=connector_type,
+        datasets=[],
+    )
+
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
+
+    with pytest.raises(InvalidArgumentValueError, match="not found"):
+        update_namespace_asset_dataset(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            dataset_name="missing-ds",
+            show_template="config",
+            wait_sec=0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# add_namespace_asset_dataset_point (generalized) unit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("has_datapoint_config", [False, True])
+def test_add_namespace_asset_dataset_point_generalized(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    has_datapoint_config: bool,
+):
+    asset_name = "gen-asset"
+    dataset_name = "sensor-ds"
+    datapoint_name = "temp-dp"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    existing_ds = {
+        "name": dataset_name,
+        "dataSource": "s/src",
+        "dataPoints": [],
+    }
+    asset = _build_asset_with_connector(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        connector_type=connector_type,
+        datasets=[existing_ds],
+    )
+
+    datapoint_config_json = json.dumps({
+        "datapointConfiguration": {"samplingInterval": 250, "deadBand": 0.5, "enabled": True}
+    })
+
+    # _get_connector_type_from_asset
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
+    # _check_device_props
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
+
+    if has_datapoint_config:
+        mocker.patch(
+            "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+            return_value={
+                "inboundEndpoints": [{
+                    "endpointType": f"Microsoft.{connector_type}",
+                    "datasets": {
+                        "dataPoints": {"dataPointConfigurationSchema": None},
+                    },
+                }]
+            },
+        )
+
+    updated_asset = deepcopy(asset)
+    added_dp = {"name": datapoint_name, "dataSource": "sensors/temp"}
+    if has_datapoint_config:
+        added_dp["dataPointConfiguration"] = json.dumps({"samplingInterval": 250, "deadBand": 0.5, "enabled": True})
+    updated_asset["properties"]["datasets"][0]["dataPoints"] = [added_dp]
+
+    mocked_responses.add(
+        responses.PATCH,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        status=200,
+    )
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=updated_asset, status=200,
+    )
+
+    result = add_namespace_asset_dataset_point(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name="inst",
+        instance_resource_group="rg",
+        dataset_name=dataset_name,
+        datapoint_name=datapoint_name,
+        data_source="sensors/temp",
+        replace=False,
+        datapoint_config=datapoint_config_json if has_datapoint_config else None,
+        wait_sec=0,
+    )
+
+    assert isinstance(result, list)
+    dp = next((p for p in result if p["name"] == datapoint_name), None)
+    assert dp is not None
+    assert dp["dataSource"] == "sensors/temp"
+    if has_datapoint_config:
+        cfg = json.loads(dp["dataPointConfiguration"])
+        assert cfg["samplingInterval"] == 250
+        assert cfg["deadBand"] == 0.5
+
+
+def test_add_namespace_asset_dataset_point_generalized_raises_on_duplicate(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    asset_name = "gen-asset"
+    dataset_name = "sensor-ds"
+    datapoint_name = "existing-dp"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    existing_ds = {
+        "name": dataset_name,
+        "dataSource": "s/src",
+        "dataPoints": [{"name": datapoint_name, "dataSource": "sensors/old"}],
+    }
+    asset = _build_asset_with_connector(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        connector_type=connector_type,
+        datasets=[existing_ds],
+    )
+
+    # _get_connector_type_from_asset
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
+
+    with pytest.raises(InvalidArgumentValueError, match="already exists"):
+        add_namespace_asset_dataset_point(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            dataset_name=dataset_name,
+            datapoint_name=datapoint_name,
+            data_source="sensors/new",
+            replace=False,
+            wait_sec=0,
+        )

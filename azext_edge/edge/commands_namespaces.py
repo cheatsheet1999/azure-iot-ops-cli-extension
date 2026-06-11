@@ -462,6 +462,49 @@ def add_inbound_mqtt_device_endpoint(
     )
 
 
+def apply_inbound_device_endpoint(
+    cmd,
+    connector_type: str,
+    instance_name: str,
+    instance_resource_group: str,
+    device_name: Optional[str] = None,
+    endpoint_name: Optional[str] = None,
+    endpoint_address: Optional[str] = None,
+    endpoint_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    skip_connector_check: Optional[bool] = False,
+    endpoint_version: Optional[str] = None,
+    certificate_reference: Optional[str] = None,
+    key_reference: Optional[str] = None,
+    intermediate_certificate_reference: Optional[str] = None,
+    password_reference: Optional[str] = None,
+    username_reference: Optional[str] = None,
+    trust_list: Optional[str] = None,
+    no_replace: Optional[bool] = False,
+    **kwargs
+):
+    return NamespaceDevices(cmd).apply_inbound_endpoint_by_connector_type(
+        device_name=device_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        connector_type=connector_type,
+        endpoint_name=endpoint_name,
+        endpoint_address=endpoint_address,
+        endpoint_config=endpoint_config,
+        show_template=show_template,
+        skip_connector_check=skip_connector_check,
+        endpoint_version=endpoint_version,
+        certificate_reference=certificate_reference,
+        key_reference=key_reference,
+        intermediate_certificate_reference=intermediate_certificate_reference,
+        password_reference=password_reference,
+        username_reference=username_reference,
+        trust_list=trust_list,
+        no_replace=no_replace,
+        **kwargs
+    )
+
+
 def list_inbound_device_endpoints(
     cmd,
     device_name: str,
@@ -498,6 +541,110 @@ def remove_inbound_device_endpoints(
 
 
 # NAMESPACE ASSET COMMANDS
+def create_namespace_asset(
+    cmd,
+    connector_type: str,
+    instance_name: str,
+    instance_resource_group: str,
+    asset_name: Optional[str] = None,
+    device_name: Optional[str] = None,
+    device_endpoint_name: Optional[str] = None,
+    asset_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    asset_type_refs: Optional[List[str]] = None,
+    attributes: Optional[List[str]] = None,
+    description: Optional[str] = None,
+    disabled: Optional[bool] = None,
+    display_name: Optional[str] = None,
+    documentation_uri: Optional[str] = None,
+    external_asset_id: Optional[str] = None,
+    hardware_revision: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    manufacturer_uri: Optional[str] = None,
+    model: Optional[str] = None,
+    product_code: Optional[str] = None,
+    serial_number: Optional[str] = None,
+    software_revision: Optional[str] = None,
+    tags: Optional[Dict[str, str]] = None,
+    **kwargs
+):
+    return NamespaceAssets(cmd).create_asset_by_connector_type(
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        connector_type=connector_type,
+        asset_name=asset_name,
+        device_name=device_name,
+        device_endpoint_name=device_endpoint_name,
+        asset_config=asset_config,
+        show_template=show_template,
+        asset_type_refs=asset_type_refs,
+        attributes=attributes,
+        description=description,
+        disabled=disabled,
+        display_name=display_name,
+        documentation_uri=documentation_uri,
+        external_asset_id=external_asset_id,
+        hardware_revision=hardware_revision,
+        manufacturer=manufacturer,
+        manufacturer_uri=manufacturer_uri,
+        model=model,
+        product_code=product_code,
+        serial_number=serial_number,
+        software_revision=software_revision,
+        tags=tags,
+        **kwargs
+    )
+
+
+def update_namespace_asset(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    asset_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    asset_type_refs: Optional[List[str]] = None,
+    attributes: Optional[List[str]] = None,
+    description: Optional[str] = None,
+    disabled: Optional[bool] = None,
+    display_name: Optional[str] = None,
+    documentation_uri: Optional[str] = None,
+    external_asset_id: Optional[str] = None,
+    hardware_revision: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    manufacturer_uri: Optional[str] = None,
+    model: Optional[str] = None,
+    product_code: Optional[str] = None,
+    serial_number: Optional[str] = None,
+    software_revision: Optional[str] = None,
+    tags: Optional[Dict[str, str]] = None,
+    **kwargs
+):
+    return NamespaceAssets(cmd).update_asset_by_connector_type(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        asset_config=asset_config,
+        show_template=show_template,
+        asset_type_refs=asset_type_refs,
+        attributes=attributes,
+        description=description,
+        disabled=disabled,
+        display_name=display_name,
+        documentation_uri=documentation_uri,
+        external_asset_id=external_asset_id,
+        hardware_revision=hardware_revision,
+        manufacturer=manufacturer,
+        manufacturer_uri=manufacturer_uri,
+        model=model,
+        product_code=product_code,
+        serial_number=serial_number,
+        software_revision=software_revision,
+        tags=tags,
+        **kwargs
+    )
+
+
 def create_namespace_custom_asset(
     cmd,
     asset_name: str,
@@ -2940,3 +3087,98 @@ export_namespace_custom_asset_management_group_action = _make_mgmt_action_export
 export_namespace_opcua_asset_management_group_action = _make_mgmt_action_export_func("export_management_group_actions")
 import_namespace_custom_asset_management_group_action = _make_mgmt_action_import_func("import_management_group_actions")
 import_namespace_opcua_asset_management_group_action = _make_mgmt_action_import_func("import_management_group_actions")
+
+
+# GENERALIZED DATASET COMMANDS
+
+
+def add_namespace_asset_dataset(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    dataset_name: str,
+    data_source: Optional[str] = None,
+    type_ref: Optional[str] = None,
+    replace: Optional[bool] = False,
+    dataset_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    **kwargs
+) -> dict:
+    return NamespaceAssets(cmd).add_dataset_generalized(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        dataset_name=dataset_name,
+        data_source=data_source,
+        type_ref=type_ref,
+        replace=replace,
+        dataset_config=dataset_config,
+        show_template=show_template,
+        **kwargs
+    )
+
+
+def update_namespace_asset_dataset(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    dataset_name: str,
+    data_source: Optional[str] = None,
+    type_ref: Optional[str] = None,
+    dataset_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    **kwargs
+) -> dict:
+    return NamespaceAssets(cmd).update_dataset_generalized(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        dataset_name=dataset_name,
+        data_source=data_source,
+        type_ref=type_ref,
+        dataset_config=dataset_config,
+        show_template=show_template,
+        **kwargs
+    )
+
+
+export_namespace_asset_dataset = _make_export_func("export_datasets")
+import_namespace_asset_dataset = _make_import_func("import_datasets")
+
+
+# GENERALIZED DATAPOINT COMMANDS
+
+
+def add_namespace_asset_dataset_point(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    dataset_name: str,
+    datapoint_name: str,
+    data_source: str,
+    type_ref: Optional[str] = None,
+    replace: Optional[bool] = False,
+    datapoint_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    **kwargs
+) -> List[dict]:
+    return NamespaceAssets(cmd).add_dataset_datapoint_generalized(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        dataset_name=dataset_name,
+        datapoint_name=datapoint_name,
+        data_source=data_source,
+        type_ref=type_ref,
+        replace=replace,
+        datapoint_config=datapoint_config,
+        show_template=show_template,
+        **kwargs
+    )
+
+
+export_namespace_asset_dataset_point = _make_datapoint_export_func("export_dataset_datapoints")
+import_namespace_asset_dataset_point = _make_datapoint_import_func("import_dataset_datapoints")

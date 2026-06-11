@@ -646,3 +646,209 @@ def assert_asset_properties(result, **expected):
         assert result_props["serialNumber"] == expected["serial_number"]
     if "software_revision" in expected:
         assert result_props["softwareRevision"] == expected["software_revision"]
+
+
+# ---------------------------------------------------------------------------
+# Tests for the generalized az iot ops ns asset create / update commands
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("template_mode", ["config", "schema"])
+def test_generalized_asset_show_template_opcua(template_mode, require_namespace_init_module):
+    """--show-template for OPC UA reads from the bundled file (no ARM call needed)."""
+    instance_name = require_namespace_init_module["instanceName"]
+    resource_group = require_namespace_init_module["resourceGroup"]
+    result = run(
+        f"az iot ops ns asset create "
+        f"--show-template {template_mode} --connector-type Microsoft.OpcUa "
+        f"-g {resource_group} -i {instance_name}"
+    )
+    assert result["connectorType"] == "Microsoft.OpcUa"
+    asset_config = result["assetConfig"]
+
+    # Datasets configuration and destinations must be present
+    assert "defaultDatasetsConfiguration" in asset_config
+    assert "defaultDatasetsDestinations" in asset_config
+
+    datasets_config = asset_config["defaultDatasetsConfiguration"]
+    for field in ["publishingInterval", "samplingInterval", "queueSize", "keyFrameCount"]:
+        assert field in datasets_config, f"Missing datasets config field: {field}"
+
+    # Events configuration and destinations must be present
+    assert "defaultEventsConfiguration" in asset_config
+    assert "defaultEventsDestinations" in asset_config
+
+    events_config = asset_config["defaultEventsConfiguration"]
+    for field in ["publishingInterval", "samplingInterval", "queueSize"]:
+        assert field in events_config, f"Missing events config field: {field}"
+
+
+def test_generalized_asset_error_cases(require_namespace_init_module):
+    """Verify CLI-level error conditions for generalized asset create/update."""
+    instance_name = require_namespace_init_module["instanceName"]
+    resource_group = require_namespace_init_module["resourceGroup"]
+
+    # --connector-type is required for asset create
+    run(
+        "az iot ops ns asset create "
+        "--show-template config "
+        f"-g {resource_group} -i {instance_name}",
+        expect_failure=True,
+    )
+
+    # --show-template + --asset-config are mutually exclusive
+    run(
+        "az iot ops ns asset create "
+        "--connector-type Microsoft.OpcUa "
+        "--show-template config "
+        f"--asset-config '{{}}' "
+        f"-g {resource_group} -i {instance_name}",
+        expect_failure=True,
+    )
+
+    # --name is required when not using --show-template
+    run(
+        "az iot ops ns asset create "
+        "--connector-type Microsoft.OpcUa "
+        "--device dummy --endpoint dummy "
+        f"-g {resource_group} -i {instance_name}",
+        expect_failure=True,
+    )
+
+
+def test_generalized_asset_lifecycle(
+    require_namespace_init_module, shared_device, tracked_resources: List[str]
+):
+    """Integration lifecycle test for the generalized ns asset create / update commands."""
+    import json
+    import os
+    import tempfile
+
+    instance_name = require_namespace_init_module["instanceName"]
+    resource_group = require_namespace_init_module["resourceGroup"]
+    device_name = shared_device
+
+    endpoint_name = f"gen-ep-{generate_random_string(8, force_lower=True)}"
+    asset_name = f"gen-asset-{generate_random_string(8, force_lower=True)}"
+
+    # Create an OPC UA inbound endpoint on the shared device
+    run(
+        f"az iot ops ns device endpoint inbound add opcua --name {endpoint_name} "
+        f"--instance {instance_name} -g {resource_group} --device {device_name} "
+        f"--endpoint-address opc.tcp://192.168.1.200:4840"
+    )
+
+    # --- Create asset using the generalized create command ---
+    created = run(
+        f"az iot ops ns asset create "
+        f"--connector-type opcua "
+        f"--name {asset_name} "
+        f"--device {device_name} "
+        f"--endpoint {endpoint_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--description \"Generalized create test\" "
+        f"--display-name \"Gen Asset\" "
+        f"--manufacturer \"TestCo\" "
+        f"--serial-number \"GEN-SN-001\""
+    )
+    tracked_resources.append(created["id"])
+
+    assert_asset_properties(
+        created,
+        name=asset_name,
+        device=device_name,
+        endpoint=endpoint_name,
+        description="Generalized create test",
+        display_name="Gen Asset",
+        manufacturer="TestCo",
+        serial_number="GEN-SN-001",
+    )
+
+    # --- --show-template config round-trip: use output directly as --asset-config ---
+    template_result = run(
+        f"az iot ops ns asset create "
+        f"--show-template config --connector-type Microsoft.OpcUa "
+        f"--instance {instance_name} -g {resource_group}"
+    )
+    assert template_result["connectorType"] == "Microsoft.OpcUa"
+    assert "assetConfig" in template_result
+    assert "defaultDatasetsConfiguration" in template_result["assetConfig"]
+
+    config_fd, config_path = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(config_fd, "w") as f:
+            json.dump(template_result["assetConfig"], f)
+        asset_name_2 = f"gen-asset2-{generate_random_string(8, force_lower=True)}"
+        created_2 = run(
+            f"az iot ops ns asset create "
+            f"--connector-type opcua "
+            f"--name {asset_name_2} "
+            f"--device {device_name} "
+            f"--endpoint {endpoint_name} "
+            f"--instance {instance_name} -g {resource_group} "
+            f"--asset-config {config_path}"
+        )
+        tracked_resources.append(created_2["id"])
+        assert created_2["name"] == asset_name_2
+        asset_props = created_2["properties"]
+        datasets_config = json.loads(asset_props.get("defaultDatasetsConfiguration", "{}"))
+        assert datasets_config.get("publishingInterval") == 1000
+        assert datasets_config.get("samplingInterval") == 1000
+    finally:
+        os.unlink(config_path)
+
+    # --- Update asset using the generalized update command ---
+    updated = run(
+        f"az iot ops ns asset update "
+        f"--name {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--description \"Updated via generalized update\" "
+        f"--software-revision \"v2.0\" "
+        f"--model \"UpdatedModel\""
+    )
+
+    assert_asset_properties(
+        updated,
+        name=asset_name,
+        description="Updated via generalized update",
+        software_revision="v2.0",
+        model="UpdatedModel",
+    )
+
+    # --- --show-template on update (reads connector type from existing asset) ---
+    schema_result = run(
+        f"az iot ops ns asset update "
+        f"--name {asset_name} "
+        f"--show-template schema "
+        f"--instance {instance_name} -g {resource_group}"
+    )
+    assert schema_result["connectorType"] == "Microsoft.OpcUa"
+    assert "assetConfig" in schema_result
+
+    # --- Error: --show-template + --asset-config ---
+    run(
+        f"az iot ops ns asset update "
+        f"--name {asset_name} "
+        f"--show-template config "
+        f"--asset-config '{{}}' "
+        f"--instance {instance_name} -g {resource_group}",
+        expect_failure=True,
+    )
+
+    # --- Error: duplicate create (asset already exists) ---
+    run(
+        f"az iot ops ns asset create "
+        f"--connector-type opcua "
+        f"--name {asset_name} "
+        f"--device {device_name} "
+        f"--endpoint {endpoint_name} "
+        f"--instance {instance_name} -g {resource_group}",
+        expect_failure=True,
+    )
+
+    # Clean up endpoint
+    run(
+        f"az iot ops ns device endpoint inbound remove "
+        f"--device {device_name} --endpoint {endpoint_name} "
+        f"--instance {instance_name} -g {resource_group} -y"
+    )

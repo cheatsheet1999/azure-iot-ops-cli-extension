@@ -10,7 +10,12 @@ import json
 import pytest
 import responses
 
-from azure.cli.core.azclierror import FileOperationError, InvalidArgumentValueError
+from azure.cli.core.azclierror import (
+    FileOperationError,
+    InvalidArgumentValueError,
+    RequiredArgumentMissingError,
+    ResourceNotFoundError,
+)
 
 from azext_edge.edge.commands_namespaces import (
     create_namespace_device,
@@ -27,9 +32,11 @@ from azext_edge.edge.commands_namespaces import (
     add_inbound_opcua_device_endpoint,
     add_inbound_rest_device_endpoint,
     add_inbound_sse_device_endpoint,
-    add_inbound_mqtt_device_endpoint
+    add_inbound_mqtt_device_endpoint,
+    apply_inbound_device_endpoint,
 )
 from azext_edge.edge.providers.adr.common import ADRAuthModes
+from azext_edge.edge.providers.adr.helpers import _slim_schema, strip_nulls as _strip_nulls
 from azext_edge.edge.providers.adr.namespace_devices import DeviceEndpointType
 from azext_edge.edge.providers.adr.specs import SecurityMode, SecurityPolicy
 from azext_edge.edge.util.common import parse_kvp_nargs
@@ -1803,7 +1810,7 @@ def test_add_inbound_opcua_device_endpoint(
     (DeviceEndpointType.MQTT.value, add_inbound_mqtt_device_endpoint),
     ("custom", add_inbound_custom_device_endpoint)
 ])
-def test_add_inbound_device_endpoint_error(
+def test_apply_inbound_device_endpoint_error(
     mocked_cmd,
     mocked_responses: responses,
     endpoint_type: str,
@@ -2425,3 +2432,1456 @@ def test_add_inbound_mqtt_device_endpoint(
     assert endpoint_patch["additionalConfiguration"]
     additional_config = json.loads(endpoint_patch["additionalConfiguration"])
     assert additional_config == expected_mqtt_config
+
+
+# ---------------------------------------------------------------------------
+# Tests for the generalized apply_inbound_device_endpoint command
+# ---------------------------------------------------------------------------
+
+
+def _make_connector_template(connector_type: str, version: str = "1.0.0", schema_refs=None):
+    """Build a minimal mock connector template resource.
+
+    configurationSchemaRefs uses the dict shape matching real connector templates
+    (e.g. keys like additionalConfigSchemaRef), not a plain list.
+    """
+    if schema_refs is None:
+        config_schema_refs = {}
+    elif isinstance(schema_refs, list):
+        # Wrap list into dict shape: first entry becomes additionalConfigSchemaRef
+        config_schema_refs = {"additionalConfigSchemaRef": schema_refs[0]} if schema_refs else {}
+    else:
+        config_schema_refs = schema_refs
+    return {
+        "name": f"template-{connector_type.lower()}",
+        "properties": {
+            "connectorMetadataRef": f"mcr.microsoft.com/azureiotoperations/{connector_type.lower()}-metadata:1.0",
+            "deviceInboundEndpointTypes": [
+                {
+                    "endpointType": connector_type,
+                    "version": version,
+                    "configurationSchemaRefs": config_schema_refs,
+                }
+            ],
+            "runtimeConfiguration": {
+                "managedConfigurationSettings": {
+                    "imageConfigurationSettings": {
+                        "tagDigestSettings": {"tag": version}
+                    }
+                }
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("connector_type,template_mode", [
+    ("Microsoft.OpcUa", "config"),
+    ("Microsoft.OpcUa", "schema"),
+    ("Microsoft.Onvif", "config"),
+    ("Microsoft.Onvif", "schema"),
+])
+def test_apply_inbound_device_endpoint_show_template(
+    mocked_cmd,
+    mocker,
+    connector_type: str,
+    template_mode: str,
+    mocked_get_namespace_for_instance,
+):
+    """--show-template returns config template without hitting device APIs.
+
+    OPC UA: schema comes from bundled metadata via _get_opcua_info.
+    Other types: schema comes from ConnectorTemplates.get_endpoint_schema.
+
+    config mode: fields shown as default value (null if no default).
+    schema mode: fields shown with type, default, and constraints.
+    """
+    raw_schema = {"type": "object", "properties": {"foo": {"type": "string"}}}
+
+    is_opcua = connector_type.lower() == "microsoft.opcua"
+
+    if template_mode == "config":
+        # foo has no default -> null in config mode
+        expected_endpoint_config = {"foo": None}
+    else:
+        # schema mode: foo has no default -> full metadata
+        expected_endpoint_config = {"foo": {"type": "string", "default": None}}
+
+    if is_opcua:
+        mocker.patch(
+            "azext_edge.edge.providers.adr.helpers.get_opcua_info",
+            return_value={
+                "version": "1.2.82",
+                "inboundEndpoints": [
+                    {"endpointType": "Microsoft.OpcUa", "additionalConfigurationSchema": raw_schema}
+                ],
+            },
+        )
+        mock_ct = mocker.patch(
+            "azext_edge.edge.providers.adr.namespace_devices.ConnectorTemplates"
+        )
+        mock_ct.return_value.get_endpoint_schema.side_effect = AssertionError(
+            "ConnectorTemplates.get_endpoint_schema must not be called for OPC UA"
+        )
+    else:
+        mock_ct = mocker.patch(
+            "azext_edge.edge.providers.adr.namespace_devices.ConnectorTemplates"
+        )
+        mock_ct.return_value.get_endpoint_schema.return_value = {
+            "connectorType": connector_type,
+            "endpointConfig": raw_schema,
+        }
+
+    instance_name = f"inst-{generate_random_string()}"
+    instance_resource_group = f"rg-{generate_random_string()}"
+
+    result = apply_inbound_device_endpoint(
+        cmd=mocked_cmd,
+        connector_type=connector_type,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        show_template=template_mode,
+    )
+
+    expected = {"connectorType": connector_type, "endpointConfig": expected_endpoint_config}
+    assert result == expected
+    if not is_opcua:
+        mock_ct.return_value.get_endpoint_schema.assert_called_once_with(
+            instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+            connector_type=connector_type,
+        )
+
+
+def test_apply_inbound_device_endpoint_skip_connector_check_with_config_file_errors(mocked_cmd):
+    """--skip-connector-check and --endpoint-config together must raise InvalidArgumentValueError."""
+    with pytest.raises(InvalidArgumentValueError, match="--skip-connector-check cannot be used when --endpoint-config"):
+        apply_inbound_device_endpoint(
+            cmd=mocked_cmd,
+            connector_type="Microsoft.OpcUa",
+            instance_name="my-instance",
+            instance_resource_group="my-rg",
+            device_name="my-device",
+            endpoint_name="ep1",
+            endpoint_address="opc.tcp://1.2.3.4:4840",
+            endpoint_config="./config.json",
+            skip_connector_check=True,
+        )
+
+
+@pytest.mark.parametrize("missing_arg, kwargs_override", [
+    ("device_name", {"device_name": None}),
+    ("endpoint_name", {"endpoint_name": None}),
+    ("endpoint_address", {"endpoint_address": None}),
+])
+def test_apply_inbound_device_endpoint_missing_required_args(
+    mocked_cmd,
+    mocker,
+    missing_arg: str,
+    kwargs_override: dict,
+):
+    """When not in show_schema mode, --device / --name / --endpoint-address are required."""
+    # Patch connector template so we never hit the network
+    mock_ct = mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_devices.ConnectorTemplates"
+    )
+    mock_ct.return_value.get_connector_template_for_type.return_value = _make_connector_template("Microsoft.OpcUa")
+
+    base_kwargs = {
+        "connector_type": "Microsoft.OpcUa",
+        "instance_name": "my-instance",
+        "instance_resource_group": "my-rg",
+        "device_name": "my-device",
+        "endpoint_name": "ep1",
+        "endpoint_address": "opc.tcp://1.2.3.4:4840",
+        "skip_connector_check": True,  # skip template lookup so we hit arg validation
+    }
+    base_kwargs.update(kwargs_override)
+
+    with pytest.raises(RequiredArgumentMissingError):
+        apply_inbound_device_endpoint(cmd=mocked_cmd, **base_kwargs)
+
+
+def test_apply_inbound_device_endpoint_no_template_errors(
+    mocked_cmd,
+    mocker,
+):
+    """When connector template is not found for a non-OPC UA type and --skip-connector-check
+    is not set, raise ResourceNotFoundError.
+    OPC UA is excluded here because it never uses connector templates.
+    """
+    connector_type = "Microsoft.Onvif"  # non-OPC UA type that requires a connector template
+    mock_ct = mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_devices.ConnectorTemplates"
+    )
+    mock_ct.return_value.get_connector_template_for_type.return_value = None
+
+    with pytest.raises(ResourceNotFoundError, match="No connector template found for connector type"):
+        apply_inbound_device_endpoint(
+            cmd=mocked_cmd,
+            connector_type=connector_type,
+            instance_name="my-instance",
+            instance_resource_group="my-rg",
+            device_name="my-device",
+            endpoint_name="ep1",
+            endpoint_address="http://1.2.3.4:80/onvif",
+            skip_connector_check=False,
+        )
+
+
+@pytest.mark.parametrize("with_config_file, skip_connector_check, endpoints_present, replace", [
+    # (with_config_file, skip_connector_check, endpoints_present, replace)
+    # with_config_file=True + skip_connector_check=True is mutually exclusive and is covered by
+    # test_apply_inbound_device_endpoint_skip_connector_check_with_config_file_errors
+    (False, False, False, False),
+    (False, False, True, True),
+    (False, True, False, False),
+    (False, True, True, True),
+    (True, False, False, False),
+    (True, False, True, True),
+])
+def test_apply_inbound_device_endpoint_success(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocker,
+    mocked_get_namespace_for_instance,
+    with_config_file: bool,
+    skip_connector_check: bool,
+    endpoints_present: bool,
+    replace: bool,
+):
+    """
+    Happy-path tests for apply_inbound_device_endpoint.
+    Covers: with/without config file, skip/no-skip connector check, replace semantics.
+    """
+
+    connector_type = "Microsoft.OpcUa"
+    version_from_template = "1.3.0"
+
+    # OPC UA does not use Akri connector templates — mock _get_opcua_info instead.
+    # For skip_connector_check=True neither path is taken, so the mock is a no-op there.
+    mocker.patch(
+        "azext_edge.edge.providers.adr.helpers.get_opcua_info",
+        return_value={"version": version_from_template, "inboundEndpoints": []},
+    )
+    # ConnectorTemplates should NOT be called for OPC UA; patch it to catch any accidental call.
+    mock_ct = mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_devices.ConnectorTemplates"
+    )
+    mock_ct.return_value.get_connector_template_for_type.side_effect = AssertionError(
+        "ConnectorTemplates should not be called for OPC UA"
+    )
+
+    # Setup identifiers
+    device_name = generate_random_string()
+    instance_name = f"inst-{generate_random_string()}"
+    instance_resource_group = f"rg-{generate_random_string()}"
+    endpoint_name = f"ep-{generate_random_string()}"
+    endpoint_address = "opc.tcp://10.0.0.1:4840"
+
+    namespace_name = mocked_get_namespace_for_instance.return_value["name"]
+    resource_group_name = mocked_get_namespace_for_instance.return_value["resource_group"]
+
+    # Build endpoint config file content (inline JSON, not an actual file path)
+    endpoint_config_content = '{"keepAlive": 5000}'
+    config_file_path = None
+    if with_config_file:
+        config_file_path = endpoint_config_content
+        # patch process_additional_configuration so it just returns the JSON string
+        mocker.patch(
+            "azext_edge.edge.providers.adr.helpers.process_additional_configuration",
+            return_value=endpoint_config_content,
+        )
+
+    # Build original device
+    original_device = get_namespace_device_record(
+        device_name=device_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+    )
+    original_device["properties"]["endpoints"] = {
+        "inbound": generate_device_inbound_endpoint() if endpoints_present else {}
+    }
+    if replace:
+        original_device["properties"]["endpoints"]["inbound"].update(
+            generate_device_inbound_endpoint(endpoint_name=endpoint_name)
+        )
+
+    # Determine expected endpoint body
+    # OPC UA version is always None — ADR manages it (consistent with DOE behavior).
+    expected_version = None
+    expected_inbound = {
+        endpoint_name: {
+            "endpointType": connector_type,
+            "address": endpoint_address,
+            "version": expected_version,
+            "authentication": {"method": ADRAuthModes.anonymous.value},
+        }
+    }
+    if with_config_file:
+        expected_inbound[endpoint_name]["additionalConfiguration"] = endpoint_config_content
+
+    updated_device = deepcopy(original_device)
+    updated_device["properties"]["endpoints"] = {"inbound": expected_inbound}
+
+    # Mock GET (original device)
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_device_mgmt_uri(
+            namespace_name=namespace_name,
+            resource_group_name=resource_group_name,
+            device_name=device_name,
+        ),
+        json=original_device,
+        status=200,
+        content_type="application/json",
+    )
+    # Mock PATCH
+    mocked_responses.add(
+        method=responses.PATCH,
+        url=get_namespace_device_mgmt_uri(
+            namespace_name=namespace_name,
+            resource_group_name=resource_group_name,
+            device_name=device_name,
+        ),
+        json=updated_device,
+        status=200,
+        content_type="application/json",
+    )
+    # Mock GET (final read-back)
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_device_mgmt_uri(
+            namespace_name=namespace_name,
+            resource_group_name=resource_group_name,
+            device_name=device_name,
+        ),
+        json=updated_device,
+        status=200,
+        content_type="application/json",
+    )
+
+    result = apply_inbound_device_endpoint(
+        cmd=mocked_cmd,
+        connector_type=connector_type,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        device_name=device_name,
+        endpoint_name=endpoint_name,
+        endpoint_address=endpoint_address,
+        endpoint_config=config_file_path,
+        skip_connector_check=skip_connector_check,
+        wait_sec=0,
+        replace=replace,
+    )
+
+    assert result == expected_inbound
+
+    # OPC UA never uses ConnectorTemplates — template lookup must not be called in any case.
+    mock_ct.return_value.get_connector_template_for_type.assert_not_called()
+
+    # Verify HTTP calls
+    assert len(mocked_responses.calls) == 3
+    patch_body = json.loads(mocked_responses.calls[1].request.body)
+    endpoint_patch = patch_body["properties"]["endpoints"]["inbound"][endpoint_name]
+    assert endpoint_patch["endpointType"] == connector_type
+    assert endpoint_patch["version"] == expected_version
+    assert endpoint_patch["address"] == endpoint_address
+
+    if with_config_file:
+        assert endpoint_patch.get("additionalConfiguration") == endpoint_config_content
+    else:
+        assert "additionalConfiguration" not in endpoint_patch
+
+
+def test_apply_inbound_device_endpoint_duplicate_no_replace_errors(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocker,
+    mocked_get_namespace_for_instance,
+):
+    """Duplicate endpoint name without --replace must raise InvalidArgumentValueError."""
+    connector_type = "Microsoft.OpcUa"
+    # OPC UA uses bundled metadata, not connector templates.
+    mocker.patch(
+        "azext_edge.edge.providers.adr.helpers.get_opcua_info",
+        return_value={"version": "1.2.82", "inboundEndpoints": []},
+    )
+    mock_ct = mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_devices.ConnectorTemplates"
+    )
+    mock_ct.return_value.get_connector_template_for_type.side_effect = AssertionError(
+        "ConnectorTemplates should not be called for OPC UA"
+    )
+
+    device_name = generate_random_string()
+    endpoint_name = f"ep-{generate_random_string()}"
+    namespace_name = mocked_get_namespace_for_instance.return_value["name"]
+    resource_group_name = mocked_get_namespace_for_instance.return_value["resource_group"]
+
+    original_device = get_namespace_device_record(
+        device_name=device_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+    )
+    # Pre-populate the endpoint so it already exists
+    original_device["properties"]["endpoints"]["inbound"] = {
+        endpoint_name: {"endpointType": connector_type, "address": "opc.tcp://old:4840", "authentication": {}}
+    }
+
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_device_mgmt_uri(
+            namespace_name=namespace_name,
+            resource_group_name=resource_group_name,
+            device_name=device_name,
+        ),
+        json=original_device,
+        status=200,
+        content_type="application/json",
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="already exists"):
+        apply_inbound_device_endpoint(
+            cmd=mocked_cmd,
+            connector_type=connector_type,
+            instance_name="my-instance",
+            instance_resource_group="my-rg",
+            device_name=device_name,
+            endpoint_name=endpoint_name,
+            endpoint_address="opc.tcp://new:4840",
+            no_replace=True,
+            wait_sec=0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# _slim_schema unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_slim_schema_config_mode_flat():
+    """config mode: fields with defaults use the default; fields without default → None."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "withDefault": {"type": "integer", "default": 42},
+            "noDefault": {"type": "string"},
+        },
+    }
+    result = _slim_schema(schema, mode="config")
+    assert result == {"withDefault": 42, "noDefault": None}
+
+
+def test_slim_schema_schema_mode_flat():
+    """schema mode: every field is a metadata dict with type and default."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "withDefault": {"type": "integer", "default": 42},
+            "noDefault": {"type": "string"},
+        },
+    }
+    result = _slim_schema(schema, mode="schema")
+    assert result == {
+        "withDefault": {"type": "integer", "default": 42},
+        "noDefault": {"type": "string", "default": None},
+    }
+
+
+def test_slim_schema_schema_mode_required_visible():
+    """schema mode: 'required' list is included in the output so users know which fields are mandatory.
+    config mode: 'required' is NOT included (it only affects the null-field warning)."""
+    schema = {
+        "type": "object",
+        "required": ["name", "enabled"],
+        "properties": {
+            "name": {"type": "string"},
+            "enabled": {"type": "boolean", "default": True},
+            "optional": {"type": "integer", "default": 0},
+        },
+    }
+    schema_result = _slim_schema(schema, mode="schema")
+    assert schema_result["required"] == ["name", "enabled"]
+    assert schema_result["name"] == {"type": "string", "default": None}
+    assert schema_result["enabled"] == {"type": "boolean", "default": True}
+    assert schema_result["optional"] == {"type": "integer", "default": 0}
+
+    config_result = _slim_schema(schema, mode="config")
+    assert "required" not in config_result
+    assert config_result == {"name": None, "enabled": True, "optional": 0}
+
+
+def test_slim_schema_schema_mode_no_required_no_key():
+    """schema mode: when there is no 'required' in the schema, the key is omitted from output."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "field": {"type": "string"},
+        },
+    }
+    result = _slim_schema(schema, mode="schema")
+    assert "required" not in result
+
+
+def test_slim_schema_nested_objects():
+    """Both modes recurse into nested objects (sub-properties)."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "security": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "default": "Sign"},
+                    "policy": {"type": "string"},
+                },
+            }
+        },
+    }
+    config = _slim_schema(schema, mode="config")
+    assert config == {"security": {"mode": "Sign", "policy": None}}
+
+    schema_result = _slim_schema(schema, mode="schema")
+    assert schema_result == {
+        "security": {
+            "mode": {"type": "string", "default": "Sign"},
+            "policy": {"type": "string", "default": None},
+        }
+    }
+
+
+@pytest.mark.parametrize("constraint_key,constraint_value", [
+    ("minimum", 0),
+    ("maximum", 100),
+    ("exclusiveMinimum", 1),
+    ("exclusiveMaximum", 99),
+    ("enum", ["a", "b", "c"]),
+    ("pattern", "^[a-z]+$"),
+])
+def test_slim_schema_schema_mode_constraints(constraint_key, constraint_value):
+    """schema mode: constraint keys are preserved in the metadata dict."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "field": {"type": "string", **{constraint_key: constraint_value}},
+        },
+    }
+    result = _slim_schema(schema, mode="schema")
+    assert result["field"][constraint_key] == constraint_value
+
+
+def test_slim_schema_config_mode_ignores_constraints():
+    """config mode: constraint keys are NOT included — only the default value is returned."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "field": {"type": "integer", "default": 5, "minimum": 0, "maximum": 100},
+        },
+    }
+    result = _slim_schema(schema, mode="config")
+    assert result == {"field": 5}
+
+
+def test_slim_schema_type_array_drops_null():
+    """When type is an array like ['string', 'null'], null is stripped in both modes."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "field": {"type": ["string", "null"]},
+        },
+    }
+    config = _slim_schema(schema, mode="config")
+    assert config == {"field": None}
+
+    schema_result = _slim_schema(schema, mode="schema")
+    assert schema_result["field"]["type"] == "string"
+
+
+def test_slim_schema_items_array_config_mode():
+    """config mode: array field with items sub-schema renders as a list with one slimmed item."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "tags": {
+                "type": "array",
+                "items": {"type": "string", "default": "tag"},
+            },
+        },
+    }
+    result = _slim_schema(schema, mode="config")
+    assert result == {"tags": ["tag"]}
+
+
+def test_slim_schema_items_array_schema_mode():
+    """schema mode: array field exposes type, default, and items metadata."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+    }
+    result = _slim_schema(schema, mode="schema")
+    assert result == {
+        "tags": {
+            "type": "array",
+            "default": None,
+            "items": {"type": "string", "default": None},
+        }
+    }
+
+
+def test_slim_schema_oneof_picks_first_non_null_variant():
+    """oneOf: the first non-null variant is selected and its properties are used."""
+    schema = {
+        "oneOf": [
+            {"type": "null"},
+            {
+                "type": "object",
+                "properties": {
+                    "port": {"type": "integer", "default": 8080},
+                },
+            },
+        ]
+    }
+    result = _slim_schema(schema, mode="config")
+    assert result == {"port": 8080}
+
+
+def test_slim_schema_anyof_ignored():
+    """anyOf is unsupported and silently ignored; result is the scalar/null fallback."""
+    schema = {
+        "anyOf": [
+            {"type": "null"},
+            {"type": "string", "default": "hello"},
+        ]
+    }
+    # anyOf key is ignored; schema has no properties/items/type → scalar leaf with default=None
+    result = _slim_schema(schema, mode="config")
+    assert result is None
+
+
+def test_slim_schema_oneof_multi_variant_config_mode_picks_first():
+    """config mode with multiple real oneOf variants: first non-null is used (must be concrete)."""
+    schema = {
+        "oneOf": [
+            {"type": "null"},
+            {"type": "string", "default": "basic"},
+            {"type": "string", "default": "advanced"},
+        ]
+    }
+    result = _slim_schema(schema, mode="config")
+    assert result == "basic"
+
+
+def test_slim_schema_oneof_multi_variant_schema_mode_preserves_all():
+    """schema mode with multiple oneOf variants: all variants including null are preserved."""
+    schema = {
+        "oneOf": [
+            {"type": "null"},
+            {"type": "string", "default": "basic"},
+            {"type": "string", "default": "advanced"},
+        ]
+    }
+    result = _slim_schema(schema, mode="schema")
+    assert "oneOf" in result
+    assert result["oneOf"] == [
+        {"type": "null", "default": None},
+        {"type": "string", "default": "basic"},
+        {"type": "string", "default": "advanced"},
+    ]
+
+
+def test_slim_schema_anyof_ignored_schema_mode():
+    """anyOf is unsupported; in schema mode it is silently ignored and the schema falls through."""
+    schema = {
+        "anyOf": [
+            {"type": "null"},
+            {"type": "object", "properties": {"host": {"type": "string", "default": "localhost"}}},
+            {"type": "object", "properties": {"url": {"type": "string", "default": "http://"}}},
+        ]
+    }
+    result = _slim_schema(schema, mode="schema")
+    # anyOf key is ignored; schema has no properties/items/type → scalar metadata dict
+    assert "anyOf" not in result
+    assert result == {"type": "string", "default": None}
+
+
+def test_slim_schema_allof_merges_properties():
+    """allOf config mode: properties from all sub-schemas are merged into one flat object."""
+    schema = {
+        "allOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "host": {"type": "string", "default": "localhost"},
+                },
+            },
+            {
+                "properties": {
+                    "port": {"type": "integer", "default": 443},
+                },
+            },
+        ]
+    }
+    result = _slim_schema(schema, mode="config")
+    assert result == {"host": "localhost", "port": 443}
+
+
+def test_slim_schema_allof_schema_mode_preserves_structure():
+    """allOf schema mode: each sub-schema is slimmed separately and allOf key is preserved."""
+    schema = {
+        "allOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "host": {"type": "string", "default": "127.0.0.1"},
+                },
+            },
+            {
+                "properties": {
+                    "port": {"type": "integer", "default": 8080},
+                    "timeout": {"type": "integer", "default": 30},
+                },
+            },
+        ]
+    }
+    result = _slim_schema(schema, mode="schema")
+    assert "allOf" in result
+    assert len(result["allOf"]) == 2
+    assert result["allOf"][0] == {"host": {"type": "string", "default": "127.0.0.1"}}
+    assert result["allOf"][1] == {
+        "port": {"type": "integer", "default": 8080},
+        "timeout": {"type": "integer", "default": 30},
+    }
+
+
+def test_slim_schema_ref_definitions_path():
+    """$ref with #/definitions/... (Draft-07 style) is resolved against the root schema."""
+    schema = {
+        "definitions": {
+            "AuthConfig": {
+                "type": "object",
+                "properties": {
+                    "username": {"type": "string", "default": "admin"},
+                    "password": {"type": "string"},
+                },
+            }
+        },
+        "type": "object",
+        "properties": {
+            "host": {"type": "string", "default": "localhost"},
+            "auth": {"$ref": "#/definitions/AuthConfig"},
+        },
+    }
+    result_config = _slim_schema(schema, mode="config")
+    assert result_config["host"] == "localhost"
+    assert result_config["auth"] == {"username": "admin", "password": None}
+
+    result_schema = _slim_schema(schema, mode="schema")
+    assert result_schema["host"] == {"type": "string", "default": "localhost"}
+    assert result_schema["auth"] == {
+        "username": {"type": "string", "default": "admin"},
+        "password": {"type": "string", "default": None},
+    }
+
+
+def test_slim_schema_ref_named_anchor_ignored():
+    """$ref with a named anchor (#Name) is unsupported and silently ignored.
+    Only #/definitions/... paths are resolved; bare-fragment anchors return None."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "conn": {"$ref": "#ConnDef"},
+            "ConnDef": {
+                "$anchor": "ConnDef",
+                "type": "object",
+                "properties": {
+                    "host": {"type": "string", "default": "127.0.0.1"},
+                    "port": {"type": "integer", "default": 8080},
+                },
+            },
+        },
+    }
+    result = _slim_schema(schema, mode="config")
+    # Named anchor ref is not a #/definitions/... path → silently ignored → None
+    assert result["conn"] is None
+
+
+def test_slim_schema_ref_unresolvable_skipped():
+    """Unsupported $ref formats are silently dropped; remaining sibling keys are processed."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "field": {
+                "$ref": "#/definitions/DoesNotExist",
+                "default": "fallback",
+            },
+        },
+    }
+    result = _slim_schema(schema, mode="config")
+    # $ref path not found in definitions; sibling 'default' key remains → scalar fallback
+    assert result["field"] == "fallback"
+
+
+def test_slim_schema_additional_properties_ignored():
+    """additionalProperties is unsupported and must NOT appear in the output in any form."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "default": "myDevice"},
+        },
+        "additionalProperties": {"type": "string"},
+    }
+    result_config = _slim_schema(schema, mode="config")
+    assert result_config == {"name": "myDevice"}
+    assert "<additionalKey>" not in result_config
+
+    result_schema = _slim_schema(schema, mode="schema")
+    assert result_schema == {"name": {"type": "string", "default": "myDevice"}}
+    assert "<additionalKey>" not in result_schema
+
+
+def test_slim_schema_additional_properties_false_ignored():
+    """additionalProperties: false is not a schema — it must NOT appear in the output."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "host": {"type": "string", "default": "localhost"},
+        },
+        "additionalProperties": False,
+    }
+    result = _slim_schema(schema, mode="config")
+    assert result == {"host": "localhost"}
+    assert "<additionalKey>" not in result
+
+
+def test_slim_schema_const_config_mode():
+    """const in config mode returns the fixed value directly."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "version": {"const": "1.0.0"},
+            "name": {"type": "string", "default": "test"},
+        },
+    }
+    result = _slim_schema(schema, mode="config")
+    assert result == {"version": "1.0.0", "name": "test"}
+
+
+def test_slim_schema_const_schema_mode():
+    """const in schema mode returns a metadata dict with type 'const'."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "version": {"const": "1.0.0"},
+        },
+    }
+    result = _slim_schema(schema, mode="schema")
+    assert result["version"] == {"type": "const", "const": "1.0.0"}
+
+
+def test_slim_schema_ref_with_sibling_overrides():
+    """$ref properties are overridden by sibling keys per JSON Schema spec."""
+    schema = {
+        "definitions": {
+            "interval": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 86400000,
+            }
+        },
+        "type": "object",
+        "properties": {
+            "publishingInterval": {
+                "title": "Publishing interval (ms)",
+                "default": 100,
+                "$ref": "#/definitions/interval",
+            },
+            "samplingInterval": {
+                "title": "Sampling interval (ms)",
+                "default": 500,
+                "$ref": "#/definitions/interval",
+            },
+        },
+    }
+    result = _slim_schema(schema, mode="config")
+    assert result == {"publishingInterval": 100, "samplingInterval": 500}
+
+    result_schema = _slim_schema(schema, mode="schema")
+    assert result_schema["publishingInterval"]["type"] == "integer"
+    assert result_schema["publishingInterval"]["default"] == 100
+    assert result_schema["publishingInterval"]["minimum"] == 1
+    assert result_schema["samplingInterval"]["default"] == 500
+
+
+# ---------------------------------------------------------------------------
+# _strip_nulls unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_strip_nulls_removes_null_values_from_dict():
+    """Null values in a dict are removed."""
+    assert _strip_nulls({"a": 1, "b": None, "c": "x"}) == {"a": 1, "c": "x"}
+
+
+def test_strip_nulls_removes_null_items_from_list():
+    """Null items in a list are removed."""
+    assert _strip_nulls([1, None, "x", None]) == [1, "x"]
+
+
+def test_strip_nulls_filters_empty_dicts_from_list():
+    """Array items that become empty dicts after stripping are dropped.
+
+    This covers the --show-template round-trip case: an all-null placeholder
+    like {"browsePath": null, "fieldId": null} should produce an empty array
+    rather than [{}], which would fail 'required' schema validation.
+    """
+    assert _strip_nulls([{"browsePath": None, "fieldId": None}]) == []
+
+
+def test_strip_nulls_keeps_partially_filled_array_items():
+    """Array items with at least one non-null field are kept."""
+    result = _strip_nulls([{"browsePath": "ns=1;i=42", "fieldId": None}])
+    assert result == [{"browsePath": "ns=1;i=42"}]
+
+
+def test_strip_nulls_mixed_list_drops_all_null_items():
+    """Mixed list: fully-null items dropped, partially-filled items kept."""
+    result = _strip_nulls([
+        {"browsePath": None, "fieldId": None},
+        {"browsePath": "ns=1;i=1"},
+        {"browsePath": None, "fieldId": None},
+    ])
+    assert result == [{"browsePath": "ns=1;i=1"}]
+
+
+def test_strip_nulls_nested_recursion():
+    """Null removal recurses into nested dicts and lists."""
+    obj = {
+        "eventFilter": {
+            "selectClauses": [
+                {"browsePath": None, "fieldId": None, "typeDefinitionId": None}
+            ]
+        },
+        "publishingInterval": 1000,
+    }
+    result = _strip_nulls(obj)
+    assert result == {
+        "eventFilter": {"selectClauses": []},
+        "publishingInterval": 1000,
+    }
+
+
+def test_strip_nulls_scalars_pass_through():
+    """Non-container values pass through unchanged."""
+    assert _strip_nulls(42) == 42
+    assert _strip_nulls("hello") == "hello"
+    assert _strip_nulls(True) is True
+
+
+# ---------------------------------------------------------------------------
+# check_json_schema dialect guard (used by mgmt actions and namespace_devices)
+# ---------------------------------------------------------------------------
+
+def test_check_json_schema_accepts_json_schema_org_dialects():
+    """check_json_schema accepts any json-schema.org dialect (Draft-04 through 2020-12).
+
+    mgmt actions may use any standard JSON Schema draft, so the shared utility
+    accepts all json-schema.org URIs.  The stricter Draft-07-only gate lives
+    inline in namespace_devices.py apply flow only.
+    """
+    from azext_edge.edge.util.schema_validation import check_json_schema
+
+    for dialect in [
+        "http://json-schema.org/draft-07/schema#",
+        "https://json-schema.org/draft/2020-12/schema",
+        "http://json-schema.org/draft-04/schema#",
+        "http://json-schema.org/draft-06/schema#",
+    ]:
+        reason = check_json_schema({"$schema": dialect, "type": "object"})
+        assert reason is None, f"check_json_schema should accept json-schema.org dialect '{dialect}'"
+
+
+def test_check_json_schema_rejects_non_json_schema_org_dialects():
+    """check_json_schema rejects completely unknown/custom $schema URIs."""
+    from azext_edge.edge.util.schema_validation import check_json_schema
+
+    for bad_dialect in [
+        "custom://my-schema",
+        "https://example.com/my-schema",
+        "urn:my-org:schema:v1",
+    ]:
+        reason = check_json_schema({"$schema": bad_dialect, "type": "object"})
+        assert reason is not None, f"Expected rejection for dialect '{bad_dialect}'"
+        assert "not a recognized JSON Schema format" in reason
+
+
+def test_check_json_schema_allows_missing_schema_key():
+    """check_json_schema is lenient when $schema is absent."""
+    from azext_edge.edge.util.schema_validation import check_json_schema
+
+    schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
+    assert check_json_schema(schema) is None
+
+
+def test_apply_inbound_endpoint_skips_validation_for_non_draft07_schema(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocker,
+    mocked_get_namespace_for_instance,
+):
+    """When the connector schema declares a non-Draft-07 dialect, validation is
+    skipped with a warning and the endpoint is applied without error."""
+    endpoint_config = json.dumps({"someKey": "someValue"})
+    non_draft07_schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {"someKey": {"type": "string"}},
+    }
+
+    device_name = generate_random_string()
+    endpoint_name = generate_random_string()
+    namespace_name = mocked_get_namespace_for_instance.return_value["name"]
+    resource_group_name = mocked_get_namespace_for_instance.return_value["resource_group"]
+
+    original_device = get_namespace_device_record(
+        device_name=device_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+    )
+    original_device["properties"]["endpoints"] = {"inbound": {}}
+
+    updated_device = deepcopy(original_device)
+    updated_device["properties"]["endpoints"]["inbound"][endpoint_name] = {
+        "endpointType": "Custom.MyConnector",
+        "address": "tcp://host:1234",
+        "version": "1.0",
+        "authentication": {"method": ADRAuthModes.anonymous.value},
+        "additionalConfiguration": endpoint_config,
+    }
+
+    mock_ct = mocker.patch("azext_edge.edge.providers.adr.namespace_devices.ConnectorTemplates")
+    mock_ct.return_value.get_connector_template_for_type.return_value = {"id": "fake"}
+    mock_ct.return_value.get_endpoint_version_for_type.return_value = "1.0"
+    mock_ct.return_value.get_endpoint_schema.return_value = {"endpointConfig": non_draft07_schema}
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.helpers.process_additional_configuration",
+        return_value=endpoint_config,
+    )
+
+    device_uri = get_namespace_device_mgmt_uri(
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        device_name=device_name,
+    )
+    mocked_responses.add(responses.GET, device_uri, json=original_device, status=200)
+    mocked_responses.add(responses.PATCH, device_uri, json=updated_device, status=200)
+    mocked_responses.add(responses.GET, device_uri, json=updated_device, status=200)
+
+    # Should not raise even though schema dialect is not Draft-07
+    apply_inbound_device_endpoint(
+        cmd=mocked_cmd,
+        connector_type="Custom.MyConnector",
+        instance_name="my-instance",
+        instance_resource_group="my-rg",
+        device_name=device_name,
+        endpoint_name=endpoint_name,
+        endpoint_address="tcp://host:1234",
+        endpoint_config=endpoint_config,
+        wait_sec=0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# --show-template + --endpoint-config mutual exclusion (unit)
+# ---------------------------------------------------------------------------
+
+def test_apply_inbound_device_endpoint_show_template_with_config_errors(
+    mocked_cmd,
+    mocked_get_namespace_for_instance,
+):
+    """--show-template and --endpoint-config together must raise InvalidArgumentValueError."""
+    from azure.cli.core.azclierror import InvalidArgumentValueError as _IAE
+    with pytest.raises(_IAE, match="--show-template and --endpoint-config cannot be used together"):
+        apply_inbound_device_endpoint(
+            cmd=mocked_cmd,
+            connector_type="Microsoft.OpcUa",
+            instance_name="my-instance",
+            instance_resource_group="my-rg",
+            show_template="config",
+            endpoint_config='{"applicationName": "test"}',
+        )
+
+
+# ---------------------------------------------------------------------------
+# Non-OpcUa happy path (ConnectorTemplates IS called)
+# ---------------------------------------------------------------------------
+
+def test_apply_inbound_device_endpoint_success_non_opcua(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocker,
+    mocked_get_namespace_for_instance,
+):
+    """
+    Happy-path for a non-OPC UA connector type (Microsoft.Onvif).
+    ConnectorTemplates.get_connector_template_for_type must be called to resolve version.
+    """
+    connector_type = "Microsoft.Onvif"
+    version_from_template = "2.1.0"
+
+    mock_ct = mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_devices.ConnectorTemplates"
+    )
+    mock_ct.return_value.get_connector_template_for_type.return_value = _make_connector_template(
+        connector_type, version=version_from_template
+    )
+    mock_ct.return_value.get_endpoint_version_for_type.return_value = version_from_template
+
+    device_name = generate_random_string()
+    endpoint_name = f"ep-{generate_random_string()}"
+    endpoint_address = "http://192.168.1.10:80/onvif/device_service"
+
+    namespace_name = mocked_get_namespace_for_instance.return_value["name"]
+    resource_group_name = mocked_get_namespace_for_instance.return_value["resource_group"]
+
+    original_device = get_namespace_device_record(
+        device_name=device_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+    )
+
+    expected_inbound = {
+        endpoint_name: {
+            "endpointType": connector_type,
+            "address": endpoint_address,
+            "version": version_from_template,
+            "authentication": {"method": ADRAuthModes.anonymous.value},
+        }
+    }
+    updated_device = deepcopy(original_device)
+    updated_device["properties"]["endpoints"] = {"inbound": expected_inbound}
+
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_device_mgmt_uri(namespace_name, resource_group_name, device_name),
+        json=original_device,
+        status=200,
+        content_type="application/json",
+    )
+    mocked_responses.add(
+        method=responses.PATCH,
+        url=get_namespace_device_mgmt_uri(namespace_name, resource_group_name, device_name),
+        json=updated_device,
+        status=200,
+        content_type="application/json",
+    )
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_device_mgmt_uri(namespace_name, resource_group_name, device_name),
+        json=updated_device,
+        status=200,
+        content_type="application/json",
+    )
+
+    result = apply_inbound_device_endpoint(
+        cmd=mocked_cmd,
+        connector_type=connector_type,
+        instance_name="my-instance",
+        instance_resource_group="my-rg",
+        device_name=device_name,
+        endpoint_name=endpoint_name,
+        endpoint_address=endpoint_address,
+        wait_sec=0,
+    )
+
+    assert result == expected_inbound
+    mock_ct.return_value.get_connector_template_for_type.assert_called_once()
+
+    patch_body = json.loads(mocked_responses.calls[1].request.body)
+    ep_patch = patch_body["properties"]["endpoints"]["inbound"][endpoint_name]
+    assert ep_patch["endpointType"] == connector_type
+    assert ep_patch["version"] == version_from_template
+
+
+# ---------------------------------------------------------------------------
+# Schema validation tests for --endpoint-config
+# ---------------------------------------------------------------------------
+
+
+def test_apply_inbound_device_endpoint_opcua_config_fails_schema_validation(
+    mocked_cmd,
+    mocker,
+    mocked_get_namespace_for_instance,
+):
+    """Invalid OPC UA endpoint config raises InvalidArgumentValueError via bundled schema."""
+    mocker.patch(
+        "azext_edge.edge.providers.adr.helpers.get_opcua_info",
+        return_value={"version": "1.2.82", "inboundEndpoints": []},
+    )
+    # keepAliveMilliseconds must be an integer — passing a string violates the schema.
+    mocker.patch(
+        "azext_edge.edge.providers.adr.helpers.process_additional_configuration",
+        return_value='{"keepAliveMilliseconds": "not-an-integer"}',
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="endpoint"):
+        apply_inbound_device_endpoint(
+            cmd=mocked_cmd,
+            connector_type="Microsoft.OpcUa",
+            instance_name="my-instance",
+            instance_resource_group="my-rg",
+            device_name="my-device",
+            endpoint_name="ep1",
+            endpoint_address="opc.tcp://1.2.3.4:4840",
+            endpoint_config='{"keepAliveMilliseconds": "not-an-integer"}',
+        )
+
+
+def test_apply_inbound_device_endpoint_non_opcua_config_fails_schema_validation(
+    mocked_cmd,
+    mocker,
+    mocked_get_namespace_for_instance,
+):
+    """Invalid non-OPC UA endpoint config raises InvalidArgumentValueError via schema from get_endpoint_schema."""
+    strict_schema = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+            "port": {"type": "integer"},
+        },
+        "additionalProperties": False,
+    }
+    mock_ct = mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_devices.ConnectorTemplates"
+    )
+    mock_ct.return_value.get_connector_template_for_type.return_value = _make_connector_template(
+        "Microsoft.Onvif", version="2.0.0"
+    )
+    mock_ct.return_value.get_endpoint_version_for_type.return_value = "2.0.0"
+    mock_ct.return_value.get_endpoint_schema.return_value = {
+        "connectorType": "Microsoft.Onvif",
+        "endpointConfig": strict_schema,
+    }
+    # unknownField is rejected by additionalProperties: false
+    mocker.patch(
+        "azext_edge.edge.providers.adr.helpers.process_additional_configuration",
+        return_value='{"unknownField": "bad"}',
+    )
+
+    with pytest.raises(InvalidArgumentValueError):
+        apply_inbound_device_endpoint(
+            cmd=mocked_cmd,
+            connector_type="Microsoft.Onvif",
+            instance_name="my-instance",
+            instance_resource_group="my-rg",
+            device_name="my-device",
+            endpoint_name="ep1",
+            endpoint_address="http://1.2.3.4:80/onvif",
+            endpoint_config='{"unknownField": "bad"}',
+        )
+
+    mock_ct.return_value.get_endpoint_schema.assert_called_once_with(
+        instance_name="my-instance",
+        instance_resource_group="my-rg",
+        connector_type="Microsoft.Onvif",
+    )
+
+
+def test_apply_inbound_device_endpoint_non_opcua_non_standard_dialect_skips_validation(
+    mocked_cmd,
+    mocker,
+    mocked_get_namespace_for_instance,
+    mocked_responses: responses,
+):
+    """Non-standard schema dialect causes validation to be skipped (warning logged, no error)."""
+    non_standard_schema = {
+        "$schema": "https://custom.ops.io/schemas/v1/endpoint",  # not json-schema.org
+        "type": "object",
+        "properties": {"port": {"type": "integer"}},
+        "additionalProperties": False,
+    }
+    connector_type = "Microsoft.Onvif"
+    version_from_template = "2.0.0"
+
+    mock_ct = mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_devices.ConnectorTemplates"
+    )
+    mock_ct.return_value.get_connector_template_for_type.return_value = _make_connector_template(
+        connector_type, version=version_from_template
+    )
+    mock_ct.return_value.get_endpoint_version_for_type.return_value = version_from_template
+    mock_ct.return_value.get_endpoint_schema.return_value = {
+        "connectorType": connector_type,
+        "endpointConfig": non_standard_schema,
+    }
+
+    endpoint_config_str = '{"unknownField": "would-fail-if-validated"}'
+    mocker.patch(
+        "azext_edge.edge.providers.adr.helpers.process_additional_configuration",
+        return_value=endpoint_config_str,
+    )
+    # validate_data_against_schema must NOT be called since dialect is non-standard
+    mock_validate = mocker.patch(
+        "azext_edge.edge.util.schema_validation.validate_data_against_schema"
+    )
+
+    device_name = generate_random_string()
+    endpoint_name = f"ep-{generate_random_string()}"
+    endpoint_address = "http://192.168.1.10:80/onvif/device_service"
+    namespace_name = mocked_get_namespace_for_instance.return_value["name"]
+    resource_group_name = mocked_get_namespace_for_instance.return_value["resource_group"]
+
+    original_device = get_namespace_device_record(
+        device_name=device_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+    )
+    expected_inbound = {
+        endpoint_name: {
+            "endpointType": connector_type,
+            "address": endpoint_address,
+            "version": version_from_template,
+            "authentication": {"method": ADRAuthModes.anonymous.value},
+            "additionalConfiguration": endpoint_config_str,
+        }
+    }
+    updated_device = deepcopy(original_device)
+    updated_device["properties"]["endpoints"] = {"inbound": expected_inbound}
+
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_device_mgmt_uri(namespace_name, resource_group_name, device_name),
+        json=original_device,
+        status=200,
+        content_type="application/json",
+    )
+    mocked_responses.add(
+        method=responses.PATCH,
+        url=get_namespace_device_mgmt_uri(namespace_name, resource_group_name, device_name),
+        json=updated_device,
+        status=200,
+        content_type="application/json",
+    )
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_device_mgmt_uri(namespace_name, resource_group_name, device_name),
+        json=updated_device,
+        status=200,
+        content_type="application/json",
+    )
+
+    apply_inbound_device_endpoint(
+        cmd=mocked_cmd,
+        connector_type=connector_type,
+        instance_name="my-instance",
+        instance_resource_group="my-rg",
+        device_name=device_name,
+        endpoint_name=endpoint_name,
+        endpoint_address=endpoint_address,
+        endpoint_config=endpoint_config_str,
+        wait_sec=0,
+    )
+
+    mock_validate.assert_not_called()
+
+
+def test_apply_inbound_device_endpoint_non_opcua_get_endpoint_schema_called_with_config(
+    mocked_cmd,
+    mocker,
+    mocked_get_namespace_for_instance,
+    mocked_responses: responses,
+):
+    """Happy path: get_endpoint_schema is called for non-OPC UA when --endpoint-config is provided."""
+    connector_type = "Microsoft.Onvif"
+    version_from_template = "2.0.0"
+    valid_schema = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {"port": {"type": "integer"}},
+    }
+
+    mock_ct = mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_devices.ConnectorTemplates"
+    )
+    mock_ct.return_value.get_connector_template_for_type.return_value = _make_connector_template(
+        connector_type, version=version_from_template
+    )
+    mock_ct.return_value.get_endpoint_version_for_type.return_value = version_from_template
+    mock_ct.return_value.get_endpoint_schema.return_value = {
+        "connectorType": connector_type,
+        "endpointConfig": valid_schema,
+    }
+
+    endpoint_config_str = '{"port": 8080}'
+    mocker.patch(
+        "azext_edge.edge.providers.adr.helpers.process_additional_configuration",
+        return_value=endpoint_config_str,
+    )
+
+    device_name = generate_random_string()
+    endpoint_name = f"ep-{generate_random_string()}"
+    endpoint_address = "http://192.168.1.10:80/onvif/device_service"
+    namespace_name = mocked_get_namespace_for_instance.return_value["name"]
+    resource_group_name = mocked_get_namespace_for_instance.return_value["resource_group"]
+
+    original_device = get_namespace_device_record(
+        device_name=device_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+    )
+    expected_inbound = {
+        endpoint_name: {
+            "endpointType": connector_type,
+            "address": endpoint_address,
+            "version": version_from_template,
+            "authentication": {"method": ADRAuthModes.anonymous.value},
+            "additionalConfiguration": endpoint_config_str,
+        }
+    }
+    updated_device = deepcopy(original_device)
+    updated_device["properties"]["endpoints"] = {"inbound": expected_inbound}
+
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_device_mgmt_uri(namespace_name, resource_group_name, device_name),
+        json=original_device,
+        status=200,
+        content_type="application/json",
+    )
+    mocked_responses.add(
+        method=responses.PATCH,
+        url=get_namespace_device_mgmt_uri(namespace_name, resource_group_name, device_name),
+        json=updated_device,
+        status=200,
+        content_type="application/json",
+    )
+    mocked_responses.add(
+        method=responses.GET,
+        url=get_namespace_device_mgmt_uri(namespace_name, resource_group_name, device_name),
+        json=updated_device,
+        status=200,
+        content_type="application/json",
+    )
+
+    result = apply_inbound_device_endpoint(
+        cmd=mocked_cmd,
+        connector_type=connector_type,
+        instance_name="my-instance",
+        instance_resource_group="my-rg",
+        device_name=device_name,
+        endpoint_name=endpoint_name,
+        endpoint_address=endpoint_address,
+        endpoint_config=endpoint_config_str,
+        wait_sec=0,
+    )
+
+    assert result == expected_inbound
+    mock_ct.return_value.get_endpoint_schema.assert_called_once_with(
+        instance_name="my-instance",
+        instance_resource_group="my-rg",
+        connector_type=connector_type,
+    )

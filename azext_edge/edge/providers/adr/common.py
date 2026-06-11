@@ -53,3 +53,20 @@ class TopicRetain(ListableEnum):
 
     keep = "Keep"
     never = "Never"
+
+
+class EndpointTemplateMode(ListableEnum):
+    """
+    Controls how --show-template renders the endpoint configuration template.
+
+    config  - Fields with a default value are shown as the default value.
+              Fields with no default are shown as null.
+              Output is directly submittable as --endpoint-config.
+
+    schema  - Every field includes full metadata: type, default value,
+              and constraints (minimum, maximum, enum, pattern) where available.
+              Useful for understanding the full schema before crafting a config.
+    """
+
+    CONFIG = "config"
+    SCHEMA = "schema"

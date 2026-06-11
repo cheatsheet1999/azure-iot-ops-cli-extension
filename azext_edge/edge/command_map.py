@@ -307,6 +307,7 @@ def load_iotops_commands(self, _):
     ) as cmd_group:
         cmd_group.command("list", "list_inbound_device_endpoints")
         cmd_group.command("remove", "remove_inbound_device_endpoints")
+        cmd_group.command("apply", "apply_inbound_device_endpoint", is_preview=True)
 
     with self.command_group(
         "iot ops ns device endpoint inbound add",
@@ -324,6 +325,8 @@ def load_iotops_commands(self, _):
         "iot ops ns asset",
         command_type=namespace_resource_ops,
     ) as cmd_group:
+        cmd_group.command("create", "create_namespace_asset", is_preview=True)
+        cmd_group.command("update", "update_namespace_asset", is_preview=True)
         cmd_group.command("delete", "delete_namespace_asset")
         cmd_group.command("query", "query_namespace_assets")
         cmd_group.show_command("show", "show_namespace_asset")
@@ -336,6 +339,30 @@ def load_iotops_commands(self, _):
         ) as cmd_group:
             cmd_group.command("create", f"create_namespace_{asset_type}_asset")
             cmd_group.command("update", f"update_namespace_{asset_type}_asset")
+
+    # generalized dataset group (connector-agnostic)
+    with self.command_group(
+        "iot ops ns asset dataset",
+        command_type=namespace_resource_ops,
+    ) as cmd_group:
+        cmd_group.command("add", "add_namespace_asset_dataset", is_preview=True)
+        cmd_group.command("export", "export_namespace_asset_dataset", is_preview=True)
+        cmd_group.command("import", "import_namespace_asset_dataset", is_preview=True)
+        cmd_group.command("list", "list_namespace_asset_datasets", is_preview=True)
+        cmd_group.command("remove", "remove_namespace_asset_dataset", is_preview=True)
+        cmd_group.show_command("show", "show_namespace_asset_dataset", is_preview=True)
+        cmd_group.command("update", "update_namespace_asset_dataset", is_preview=True)
+
+    # generalized datapoint group (connector-agnostic)
+    with self.command_group(
+        "iot ops ns asset datapoint",
+        command_type=namespace_resource_ops,
+    ) as cmd_group:
+        cmd_group.command("add", "add_namespace_asset_dataset_point", is_preview=True)
+        cmd_group.command("export", "export_namespace_asset_dataset_point", is_preview=True)
+        cmd_group.command("import", "import_namespace_asset_dataset_point", is_preview=True)
+        cmd_group.command("list", "list_namespace_asset_dataset_points", is_preview=True)
+        cmd_group.command("remove", "remove_namespace_asset_dataset_point", is_preview=True)
 
     # dataset
     for asset_type in ["custom", "opcua", "rest", "sse", "mqtt"]:

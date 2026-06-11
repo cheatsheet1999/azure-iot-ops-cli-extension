@@ -49,6 +49,7 @@ from .providers.orchestration.common import (
     TlsKeyAlgo,
     TlsKeyRotation,
 )
+from .providers.adr.common import EndpointTemplateMode, FileType
 
 
 def load_iotops_arguments(self, _):
@@ -2065,6 +2066,257 @@ def load_iotops_arguments(self, _):
             options_list=["--private-key-secret-name", "--prks"],
             help="Private key secret name in the Key Vault. If not provided, the "
             "certificate file name will be used to generate the secret name.",
+        )
+
+    with self.argument_context("iot ops ns asset create") as context:
+        context.argument(
+            "connector_type",
+            options_list=["--connector-type", "--ct"],
+            help="Connector type for the asset (e.g. 'Microsoft.OpcUa', 'Microsoft.Http'). "
+            "For all types except Microsoft.OpcUa, the matching connector template must exist "
+            "in the instance when --asset-config is provided.",
+        )
+        context.argument(
+            "asset_name",
+            options_list=["--name", "-n"],
+            help="Name of the asset. Required unless --show-template is used.",
+        )
+        context.argument(
+            "device_name",
+            options_list=["--device", "-d"],
+            help="Device name. Required unless --show-template is used.",
+        )
+        context.argument(
+            "device_endpoint_name",
+            options_list=["--endpoint", "--ep"],
+            help="Device inbound endpoint name. Required unless --show-template is used.",
+        )
+        context.argument(
+            "asset_config",
+            options_list=["--asset-config", "--ac"],
+            help="Inline JSON string or path to a JSON/YAML file (.json, .yaml, .yml) containing "
+            "connector-specific default asset configurations and destinations. Accepted keys vary "
+            "by connector type (e.g. defaultDatasetsConfiguration, defaultEventsConfiguration, "
+            "defaultStreamsConfiguration, defaultDatasetsDestinations, defaultEventsDestinations, "
+            "defaultStreamsDestinations). Use --show-template to discover the supported keys and "
+            "their schema for the target connector type. Cannot be combined with --show-template.",
+        )
+        context.argument(
+            "show_template",
+            options_list=["--show-template"],
+            arg_type=get_enum_type(EndpointTemplateMode),
+            help="Show a starter configuration template for the connector type and exit without "
+            "creating an asset. "
+            "config: fields shown with their default values (null if no default); output is "
+            "directly usable as --asset-config input. "
+            "oneOf fields with multiple variants collapse to the first non-null variant and emit a warning — "
+            "run with schema mode to see all options. "
+            "allOf fields merge all non-null sub-schemas into one flat object. "
+            "schema: every field includes type, default, and constraints (min, max, enum, pattern); "
+            "oneOf/allOf fields show all variants so you can inspect the full schema. "
+            "Draft-07 $ref pointers (#/definitions/...) are resolved inline in both modes.",
+        )
+
+    with self.argument_context("iot ops ns asset update") as context:
+        context.argument(
+            "asset_name",
+            options_list=["--name", "-n"],
+            help="Name of the asset.",
+        )
+        context.argument(
+            "asset_config",
+            options_list=["--asset-config", "--ac"],
+            help="Inline JSON string or path to a JSON/YAML file (.json, .yaml, .yml) containing "
+            "connector-specific default asset configurations and destination settings to update. "
+            "Accepted keys vary by connector type and can include destination keys such as "
+            "defaultDatasetsDestinations, defaultEventsDestinations, defaultStreamsDestinations. "
+            "Use --show-template to discover the supported keys and their schema "
+            "for the asset's connector type. Cannot be combined with --show-template.",
+        )
+        context.argument(
+            "show_template",
+            options_list=["--show-template"],
+            arg_type=get_enum_type(EndpointTemplateMode),
+            help="Show a starter configuration template for the asset's connector type and exit "
+            "without updating the asset. The connector type is read from the existing asset. "
+            "config: fields shown with their default values (null if no default); output is "
+            "directly usable as --asset-config input. "
+            "oneOf fields with multiple variants collapse to the first non-null variant and emit a warning — "
+            "run with schema mode to see all options. "
+            "allOf fields merge all non-null sub-schemas into one flat object. "
+            "schema: every field includes type, default, and constraints (min, max, enum, pattern); "
+            "oneOf/allOf fields show all variants so you can inspect the full schema. "
+            "Draft-07 $ref pointers (#/definitions/...) are resolved inline in both modes.",
+        )
+
+    with self.argument_context("iot ops ns asset dataset") as context:
+        context.argument(
+            "asset_name",
+            options_list=["--asset", "-a"],
+            help="Asset name.",
+        )
+        context.argument(
+            "dataset_name",
+            options_list=["--name", "-n"],
+            help="Dataset name.",
+        )
+        context.argument(
+            "data_source",
+            options_list=["--data-source", "--ds"],
+            help="Data source for the dataset.",
+        )
+        context.argument(
+            "type_ref",
+            options_list=["--type-ref", "--tr"],
+            help="Type definition ID or URI.",
+        )
+        context.argument(
+            "dataset_config",
+            options_list=["--dataset-config", "--dc"],
+            help="Inline JSON string or path to a JSON/YAML file (.json, .yaml, .yml) containing "
+            "connector-specific dataset configuration and/or destinations. Accepted keys are "
+            "'datasetConfiguration' (connector-specific config object) and 'destinations' (list of "
+            "destination objects). Use --show-template to discover the supported keys and schema "
+            "for the asset's connector type. Cannot be combined with --show-template. "
+            "For non-OPC UA connectors, a connector template must exist in the instance.",
+        )
+        context.argument(
+            "show_template",
+            options_list=["--show-template"],
+            arg_type=get_enum_type(EndpointTemplateMode),
+            help="Show a starter dataset configuration template for the asset's connector type and "
+            "exit without modifying the dataset. The connector type is read from the existing asset. "
+            "config: fields shown with their default values (null if no default); output is "
+            "directly usable as --dataset-config input. "
+            "schema: every field includes type, default, and constraints (min, max, enum, pattern). "
+            "Draft-07 $ref pointers (#/definitions/...) are resolved inline in both modes.",
+        )
+
+    with self.argument_context("iot ops ns asset dataset add") as context:
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the dataset if another dataset with the same name is already present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset dataset export") as context:
+        context.argument(
+            "extension",
+            options_list=["--format", "-f"],
+            arg_type=get_enum_type([FileType.json.value, FileType.yaml.value], default=FileType.json.value),
+            help="Export file format (JSON or YAML).",
+        )
+        context.argument(
+            "output_dir",
+            options_list=["--output-dir", "--od"],
+            help="Output directory for export.",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the local file if present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset dataset import") as context:
+        context.argument(
+            "file_path",
+            options_list=["--input-file", "--if"],
+            help="Path to import file (JSON or YAML).",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace existing datasets that share a name with an imported dataset.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset datapoint") as context:
+        context.argument(
+            "asset_name",
+            options_list=["--asset", "-a"],
+            help="Asset name.",
+        )
+        context.argument(
+            "dataset_name",
+            options_list=["--dataset", "-d"],
+            help="Dataset name.",
+        )
+        context.argument(
+            "datapoint_name",
+            options_list=["--name", "-n"],
+            help="Data point name.",
+        )
+        context.argument(
+            "data_source",
+            options_list=["--data-source", "--ds"],
+            help="Data source for the data point.",
+        )
+        context.argument(
+            "type_ref",
+            options_list=["--type-ref", "--tr"],
+            help="Type definition ID or URI.",
+        )
+        context.argument(
+            "datapoint_config",
+            options_list=["--datapoint-config", "--dpc"],
+            help="Inline JSON string or path to a JSON/YAML file (.json, .yaml, .yml) containing "
+            "connector-specific datapoint configuration. Accepted key is 'datapointConfiguration' "
+            "(connector-specific config object). Use --show-template to discover the supported keys "
+            "and schema for the asset's connector type. Cannot be combined with --show-template. "
+            "For non-OPC UA connectors, a connector template must exist in the instance.",
+        )
+        context.argument(
+            "show_template",
+            options_list=["--show-template"],
+            arg_type=get_enum_type(EndpointTemplateMode),
+            help="Show a starter datapoint configuration template for the asset's connector type "
+            "and exit without modifying the datapoint. The connector type is read from the existing "
+            "asset. config: fields shown with their default values (null if no default); output is "
+            "directly usable as --datapoint-config input. "
+            "schema: every field includes type, default, and constraints (min, max, enum, pattern). "
+            "Draft-07 $ref pointers (#/definitions/...) are resolved inline in both modes.",
+        )
+
+    with self.argument_context("iot ops ns asset datapoint add") as context:
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the data point if another point with the same name is already present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset datapoint export") as context:
+        context.argument(
+            "extension",
+            options_list=["--format", "-f"],
+            arg_type=get_enum_type(FileType, default=FileType.json.value),
+            help="Export file format.",
+        )
+        context.argument(
+            "output_dir",
+            options_list=["--output-dir", "--od"],
+            help="Output directory for export.",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the local file if present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset datapoint import") as context:
+        context.argument(
+            "file_path",
+            options_list=["--input-file", "--if"],
+            help="Path to import file (JSON, YAML, or CSV).",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace existing data points that share a name with an imported data point.",
+            arg_type=get_three_state_flag(),
         )
 
     with self.argument_context("iot ops clone") as context:
