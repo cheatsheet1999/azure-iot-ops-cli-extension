@@ -915,6 +915,65 @@ class ConnectorTemplates(Queryable):
                 f"Failed to fetch connector metadata from {metadata_ref}: {str(e)}"
             )
 
+    @staticmethod
+    def _safe_extractall(tar: tarfile.TarFile, dest_dir: str) -> None:
+        """
+        Safely extract all members of a tar archive into dest_dir.
+
+        Prevents Tar Slip / path traversal (CWE-22) by rejecting members whose
+        resolved destination would fall outside dest_dir (e.g. absolute paths or
+        ``..`` traversal sequences). Link members (symlink/hardlink) and special
+        file members (FIFO/character/block devices) are also rejected.
+
+        Args:
+            tar: An open tarfile.TarFile to extract.
+            dest_dir: The directory into which members must be extracted.
+
+        Raises:
+            ValidationError: If any member would be written outside dest_dir or
+                is an unsupported special file type.
+        """
+        dest_root = os.path.realpath(dest_dir)
+
+        members = tar.getmembers()
+        for member in members:
+            member_path = os.path.realpath(os.path.join(dest_root, member.name))
+            if not ConnectorTemplates._is_within_directory(dest_root, member_path):
+                raise ValidationError(
+                    f"Refusing to extract unsafe path from artifact: '{member.name}'. "
+                    "The archive attempts to write outside the extraction directory."
+                )
+
+            # Reject special file types (FIFO/character/block devices). They are unnecessary for
+            # metadata extraction and could cause the later open() to block or have unsafe side effects.
+            if member.isdev() or member.isfifo():
+                raise ValidationError(
+                    f"Refusing to extract unsupported tar member from artifact: '{member.name}'. "
+                    "Only regular files and directories are allowed."
+                )
+
+            # Links (symlink/hardlink) are unnecessary for metadata extraction and are easy to misuse for
+            # path traversal-style attacks, so reject them entirely.
+            if member.islnk() or member.issym():
+                raise ValidationError(
+                    f"Refusing to extract link from artifact: '{member.name}'. "
+                    "Link members are not supported."
+                )
+
+        tar.extractall(dest_root, members=[m for m in members if m.isdir() or m.isreg()])
+
+    @staticmethod
+    def _is_within_directory(directory: str, target: str) -> bool:
+        """Return True if ``target`` is located within ``directory``."""
+        directory = os.path.realpath(directory)
+        target = os.path.realpath(target)
+        try:
+            return os.path.commonpath([directory]) == os.path.commonpath([directory, target])
+        except ValueError:
+            # Raised when paths are on different drives (Windows) or mix absolute/relative;
+            # such a target cannot be within the directory, so treat it as unsafe.
+            return False
+
     def _parse_metadata_blob(self, blob_content: bytes, metadata_ref: str) -> dict:
         """
         Parse connector metadata from blob content.
@@ -950,13 +1009,13 @@ class ConnectorTemplates(Queryable):
             try:
                 logger.debug("Attempting to extract as tar.gz")
                 with tarfile.open(fileobj=io.BytesIO(blob_content), mode="r:gz") as tar:
-                    tar.extractall(temp_dir)
+                    self._safe_extractall(tar, temp_dir)
             except (tarfile.ReadError, OSError):
                 # Try as plain tar
                 try:
                     logger.debug("tar.gz failed, attempting to extract as plain tar")
                     with tarfile.open(fileobj=io.BytesIO(blob_content), mode="r") as tar:
-                        tar.extractall(temp_dir)
+                        self._safe_extractall(tar, temp_dir)
                 except (tarfile.ReadError, OSError) as e:
                     raise CLIInternalError(
                         f"Failed to extract artifact from {metadata_ref}. "
