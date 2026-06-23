@@ -38,6 +38,7 @@ def test_registry_endpoint_lifecycle_anonymous(registry_endpoint_test_setup, tra
     instance_name = registry_endpoint_test_setup["instanceName"]
     registry_endpoint_name = f"test-registry-{generate_random_string(force_lower=True, size=8)}"
     host = "myregistry.azurecr.io"
+    registry_endpoint = {}
 
     try:
         # CREATE - SAMI authentication (default)
@@ -124,6 +125,7 @@ def test_registry_endpoint_artifact_pull_secret(registry_endpoint_test_setup, tr
     registry_endpoint_name = f"test-registry-{generate_random_string(force_lower=True, size=8)}"
     host = "secretregistry.azurecr.io"
     secret_ref = "my-registry-secret"
+    registry_endpoint = {}
 
     try:
         # CREATE - ArtifactPullSecret authentication
@@ -183,7 +185,8 @@ def test_registry_endpoint_system_assigned_auth(registry_endpoint_test_setup, tr
     instance_name = registry_endpoint_test_setup["instanceName"]
     registry_endpoint_name = f"test-registry-{generate_random_string(force_lower=True, size=8)}"
     host = "systemregistry.azurecr.io"
-    audience = "system-audience"
+    audience = "https://containerregistry.azure.net"
+    registry_endpoint = {}
 
     try:
         # CREATE - SystemAssigned authentication with audience
@@ -245,7 +248,8 @@ def test_registry_endpoint_user_assigned_auth(registry_endpoint_test_setup, trac
     host = "userregistry.azurecr.io"
     client_id = "test-client-id"
     tenant_id = "test-tenant-id"
-    scope = "test-scope"
+    scope = "https://containerregistry.azure.net"
+    registry_endpoint = {}
 
     try:
         # CREATE - UserAssigned authentication with full parameters
@@ -428,6 +432,7 @@ def test_registry_endpoint_code_signing_cas(registry_endpoint_test_setup, tracke
     configmap2 = "configmap2"
     secret1 = "secret1"
     secret2 = "secret2"
+    registry_endpoint = {}
 
     try:
         # CREATE - with one configmap
