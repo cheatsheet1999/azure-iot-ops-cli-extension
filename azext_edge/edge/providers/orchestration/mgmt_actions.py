@@ -19,6 +19,7 @@ from ...util.az_client import (
     wait_for_terminal_state,
 )
 from ...util.common import should_continue_prompt
+from ...util.cloud_config import CloudConfig
 from ...util.id_tools import parse_resource_id as parse_resource_id_dict
 from ...util.queryable import Queryable
 from ...util.workflow_display import StepState, WorkflowDisplay, render_summary
@@ -257,7 +258,6 @@ class MgmtActions(Queryable):
         Bootstraps the management actions infrastructure across Event Grid, ADR, and AIO domains.
         """
         from ...util.machinery import scoped_semver_import
-        from ...util.cloud_config import CloudConfig
 
         if not CloudConfig(self.cmd).supports_eventgrid_mqtt:
             raise ValidationError(
@@ -1673,8 +1673,6 @@ class MgmtActions(Queryable):
 
     def _build_eg_endpoint_auth(self, mi_resource: Optional[Dict] = None) -> Dict:
         """Build the authentication block for the EG MQTT dataflow endpoint."""
-        from ...util.cloud_config import CloudConfig
-
         eg_audience = CloudConfig(self.cmd).eventgrid_audience
         if mi_resource:
             return {

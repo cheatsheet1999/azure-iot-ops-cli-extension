@@ -27,6 +27,7 @@ from knack.log import get_logger
 
 from ...constants import USER_AGENT
 from .az_client import AZURE_CLI_CREDENTIAL
+from .cloud_config import CloudConfig
 
 logger = get_logger(__name__)
 
@@ -359,8 +360,6 @@ class OciRegistryClient:
             return None
 
         try:
-            from .cloud_config import CloudConfig
-
             arm_token = AZURE_CLI_CREDENTIAL.get_token(CloudConfig(cmd).arm_endpoint_scope).token
         except Exception as ex:  # pragma: no cover - credential failures
             logger.warning(f"Failed to obtain ARM token for ACR: {ex}")
@@ -426,11 +425,9 @@ class OciRegistryClient:
     def _is_acr_registry(registry: str, cmd=None) -> bool:
         """Check if the registry is an Azure Container Registry."""
         if cmd is not None:
-            from .cloud_config import CloudConfig
-
             try:
                 return registry.endswith(CloudConfig(cmd).acr_suffix)
-            except Exception as ex:  # pragma: no cover - cloud ACR suffix not set
+            except AttributeError as ex:  # pragma: no cover - cloud ACR suffix not set
                 logger.debug(f"Could not resolve cloud ACR suffix; falling back to default: {ex}")
         return registry.endswith(".azurecr.io")
 

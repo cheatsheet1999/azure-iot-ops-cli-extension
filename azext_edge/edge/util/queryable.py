@@ -8,6 +8,7 @@ from functools import cached_property
 from typing import List, Optional, Union
 
 from .az_client import get_resource_client
+from .cloud_config import CloudConfig
 from .resource_graph import ResourceGraph
 from knack.log import get_logger
 
@@ -67,7 +68,6 @@ class Queryable:
         Attempts to fetch the service principal Id by app Id from the Microsoft Graph API.
         """
         from azure.cli.core.util import send_raw_request
-        from .cloud_config import CloudConfig
 
         cloud_config = CloudConfig(self.cmd)
         graph_sp_endpoint = f"{cloud_config.graph_endpoint}v1.0/servicePrincipals"

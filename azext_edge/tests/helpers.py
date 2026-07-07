@@ -449,7 +449,6 @@ def wait_for_expected_count(
 CLOUD_CONFIG_FIXTURES = {
     "AzureCloud": {
         "resource_manager": "https://management.azure.com/",
-        "active_directory_resource_id": "https://management.core.windows.net/",
         "microsoft_graph_resource_id": "https://graph.microsoft.com/",
         "storage_endpoint": "core.windows.net",
         "keyvault_dns": ".vault.azure.net",
@@ -457,7 +456,6 @@ CLOUD_CONFIG_FIXTURES = {
     },
     "AzureUSGovernment": {
         "resource_manager": "https://management.usgovcloudapi.net/",
-        "active_directory_resource_id": "https://management.core.usgovcloudapi.net/",
         "microsoft_graph_resource_id": "https://graph.microsoft.us/",
         "storage_endpoint": "core.usgovcloudapi.net",
         "keyvault_dns": ".vault.usgovcloudapi.net",
@@ -465,7 +463,6 @@ CLOUD_CONFIG_FIXTURES = {
     },
     "AzureChinaCloud": {
         "resource_manager": "https://management.chinacloudapi.cn",
-        "active_directory_resource_id": "https://management.core.chinacloudapi.cn/",
         "microsoft_graph_resource_id": "https://microsoftgraph.chinacloudapi.cn",
         "storage_endpoint": "core.chinacloudapi.cn",
         "keyvault_dns": ".vault.azure.cn",
@@ -487,7 +484,6 @@ def build_mock_cmd_for_cloud(cloud_name: str):
     cloud.name = cloud_name
     cloud.endpoints = _Stub()
     cloud.endpoints.resource_manager = fixture["resource_manager"]
-    cloud.endpoints.active_directory_resource_id = fixture["active_directory_resource_id"]
     cloud.endpoints.microsoft_graph_resource_id = fixture["microsoft_graph_resource_id"]
     cloud.suffixes = _Stub()
     cloud.suffixes.storage_endpoint = fixture["storage_endpoint"]
