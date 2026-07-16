@@ -2093,7 +2093,7 @@ def test_export_namespace_asset_event_group_events(
     result = func(
         cmd=mocked_cmd,
         asset_name=asset_name,
-        event_group_name=event_group_name,
+        group_name=event_group_name,
         instance_name=instance_name,
         instance_resource_group=instance_resource_group,
         extension=extension,
@@ -2240,7 +2240,7 @@ def test_import_namespace_asset_event_group_events(
     result = func(
         cmd=mocked_cmd,
         asset_name=asset_name,
-        event_group_name=event_group_name,
+        group_name=event_group_name,
         instance_name=instance_name,
         instance_resource_group=instance_resource_group,
         file_path=str(import_file),
@@ -2348,7 +2348,7 @@ def _add_device_get_for_generalized(
     resource_group_name: str,
     connector_type: str,
 ) -> None:
-    """Register GET device mock needed by _get_connector_type_from_asset and _check_device_props."""
+    """Register GET device mock needed by _get_connector_type_and_device and _check_device_props."""
     device_name = asset["properties"]["deviceRef"]["deviceName"]
     endpoint_name = asset["properties"]["deviceRef"]["endpointName"]
     add_device_get_call(
@@ -2402,15 +2402,7 @@ def test_add_namespace_asset_dataset_generalized(
         datasets=existing_datasets,
     )
 
-    # _get_connector_type_from_asset: GET asset + GET device
-    mocked_responses.add(
-        responses.GET,
-        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
-        json=asset, status=200,
-    )
-    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
-
-    # _check_device_props(asset_name=...): GET asset + GET device
+    # self.show + _get_connector_type_and_device: GET asset + GET device
     mocked_responses.add(
         responses.GET,
         get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
@@ -2543,14 +2535,7 @@ def test_update_namespace_asset_dataset_generalized(
         "destinations": [{"target": "Mqtt", "configuration": {"topic": "updated/topic"}}],
     })
 
-    # _get_connector_type_from_asset
-    mocked_responses.add(
-        responses.GET,
-        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
-        json=asset, status=200,
-    )
-    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
-    # _check_device_props
+    # self.show + _get_connector_type_and_device
     mocked_responses.add(
         responses.GET,
         get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
@@ -2760,14 +2745,7 @@ def test_add_namespace_asset_dataset_point_generalized(
         "datapointConfiguration": {"samplingInterval": 250, "deadBand": 0.5, "enabled": True}
     })
 
-    # _get_connector_type_from_asset
-    mocked_responses.add(
-        responses.GET,
-        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
-        json=asset, status=200,
-    )
-    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
-    # _check_device_props
+    # self.show + _get_connector_type_and_device
     mocked_responses.add(
         responses.GET,
         get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),

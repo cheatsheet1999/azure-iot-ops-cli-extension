@@ -20,6 +20,10 @@ from azext_edge.edge.commands_namespaces import (
     update_namespace_custom_asset_stream,
     update_namespace_media_asset_stream,
 )
+from azext_edge.edge.commands_namespaces import (
+    add_namespace_asset_stream,
+    update_namespace_asset_stream,
+)
 
 from .test_namespace_assets_unit import (
     add_device_get_call, get_namespace_asset_mgmt_uri, get_namespace_asset_record
@@ -1206,3 +1210,890 @@ def test_import_namespace_asset_streams(
     # Verify result is a list of streams
     assert isinstance(result, list)
     assert len(result) > 0
+
+
+# ---------------------------------------------------------------------------
+# Generalized (connector-agnostic) stream unit tests
+# ---------------------------------------------------------------------------
+
+
+def _build_asset_with_connector_streams(
+    asset_name: str,
+    namespace_name: str,
+    resource_group_name: str,
+    streams: Optional[list] = None,
+) -> dict:
+    """Build a mock asset record pre-wired for the generalized stream path."""
+    asset = get_namespace_asset_record(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+    )
+    asset["properties"]["streams"] = streams or []
+    return asset
+
+
+def _add_device_get_for_generalized_streams(
+    mocked_responses: responses,
+    asset: dict,
+    namespace_name: str,
+    resource_group_name: str,
+    connector_type: str,
+) -> None:
+    """Register GET device mock needed by _get_connector_type_and_device and _check_device_props."""
+    device_name = asset["properties"]["deviceRef"]["deviceName"]
+    endpoint_name = asset["properties"]["deviceRef"]["endpointName"]
+    add_device_get_call(
+        mocked_responses,
+        device_name=device_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        endpoint_name=endpoint_name,
+        endpoint_type=connector_type,
+    )
+
+
+def _stream_metadata(connector_type: str, stream_schema=None, supported=("Mqtt",)) -> dict:
+    """Build a connector metadata payload for the generalized stream path."""
+    return {
+        "inboundEndpoints": [{
+            "endpointType": f"Microsoft.{connector_type}",
+            "streams": {
+                "streamConfigurationSchema": stream_schema,
+                "destinations": {"supportedDestinations": list(supported)},
+            },
+        }]
+    }
+
+
+def _register_asset_and_device_get(
+    mocked_responses: responses,
+    asset: dict,
+    namespace_name: str,
+    resource_group_name: str,
+    asset_name: str,
+    connector_type: str,
+) -> None:
+    """Register the single asset GET + device GET used by the generalized front-door
+    (self.show + _get_connector_type_and_device)."""
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized_streams(
+        mocked_responses, asset, namespace_name, resource_group_name, connector_type
+    )
+
+
+# ---------------------------------------------------------------------------
+# add_namespace_asset_stream (generalized) unit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("has_stream_config", [False, True])
+@pytest.mark.parametrize("replace, pre_existing", [
+    (False, False),
+    (True, False),
+    (True, True),
+])
+def test_add_namespace_asset_stream_generalized(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    has_stream_config: bool,
+    replace: bool,
+    pre_existing: bool,
+):
+    asset_name = "gen-asset"
+    stream_name = f"stream-{generate_random_string()}"
+    connector_type = "Custom.Test"
+
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    stream_config_json = json.dumps({
+        "streamConfiguration": {"snapshotsPerSecond": 5},
+        "destinations": [{"target": "Mqtt", "configuration": {"topic": "t/test"}}],
+    })
+
+    existing_streams = [generate_stream(stream_name=stream_name)] if pre_existing else []
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=existing_streams,
+    )
+
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    if has_stream_config:
+        mocker.patch(
+            "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+            return_value=_stream_metadata(connector_type),
+        )
+
+    updated_asset = deepcopy(asset)
+    updated_asset["properties"]["streams"] = [
+        {"name": stream_name, "streamConfiguration": None, "destinations": [], "typeRef": None}
+    ]
+    mocked_responses.add(
+        responses.PATCH,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        status=200,
+    )
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=updated_asset, status=200,
+    )
+
+    result = add_namespace_asset_stream(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name="inst",
+        instance_resource_group="rg",
+        stream_name=stream_name,
+        replace=replace,
+        stream_config=stream_config_json if has_stream_config else None,
+        wait_sec=0,
+    )
+
+    assert result["name"] == stream_name
+
+
+def test_add_namespace_asset_stream_generalized_raises_on_duplicate(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    asset_name = "gen-asset"
+    stream_name = "existing-stream"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[generate_stream(stream_name=stream_name)],
+    )
+
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="already exists"):
+        add_namespace_asset_stream(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            stream_name=stream_name,
+            replace=False,
+            wait_sec=0,
+        )
+
+
+def test_add_namespace_asset_stream_generalized_show_template_config(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    """show_template=config on add should return a blank template wrapped with connectorType."""
+    asset_name = "gen-asset"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[],
+    )
+
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=_stream_metadata(
+            connector_type,
+            stream_schema={
+                "type": "object",
+                "properties": {"snapshotsPerSecond": {"type": "integer", "default": 1}},
+            },
+        ),
+    )
+
+    result = add_namespace_asset_stream(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name="inst",
+        instance_resource_group="rg",
+        stream_name="new-stream",
+        show_template="config",
+        wait_sec=0,
+    )
+
+    assert result["connectorType"] == f"Microsoft.{connector_type}"
+    stream_cfg = result["streamConfig"]
+    assert "streamConfiguration" in stream_cfg
+    dests = stream_cfg["destinations"]
+    assert any(d["target"] == "Mqtt" for d in dests)
+
+
+def test_add_namespace_asset_stream_generalized_show_template_schema(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    """show_template=schema returns the connector schema structure (type/default/constraints)."""
+    asset_name = "gen-asset"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[],
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=_stream_metadata(
+            connector_type,
+            stream_schema={
+                "type": "object",
+                "properties": {
+                    "snapshotsPerSecond": {"type": "integer", "default": 1, "minimum": 0},
+                },
+            },
+        ),
+    )
+
+    result = add_namespace_asset_stream(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name="inst",
+        instance_resource_group="rg",
+        stream_name="new-stream",
+        show_template="schema",
+        wait_sec=0,
+    )
+
+    assert result["connectorType"] == f"Microsoft.{connector_type}"
+    stream_cfg = result["streamConfig"]["streamConfiguration"]
+    sps = (
+        stream_cfg["properties"]["snapshotsPerSecond"]
+        if "properties" in stream_cfg else stream_cfg["snapshotsPerSecond"]
+    )
+    assert sps["type"] == "integer"
+    assert sps["default"] == 1
+
+
+def test_add_namespace_asset_stream_generalized_show_template_with_config_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    """--show-template and --stream-config are mutually exclusive."""
+    asset_name = "gen-asset"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[],
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="cannot be used together"):
+        add_namespace_asset_stream(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            stream_name="new-stream",
+            show_template="config",
+            stream_config=json.dumps({"streamConfiguration": {"snapshotsPerSecond": 5}}),
+            wait_sec=0,
+        )
+
+
+def test_add_namespace_asset_stream_generalized_unsupported_destination_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    """A destination target not in the connector's supported set is rejected."""
+    asset_name = "gen-asset"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[],
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=_stream_metadata(connector_type, supported=("Mqtt",)),
+    )
+
+    bad_config = json.dumps({
+        "destinations": [{"target": "BrokerStateStore", "configuration": {"key": "cache"}}],
+    })
+
+    with pytest.raises(InvalidArgumentValueError, match="not supported for streams"):
+        add_namespace_asset_stream(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            stream_name="new-stream",
+            stream_config=bad_config,
+            wait_sec=0,
+        )
+
+
+def test_add_namespace_asset_stream_generalized_connector_type_mismatch_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    """A --show-template output generated for a different connector type is rejected."""
+    asset_name = "gen-asset"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[],
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    mismatched_config = json.dumps({
+        "connectorType": "Microsoft.OpcUa",
+        "streamConfig": {"streamConfiguration": {"snapshotsPerSecond": 5}},
+    })
+
+    with pytest.raises(InvalidArgumentValueError, match="does not match asset connectorType"):
+        add_namespace_asset_stream(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            stream_name="new-stream",
+            stream_config=mismatched_config,
+            wait_sec=0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# update_namespace_asset_stream (generalized) unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_update_namespace_asset_stream_generalized(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    asset_name = "gen-asset"
+    stream_name = "sensor-stream"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    existing_stream = {
+        "name": stream_name,
+        "streamConfiguration": json.dumps({"snapshotsPerSecond": 1}),
+        "destinations": [],
+        "typeRef": None,
+    }
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[existing_stream],
+    )
+
+    stream_config_json = json.dumps({
+        "streamConfiguration": {"snapshotsPerSecond": 10},
+        "destinations": [{"target": "Mqtt", "configuration": {"topic": "updated/topic"}}],
+    })
+
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=_stream_metadata(connector_type),
+    )
+
+    updated_asset = deepcopy(asset)
+    updated_stream = deepcopy(existing_stream)
+    updated_stream["streamConfiguration"] = json.dumps({"snapshotsPerSecond": 10})
+    updated_stream["destinations"] = [{"target": "Mqtt", "configuration": {"topic": "updated/topic"}}]
+    updated_asset["properties"]["streams"] = [updated_stream]
+
+    mocked_responses.add(
+        responses.PATCH,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        status=200,
+    )
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=updated_asset, status=200,
+    )
+
+    result = update_namespace_asset_stream(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name="inst",
+        instance_resource_group="rg",
+        stream_name=stream_name,
+        stream_config=stream_config_json,
+        wait_sec=0,
+    )
+
+    assert result["name"] == stream_name
+    assert json.loads(result["streamConfiguration"])["snapshotsPerSecond"] == 10
+
+
+def test_update_namespace_asset_stream_generalized_show_template_config(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    """show_template=config on update should pre-fill existing ARM values into the template."""
+    asset_name = "gen-asset"
+    stream_name = "sensor-stream"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    existing_stream = {
+        "name": stream_name,
+        "streamConfiguration": json.dumps({"snapshotsPerSecond": 3, "bufferSize": 5}),
+        "destinations": [{"target": "Mqtt", "configuration": {"topic": "live/topic", "qos": "Qos1"}}],
+        "typeRef": None,
+    }
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[existing_stream],
+    )
+
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=_stream_metadata(
+            connector_type,
+            stream_schema={
+                "type": "object",
+                "properties": {
+                    "snapshotsPerSecond": {"type": "integer", "default": 1},
+                    "bufferSize": {"type": "integer", "default": 10},
+                },
+            },
+        ),
+    )
+
+    result = update_namespace_asset_stream(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name="inst",
+        instance_resource_group="rg",
+        stream_name=stream_name,
+        show_template="config",
+        wait_sec=0,
+    )
+
+    assert result["connectorType"] == f"Microsoft.{connector_type}"
+    stream_cfg = result["streamConfig"]["streamConfiguration"]
+    assert stream_cfg["snapshotsPerSecond"] == 3
+    assert stream_cfg["bufferSize"] == 5
+    dests = result["streamConfig"]["destinations"]
+    mqtt_dest = next((d for d in dests if d["target"] == "Mqtt"), None)
+    assert mqtt_dest is not None
+    assert mqtt_dest["configuration"]["topic"] == "live/topic"
+
+
+def test_update_namespace_asset_stream_generalized_raises_if_not_found(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    asset_name = "gen-asset"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[],
+    )
+
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="not found"):
+        update_namespace_asset_stream(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            stream_name="missing-stream",
+            show_template="config",
+            wait_sec=0,
+        )
+
+
+def test_update_namespace_asset_stream_generalized_type_ref(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    """Updating only --type-ref updates the stream typeRef without touching config."""
+    asset_name = "gen-asset"
+    stream_name = "sensor-stream"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    existing_stream = {
+        "name": stream_name,
+        "streamConfiguration": json.dumps({"snapshotsPerSecond": 1}),
+        "destinations": [],
+        "typeRef": None,
+    }
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[existing_stream],
+    )
+
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    updated_asset = deepcopy(asset)
+    updated_stream = deepcopy(existing_stream)
+    updated_stream["typeRef"] = "myTypeRef"
+    updated_asset["properties"]["streams"] = [updated_stream]
+
+    mocked_responses.add(
+        responses.PATCH,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        status=200,
+    )
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=updated_asset, status=200,
+    )
+
+    result = update_namespace_asset_stream(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name="inst",
+        instance_resource_group="rg",
+        stream_name=stream_name,
+        type_ref="myTypeRef",
+        wait_sec=0,
+    )
+
+    assert result["name"] == stream_name
+    assert result["typeRef"] == "myTypeRef"
+
+
+def test_update_namespace_asset_stream_generalized_show_template_schema(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    """show_template=schema on update returns the connector schema (not pre-filled with values)."""
+    asset_name = "gen-asset"
+    stream_name = "sensor-stream"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    existing_stream = {
+        "name": stream_name,
+        "streamConfiguration": json.dumps({"snapshotsPerSecond": 3}),
+        "destinations": [],
+        "typeRef": None,
+    }
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[existing_stream],
+    )
+
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=_stream_metadata(
+            connector_type,
+            stream_schema={
+                "type": "object",
+                "properties": {"snapshotsPerSecond": {"type": "integer", "default": 1, "minimum": 0}},
+            },
+        ),
+    )
+
+    result = update_namespace_asset_stream(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name="inst",
+        instance_resource_group="rg",
+        stream_name=stream_name,
+        show_template="schema",
+        wait_sec=0,
+    )
+
+    assert result["connectorType"] == f"Microsoft.{connector_type}"
+    stream_cfg = result["streamConfig"]["streamConfiguration"]
+    sps = (
+        stream_cfg["properties"]["snapshotsPerSecond"]
+        if "properties" in stream_cfg else stream_cfg["snapshotsPerSecond"]
+    )
+    assert sps["type"] == "integer"
+    assert sps["default"] == 1
+
+
+def test_update_namespace_asset_stream_generalized_show_template_with_config_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    """--show-template config and --stream-config are mutually exclusive on update."""
+    asset_name = "gen-asset"
+    stream_name = "sensor-stream"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    existing_stream = {
+        "name": stream_name,
+        "streamConfiguration": json.dumps({"snapshotsPerSecond": 3}),
+        "destinations": [],
+        "typeRef": None,
+    }
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[existing_stream],
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="cannot be used together"):
+        update_namespace_asset_stream(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            stream_name=stream_name,
+            show_template="config",
+            stream_config=json.dumps({"streamConfiguration": {"snapshotsPerSecond": 5}}),
+            wait_sec=0,
+        )
+
+
+def test_add_namespace_asset_stream_generalized_invalid_config_shape_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    """--stream-config without 'streamConfiguration' or 'destinations' keys is rejected."""
+    asset_name = "gen-asset"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[],
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="must be a JSON object with"):
+        add_namespace_asset_stream(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            stream_name="new-stream",
+            stream_config=json.dumps({"foo": "bar"}),
+            wait_sec=0,
+        )
+
+
+def test_update_namespace_asset_stream_generalized_clears_destinations(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+):
+    """An explicit empty destinations array clears the stream's existing destinations."""
+    asset_name = "gen-asset"
+    stream_name = "sensor-stream"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    existing_stream = {
+        "name": stream_name,
+        "streamConfiguration": json.dumps({"snapshotsPerSecond": 1}),
+        "destinations": [{"target": "Mqtt", "configuration": {"topic": "old/topic"}}],
+        "typeRef": None,
+    }
+    asset = _build_asset_with_connector_streams(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        streams=[existing_stream],
+    )
+
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=_stream_metadata(connector_type),
+    )
+
+    captured = {}
+
+    def _capture_patch(request):
+        captured["body"] = json.loads(request.body)
+        return (200, {}, json.dumps(asset))
+
+    mocked_responses.add_callback(
+        responses.PATCH,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        callback=_capture_patch,
+        content_type="application/json",
+    )
+
+    updated_asset = deepcopy(asset)
+    updated_stream = deepcopy(existing_stream)
+    updated_stream["destinations"] = []
+    updated_asset["properties"]["streams"] = [updated_stream]
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=updated_asset, status=200,
+    )
+
+    result = update_namespace_asset_stream(
+        cmd=mocked_cmd,
+        asset_name=asset_name,
+        instance_name="inst",
+        instance_resource_group="rg",
+        stream_name=stream_name,
+        stream_config=json.dumps({"destinations": []}),
+        wait_sec=0,
+    )
+
+    # The PATCH payload should carry an empty destinations list (cleared, not left in place).
+    patched_stream = next(
+        s for s in captured["body"]["properties"]["streams"] if s["name"] == stream_name
+    )
+    assert patched_stream["destinations"] == []
+    assert result["destinations"] == []

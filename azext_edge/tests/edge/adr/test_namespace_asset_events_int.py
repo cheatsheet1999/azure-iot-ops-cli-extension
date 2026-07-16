@@ -10,7 +10,13 @@ import pytest
 
 from ...generators import generate_random_string
 from ...helpers import run, wait_for_expected_count
-from .namespace_helpers import create_config_file, assert_point_properties, assert_event_properties
+from .namespace_helpers import (
+    create_config_file,
+    assert_point_properties,
+    assert_event_properties,
+    _save_json_to_file,
+    _try_show_template,
+)
 
 
 pytestmark = [pytest.mark.rpsaas, pytest.mark.long_running]
@@ -593,3 +599,295 @@ def test_namespace_sse_asset_event_lifecycle_operations(asset_factory):
 
     remaining_event_group_names = [ev["name"] for ev in remaining_event_groups]
     assert event_group_name not in remaining_event_group_names
+
+
+# ---------------------------------------------------------------------------
+# Generalized event-group / event commands — OPC UA (bundled metadata)
+# ---------------------------------------------------------------------------
+
+
+def test_generalized_event_lifecycle_opcua(asset_factory, tracked_files: List[str]):
+    """Full lifecycle of generalized event-group + event commands on an OPC UA asset.
+
+    Flow:
+      1. --show-template config  ->  discover schema
+      2. Fill connector-specific values in the returned template
+      3. Use filled template as --event-group-config / --event-config
+      4. CRUD: add / show / list / update / remove
+      5. Export round-trip
+    """
+    info = asset_factory("opcua")
+    asset_name = info["name"]
+    instance_name = info["instanceName"]
+    resource_group = info["resourceGroup"]
+    eg_name = f"gen-eg-{generate_random_string(6, force_lower=True)}"
+    eg_name_2 = f"gen-eg2-{generate_random_string(6, force_lower=True)}"
+    event_name = f"gen-ev-{generate_random_string(6, force_lower=True)}"
+    data_source = "ns=2;s=Boiler"
+    ev_data_source = "ns=2;s=Boiler.Event"
+
+    # 1. SHOW-TEMPLATE - event-group
+    eg_template = run(
+        f"az iot ops ns asset event-group add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {eg_name} --show-template config"
+    )
+    assert isinstance(eg_template, dict)
+    assert "connectorType" in eg_template
+    assert "eventGroupConfig" in eg_template
+
+    eg_config = eg_template.copy()
+    eg_config["eventGroupConfig"]["eventGroupConfiguration"] = {
+        "publishingInterval": 1000,
+        "queueSize": 5,
+    }
+    eg_config["eventGroupConfig"].pop("destinations", None)
+    eg_config_file = _save_json_to_file(eg_config, tracked_files)
+
+    # 2. ADD event-group with config
+    added_eg = run(
+        f"az iot ops ns asset event-group add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {eg_name} --data-source '{data_source}' "
+        f"--event-group-config {eg_config_file}"
+    )
+    assert_event_properties(
+        added_eg, name=eg_name, data_source=data_source,
+        opcua_configuration={"publishingInterval": 1000},
+    )
+
+    # 3. SHOW event-group
+    shown_eg = run(
+        f"az iot ops ns asset event-group show --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --name {eg_name}"
+    )
+    assert_event_properties(shown_eg, name=eg_name, data_source=data_source)
+
+    # 4. LIST event-groups
+    eg_list = run(
+        f"az iot ops ns asset event-group list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group}"
+    )
+    assert any(g["name"] == eg_name for g in eg_list)
+
+    # 5. ADD a second event-group (minimal)
+    added_eg_2 = run(
+        f"az iot ops ns asset event-group add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {eg_name_2} --data-source '{data_source}'"
+    )
+    assert_event_properties(added_eg_2, name=eg_name_2)
+    eg_names = [g["name"] for g in run(
+        f"az iot ops ns asset event-group list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group}"
+    )]
+    assert eg_name in eg_names and eg_name_2 in eg_names
+
+    # 6. UPDATE event-group
+    updated_source = "ns=2;s=Boiler.Updated"
+    eg_config["eventGroupConfig"]["eventGroupConfiguration"]["publishingInterval"] = 2000
+    updated_eg_file = _save_json_to_file(eg_config, tracked_files)
+    updated_eg = run(
+        f"az iot ops ns asset event-group update --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {eg_name} --data-source '{updated_source}' "
+        f"--event-group-config {updated_eg_file}"
+    )
+    assert_event_properties(
+        updated_eg, name=eg_name, data_source=updated_source,
+        opcua_configuration={"publishingInterval": 2000},
+    )
+
+    # 7. SHOW-TEMPLATE - event
+    event_template = run(
+        f"az iot ops ns asset event add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--event-group {eg_name} --name {event_name} "
+        f"--data-source '{ev_data_source}' --show-template config"
+    )
+    assert isinstance(event_template, dict)
+    assert "connectorType" in event_template
+    assert "eventConfig" in event_template
+
+    event_config = event_template.copy()
+    event_config["eventConfig"]["eventConfiguration"] = {
+        "queueSize": 3,
+    }
+    event_config["eventConfig"].pop("destinations", None)
+    event_config_file = _save_json_to_file(event_config, tracked_files)
+
+    # 8. ADD event with config
+    added_events = run(
+        f"az iot ops ns asset event add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--event-group {eg_name} --name {event_name} "
+        f"--data-source '{ev_data_source}' --event-config {event_config_file}"
+    )
+    assert_point_properties(added_events, name=event_name, data_source=ev_data_source)
+
+    # 9. LIST events
+    ev_list = run(
+        f"az iot ops ns asset event list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --event-group {eg_name}"
+    )
+    assert any(ev["name"] == event_name for ev in ev_list)
+
+    # 10. REPLACE event
+    replaced_ev_source = "ns=2;s=Boiler.Replaced"
+    replaced_events = run(
+        f"az iot ops ns asset event add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--event-group {eg_name} --name {event_name} "
+        f"--data-source '{replaced_ev_source}' --replace"
+    )
+    assert_point_properties(replaced_events, name=event_name, data_source=replaced_ev_source)
+
+    # 11. EXPORT event-groups
+    export_result = run(
+        f"az iot ops ns asset event-group export --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --output-dir /tmp --replace"
+    )
+    assert export_result["event_group_count"] >= 1
+    tracked_files.append(export_result["file_path"])
+
+    # 12. EXPORT events
+    ev_export_result = run(
+        f"az iot ops ns asset event export --asset {asset_name} "
+        f"--event-group {eg_name} --instance {instance_name} -g {resource_group} "
+        f"--output-dir /tmp --replace"
+    )
+    assert ev_export_result["event_count"] >= 1
+    tracked_files.append(ev_export_result["file_path"])
+
+    # 13. REMOVE event
+    run(
+        f"az iot ops ns asset event remove --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--event-group {eg_name} --name {event_name}"
+    )
+    ev_list_after = run(
+        f"az iot ops ns asset event list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --event-group {eg_name}"
+    )
+    assert not any(ev["name"] == event_name for ev in (ev_list_after or []))
+
+    # 14. REMOVE event-groups
+    for eg in [eg_name, eg_name_2]:
+        run(
+            f"az iot ops ns asset event-group remove --asset {asset_name} "
+            f"--instance {instance_name} -g {resource_group} --name {eg}"
+        )
+    remaining = [g["name"] for g in (run(
+        f"az iot ops ns asset event-group list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group}"
+    ) or [])]
+    assert eg_name not in remaining and eg_name_2 not in remaining
+
+
+# ---------------------------------------------------------------------------
+# Generalized event-group / event commands — custom (connector template required)
+# ---------------------------------------------------------------------------
+
+
+def test_generalized_event_lifecycle_custom(asset_factory, tracked_files: List[str]):
+    """Generalized event-group + event lifecycle on a custom asset.
+
+    A connector template must exist in the instance for --show-template / --event-group-config
+    to resolve connector metadata. When no template is installed, --show-template returns an
+    empty dict and the test exercises the metadata-free path (no config payload).
+    """
+    info = asset_factory("custom")
+    asset_name = info["name"]
+    instance_name = info["instanceName"]
+    resource_group = info["resourceGroup"]
+    eg_name = f"gen-eg-{generate_random_string(6, force_lower=True)}"
+    event_name = f"gen-ev-{generate_random_string(6, force_lower=True)}"
+    data_source = "custom/boiler"
+    ev_data_source = "custom/boiler/event"
+
+    # 1. SHOW-TEMPLATE - event-group (may be empty when no connector template installed)
+    eg_template = _try_show_template(
+        f"az iot ops ns asset event-group add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {eg_name} --show-template config"
+    )
+
+    eg_config_arg = ""
+    if eg_template:
+        assert "connectorType" in eg_template
+        assert "eventGroupConfig" in eg_template
+        eg_config = eg_template.copy()
+        eg_config["eventGroupConfig"].pop("destinations", None)
+        eg_config_file = _save_json_to_file(eg_config, tracked_files)
+        eg_config_arg = f"--event-group-config {eg_config_file}"
+
+    # 2. ADD event-group
+    added_eg = run(
+        f"az iot ops ns asset event-group add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {eg_name} --data-source '{data_source}' {eg_config_arg}"
+    )
+    assert_event_properties(added_eg, name=eg_name, data_source=data_source)
+
+    # 3. LIST event-groups
+    eg_list = run(
+        f"az iot ops ns asset event-group list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group}"
+    )
+    assert any(g["name"] == eg_name for g in eg_list)
+
+    # 4. SHOW-TEMPLATE - event (may be empty)
+    event_template = _try_show_template(
+        f"az iot ops ns asset event add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--event-group {eg_name} --name {event_name} "
+        f"--data-source '{ev_data_source}' --show-template config"
+    )
+
+    event_config_arg = ""
+    if event_template:
+        assert "connectorType" in event_template
+        assert "eventConfig" in event_template
+        event_config = event_template.copy()
+        event_config["eventConfig"].pop("destinations", None)
+        event_config_file = _save_json_to_file(event_config, tracked_files)
+        event_config_arg = f"--event-config {event_config_file}"
+
+    # 5. ADD event
+    added_events = run(
+        f"az iot ops ns asset event add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--event-group {eg_name} --name {event_name} "
+        f"--data-source '{ev_data_source}' {event_config_arg}"
+    )
+    assert_point_properties(added_events, name=event_name, data_source=ev_data_source)
+
+    # 6. LIST events
+    ev_list = run(
+        f"az iot ops ns asset event list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --event-group {eg_name}"
+    )
+    assert any(ev["name"] == event_name for ev in ev_list)
+
+    # 7. REMOVE event
+    run(
+        f"az iot ops ns asset event remove --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--event-group {eg_name} --name {event_name}"
+    )
+    ev_list_after = run(
+        f"az iot ops ns asset event list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --event-group {eg_name}"
+    )
+    assert not any(ev["name"] == event_name for ev in (ev_list_after or []))
+
+    # 8. REMOVE event-group
+    run(
+        f"az iot ops ns asset event-group remove --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --name {eg_name}"
+    )
+    remaining = [g["name"] for g in (run(
+        f"az iot ops ns asset event-group list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group}"
+    ) or [])]
+    assert eg_name not in remaining

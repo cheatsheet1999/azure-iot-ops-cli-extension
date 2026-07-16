@@ -1596,7 +1596,7 @@ def load_adr_arguments(self, _):
             context.argument(
                 "group_name",
                 options_list=["--event-group", "--eg"],
-                help="Event name.",
+                help="Event-group name.",
             )
             context.argument(
                 "event_name",
@@ -2094,7 +2094,6 @@ def load_adr_arguments(self, _):
     _register_export_import_args(["custom", "opcua", "onvif", "sse"], "event-group")
     _register_export_import_args(
         ["custom", "opcua", "onvif", "sse"], "event", supports_csv=True,
-        extra_args={"event_group_name": {"options_list": ["--event-group", "--eg"], "help": "Event-group name."}},
     )
 
     with self.argument_context("iot ops ns asset opcua event add") as context:

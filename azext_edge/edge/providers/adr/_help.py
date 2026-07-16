@@ -2648,6 +2648,683 @@ def load_iotops_adr_help():
     """
 
     helps[
+        "iot ops ns asset event-group"
+    ] = """
+        type: group
+        short-summary: Manage event-groups for namespaced assets in an IoT Operations instance.
+        long-summary: >
+            The connector type is detected automatically from the existing asset.
+            For connector-specific parameters use --event-group-config (inline JSON or file).
+            Use --show-template to discover the supported configuration schema for the asset's connector type.
+    """
+
+    helps[
+        "iot ops ns asset event-group add"
+    ] = """
+        type: command
+        short-summary: Add an event-group to a namespaced asset in an IoT Operations instance.
+        long-summary: >
+            The connector type is detected from the asset's device endpoint.
+            Connector-specific configuration can be supplied via --event-group-config.
+            Use --show-template to discover the supported config schema. For non-OPC UA connectors,
+            a connector template must exist in the instance.
+
+        examples:
+        - name: Add a basic event-group to any asset type
+          text: >
+            az iot ops ns asset event-group add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmGroup
+
+        - name: Show the event-group config template for the asset's connector type
+          text: >
+            az iot ops ns asset event-group add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmGroup --show-template config
+
+        - name: Add an event-group with connector-specific configuration from inline JSON
+          text: >
+            az iot ops ns asset event-group add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmGroup
+            --event-group-config '{"eventGroupConfiguration": {"queueSize": 5}}'
+
+        - name: Add an event-group with configuration from a file
+          text: >
+            az iot ops ns asset event-group add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmGroup --event-group-config ./event_group_config.json
+
+        - name: Add an event-group with a default MQTT destination
+          text: >
+            az iot ops ns asset event-group add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmGroup
+            --event-group-config '{"destinations": [{"target": "Mqtt", "configuration": {"topic": "factory/alarms", "retain": "Keep", "qos": "Qos1", "ttl": 3600}}]}'
+
+        - name: Replace an existing event-group
+          text: >
+            az iot ops ns asset event-group add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmGroup --replace
+    """
+
+    helps[
+        "iot ops ns asset event-group update"
+    ] = """
+        type: command
+        short-summary: Update an event-group for a namespaced asset in an IoT Operations instance.
+        long-summary: >
+            The connector type is detected from the asset's device endpoint.
+            Use --event-group-config to supply connector-specific configuration.
+            Use --show-template config to see current event-group values pre-filled in the full schema
+            structure (ready to edit and pass back via --event-group-config).
+            Use --show-template schema to see the full connector schema with types and constraints.
+
+        examples:
+        - name: Show current event-group config pre-filled with existing values (for editing before update)
+          text: >
+            az iot ops ns asset event-group update --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmGroup --show-template config
+
+        - name: Show the event-group config schema with types and constraints
+          text: >
+            az iot ops ns asset event-group update --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmGroup --show-template schema
+
+        - name: Update event-group configuration from inline JSON
+          text: >
+            az iot ops ns asset event-group update --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmGroup
+            --event-group-config '{"eventGroupConfiguration": {"queueSize": 10}}'
+
+        - name: Update event-group data source
+          text: >
+            az iot ops ns asset event-group update --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmGroup --data-source "alarm.updated"
+    """
+
+    helps[
+        "iot ops ns asset event-group list"
+    ] = """
+        type: command
+        short-summary: List event-groups for a namespaced asset in an IoT Operations instance.
+
+        examples:
+        - name: List all event-groups for an asset
+          text: >
+            az iot ops ns asset event-group list --asset myasset --instance myInstance
+            -g myInstanceResourceGroup
+    """
+
+    helps[
+        "iot ops ns asset event-group remove"
+    ] = """
+        type: command
+        short-summary: Remove an event-group from a namespaced asset in an IoT Operations instance.
+
+        examples:
+        - name: Remove an event-group from an asset
+          text: >
+            az iot ops ns asset event-group remove --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmGroup
+    """
+
+    helps[
+        "iot ops ns asset event-group show"
+    ] = """
+        type: command
+        short-summary: Show details of an event-group for a namespaced asset in an IoT Operations instance.
+
+        examples:
+        - name: Show event-group details
+          text: >
+            az iot ops ns asset event-group show --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name alarmGroup
+    """
+
+    helps[
+        "iot ops ns asset event-group export"
+    ] = """
+        type: command
+        short-summary: Export event-groups to file.
+
+        examples:
+        - name: Export event-groups to JSON
+          text: >
+            az iot ops ns asset event-group export --asset myasset --instance myInstance
+            -g myInstanceResourceGroup
+    """
+
+    helps[
+        "iot ops ns asset event-group import"
+    ] = """
+        type: command
+        short-summary: Import event-groups from file.
+
+        examples:
+        - name: Import event-groups from a JSON file
+          text: >
+            az iot ops ns asset event-group import --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --input-file ./event_groups.json
+    """
+
+    helps[
+        "iot ops ns asset event"
+    ] = """
+        type: group
+        short-summary: Manage events for asset event-groups in IoT Operations namespaces.
+        long-summary: >
+            The connector type is detected automatically from the existing asset.
+            For connector-specific parameters use --event-config (inline JSON or file).
+            Use --show-template to discover the supported configuration schema for the asset's connector type.
+    """
+
+    helps[
+        "iot ops ns asset event add"
+    ] = """
+        type: command
+        short-summary: Add an event to an asset event-group in an IoT Operations namespace.
+        long-summary: >
+            The connector type is detected from the asset's device endpoint.
+            Connector-specific configuration (queue size, sampling interval, etc.) and destinations
+            can be supplied via --event-config. Use --show-template to discover the supported
+            config schema. For non-OPC UA connectors, a connector template must exist in the instance.
+
+        examples:
+        - name: Add a basic event to any asset type
+          text: >
+            az iot ops ns asset event add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --name severity --data-source "alarm.severity"
+
+        - name: Show the event config template for the asset's connector type
+          text: >
+            az iot ops ns asset event add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --name severity --data-source "alarm.severity"
+            --show-template config
+
+        - name: Add an event with connector-specific configuration from inline JSON
+          text: >
+            az iot ops ns asset event add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --name severity --data-source "alarm.severity"
+            --event-config '{"eventConfiguration": {"samplingInterval": 1000, "queueSize": 5}}'
+
+        - name: Add an event with configuration from a file
+          text: >
+            az iot ops ns asset event add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --name severity --data-source "alarm.severity"
+            --event-config ./event_config.json
+
+        - name: Add an event with an MQTT destination
+          text: >
+            az iot ops ns asset event add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --name severity --data-source "alarm.severity"
+            --event-config '{"destinations": [{"target": "Mqtt", "configuration": {"topic": "factory/alarms", "retain": "Keep", "qos": "Qos1", "ttl": 3600}}]}'
+
+        - name: Replace an existing event
+          text: >
+            az iot ops ns asset event add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --name severity --data-source "alarm.severity.updated"
+            --replace
+    """
+
+    helps[
+        "iot ops ns asset event list"
+    ] = """
+        type: command
+        short-summary: List events for an asset event-group in an IoT Operations namespace.
+
+        examples:
+        - name: List all events for an event-group
+          text: >
+            az iot ops ns asset event list --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup
+    """
+
+    helps[
+        "iot ops ns asset event remove"
+    ] = """
+        type: command
+        short-summary: Remove an event from an asset event-group in an IoT Operations namespace.
+
+        examples:
+        - name: Remove an event from an event-group
+          text: >
+            az iot ops ns asset event remove --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --name severity
+    """
+
+    helps[
+        "iot ops ns asset event export"
+    ] = """
+        type: command
+        short-summary: Export events to file.
+
+        examples:
+        - name: Export events to JSON
+          text: >
+            az iot ops ns asset event export --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup
+    """
+
+    helps[
+        "iot ops ns asset event import"
+    ] = """
+        type: command
+        short-summary: Import events from file.
+
+        examples:
+        - name: Import events from a JSON file
+          text: >
+            az iot ops ns asset event import --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --event-group alarmGroup --input-file ./events.json
+    """
+
+    helps[
+        "iot ops ns asset mgmt-group"
+    ] = """
+        type: group
+        short-summary: Manage management groups for namespaced assets in an IoT Operations instance.
+        long-summary: >
+            The connector type is detected automatically from the existing asset.
+            For connector-specific parameters use --mgmt-group-config (inline JSON or file).
+            Use --show-template to discover the supported configuration schema for the asset's connector type.
+    """
+
+    helps[
+        "iot ops ns asset mgmt-group add"
+    ] = """
+        type: command
+        short-summary: Add a management group to a namespaced asset in an IoT Operations instance.
+        long-summary: >
+            The connector type is detected from the asset's device endpoint.
+            Connector-specific configuration can be supplied via --mgmt-group-config.
+            Use --show-template to discover the supported config schema. For non-OPC UA connectors,
+            a connector template must exist in the instance.
+
+        examples:
+        - name: Add a basic management group to any asset type
+          text: >
+            az iot ops ns asset mgmt-group add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name boilerControls
+
+        - name: Show the management group config template for the asset's connector type
+          text: >
+            az iot ops ns asset mgmt-group add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name boilerControls --show-template config
+
+        - name: Add a management group with connector-specific configuration from inline JSON
+          text: >
+            az iot ops ns asset mgmt-group add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name boilerControls
+            --mgmt-group-config '{"managementGroupConfiguration": {"maxConcurrentRequests": 5}}'
+
+        - name: Add a management group with configuration from a file
+          text: >
+            az iot ops ns asset mgmt-group add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name boilerControls --mgmt-group-config ./mgmt_group_config.json
+
+        - name: Replace an existing management group
+          text: >
+            az iot ops ns asset mgmt-group add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name boilerControls --replace
+    """
+
+    helps[
+        "iot ops ns asset mgmt-group update"
+    ] = """
+        type: command
+        short-summary: Update a management group for a namespaced asset in an IoT Operations instance.
+        long-summary: >
+            The connector type is detected from the asset's device endpoint.
+            Use --mgmt-group-config to supply connector-specific configuration.
+            Use --show-template config to see current management group values pre-filled in the full schema
+            structure (ready to edit and pass back via --mgmt-group-config).
+            Use --show-template schema to see the full connector schema with types and constraints.
+
+        examples:
+        - name: Show current management group config pre-filled with existing values (for editing before update)
+          text: >
+            az iot ops ns asset mgmt-group update --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name boilerControls --show-template config
+
+        - name: Show the management group config schema with types and constraints
+          text: >
+            az iot ops ns asset mgmt-group update --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name boilerControls --show-template schema
+
+        - name: Update management group configuration from inline JSON
+          text: >
+            az iot ops ns asset mgmt-group update --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name boilerControls
+            --mgmt-group-config '{"managementGroupConfiguration": {"maxConcurrentRequests": 10}}'
+
+        - name: Update management group data source
+          text: >
+            az iot ops ns asset mgmt-group update --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name boilerControls --data-source "boiler.controls"
+    """
+
+    helps[
+        "iot ops ns asset mgmt-group list"
+    ] = """
+        type: command
+        short-summary: List management groups for a namespaced asset in an IoT Operations instance.
+
+        examples:
+        - name: List all management groups for an asset
+          text: >
+            az iot ops ns asset mgmt-group list --asset myasset --instance myInstance
+            -g myInstanceResourceGroup
+    """
+
+    helps[
+        "iot ops ns asset mgmt-group remove"
+    ] = """
+        type: command
+        short-summary: Remove a management group from a namespaced asset in an IoT Operations instance.
+
+        examples:
+        - name: Remove a management group from an asset
+          text: >
+            az iot ops ns asset mgmt-group remove --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name boilerControls
+    """
+
+    helps[
+        "iot ops ns asset mgmt-group show"
+    ] = """
+        type: command
+        short-summary: Show details of a management group for a namespaced asset in an IoT Operations instance.
+
+        examples:
+        - name: Show management group details
+          text: >
+            az iot ops ns asset mgmt-group show --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name boilerControls
+    """
+
+    helps[
+        "iot ops ns asset mgmt-group export"
+    ] = """
+        type: command
+        short-summary: Export management groups to file.
+
+        examples:
+        - name: Export management groups to JSON
+          text: >
+            az iot ops ns asset mgmt-group export --asset myasset --instance myInstance
+            -g myInstanceResourceGroup
+    """
+
+    helps[
+        "iot ops ns asset mgmt-group import"
+    ] = """
+        type: command
+        short-summary: Import management groups from file.
+
+        examples:
+        - name: Import management groups from a JSON file
+          text: >
+            az iot ops ns asset mgmt-group import --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --input-file ./management_groups.json
+    """
+
+    helps[
+        "iot ops ns asset mgmt-action"
+    ] = """
+        type: group
+        short-summary: Manage actions for asset management groups in IoT Operations namespaces.
+        long-summary: >
+            The connector type is detected automatically from the existing asset.
+            For connector-specific parameters use --action-config (inline JSON or file).
+            Use --show-template to discover the supported configuration schema for the asset's connector type.
+    """
+
+    helps[
+        "iot ops ns asset mgmt-action add"
+    ] = """
+        type: command
+        short-summary: Add an action to an asset management group in an IoT Operations namespace.
+        long-summary: >
+            The connector type is detected from the asset's device endpoint.
+            Connector-specific configuration can be supplied via --action-config. Use --show-template
+            to discover the supported config schema. For non-OPC UA connectors, a connector template
+            must exist in the instance.
+
+        examples:
+        - name: Add a basic action to any asset type
+          text: >
+            az iot ops ns asset mgmt-action add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --group boilerControls --name restart --target-uri "opc.tcp://boiler/restart"
+
+        - name: Show the action config template for the asset's connector type
+          text: >
+            az iot ops ns asset mgmt-action add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --group boilerControls --name restart --show-template config
+
+        - name: Add an action with connector-specific configuration from inline JSON
+          text: >
+            az iot ops ns asset mgmt-action add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --group boilerControls --name restart --target-uri "opc.tcp://boiler/restart"
+            --action-config '{"actionConfiguration": {"retryCount": 3}}'
+
+        - name: Add an action with configuration from a file
+          text: >
+            az iot ops ns asset mgmt-action add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --group boilerControls --name restart --target-uri "opc.tcp://boiler/restart"
+            --action-config ./action_config.json
+
+        - name: Replace an existing action
+          text: >
+            az iot ops ns asset mgmt-action add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --group boilerControls --name restart --target-uri "opc.tcp://boiler/restart"
+            --replace
+    """
+
+    helps[
+        "iot ops ns asset mgmt-action list"
+    ] = """
+        type: command
+        short-summary: List actions for an asset management group in an IoT Operations namespace.
+
+        examples:
+        - name: List all actions for a management group
+          text: >
+            az iot ops ns asset mgmt-action list --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --group boilerControls
+    """
+
+    helps[
+        "iot ops ns asset mgmt-action remove"
+    ] = """
+        type: command
+        short-summary: Remove an action from an asset management group in an IoT Operations namespace.
+
+        examples:
+        - name: Remove an action from a management group
+          text: >
+            az iot ops ns asset mgmt-action remove --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --group boilerControls --name restart
+    """
+
+    helps[
+        "iot ops ns asset mgmt-action export"
+    ] = """
+        type: command
+        short-summary: Export management group actions to file.
+
+        examples:
+        - name: Export actions to JSON
+          text: >
+            az iot ops ns asset mgmt-action export --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --group boilerControls
+    """
+
+    helps[
+        "iot ops ns asset mgmt-action import"
+    ] = """
+        type: command
+        short-summary: Import management group actions from file.
+
+        examples:
+        - name: Import actions from a JSON file
+          text: >
+            az iot ops ns asset mgmt-action import --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --group boilerControls --input-file ./actions.json
+    """
+
+    helps[
+        "iot ops ns asset stream"
+    ] = """
+        type: group
+        short-summary: Manage streams for namespaced assets in an IoT Operations instance.
+        long-summary: >
+            The connector type is detected automatically from the existing asset.
+            For connector-specific parameters use --stream-config (inline JSON or file).
+            Use --show-template to discover the supported configuration schema for the asset's connector type.
+    """
+
+    helps[
+        "iot ops ns asset stream add"
+    ] = """
+        type: command
+        short-summary: Add a stream to a namespaced asset in an IoT Operations instance.
+        long-summary: >
+            The connector type is detected from the asset's device endpoint.
+            Connector-specific configuration and destinations can be supplied via --stream-config.
+            Use --show-template to discover the supported config schema. For non-OPC UA connectors,
+            a connector template must exist in the instance.
+
+        examples:
+        - name: Add a basic stream to any asset type
+          text: >
+            az iot ops ns asset stream add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name videoStream
+
+        - name: Show the stream config template for the asset's connector type
+          text: >
+            az iot ops ns asset stream add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name videoStream --show-template config
+
+        - name: Add a stream with connector-specific configuration from inline JSON
+          text: >
+            az iot ops ns asset stream add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name videoStream
+            --stream-config '{"streamConfiguration": {"taskType": "snapshot-to-mqtt", "snapshotsPerSecond": 5}}'
+
+        - name: Add a stream with configuration from a file
+          text: >
+            az iot ops ns asset stream add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name videoStream --stream-config ./stream_config.json
+
+        - name: Add a stream with an MQTT destination
+          text: >
+            az iot ops ns asset stream add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name videoStream
+            --stream-config '{"destinations": [{"target": "Mqtt", "configuration": {"topic": "factory/streams", "retain": "Keep", "qos": "Qos1", "ttl": 3600}}]}'
+
+        - name: Replace an existing stream
+          text: >
+            az iot ops ns asset stream add --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name videoStream --replace
+    """
+
+    helps[
+        "iot ops ns asset stream update"
+    ] = """
+        type: command
+        short-summary: Update a stream for a namespaced asset in an IoT Operations instance.
+        long-summary: >
+            The connector type is detected from the asset's device endpoint.
+            Use --stream-config to supply connector-specific configuration.
+            Use --show-template config to see current stream values pre-filled in the full schema
+            structure (ready to edit and pass back via --stream-config).
+            Use --show-template schema to see the full connector schema with types and constraints.
+
+        examples:
+        - name: Show current stream config pre-filled with existing values (for editing before update)
+          text: >
+            az iot ops ns asset stream update --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name videoStream --show-template config
+
+        - name: Show the stream config schema with types and constraints
+          text: >
+            az iot ops ns asset stream update --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name videoStream --show-template schema
+
+        - name: Update stream configuration from inline JSON
+          text: >
+            az iot ops ns asset stream update --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name videoStream
+            --stream-config '{"streamConfiguration": {"snapshotsPerSecond": 10}}'
+
+        - name: Update stream type reference
+          text: >
+            az iot ops ns asset stream update --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name videoStream --type-ref "myTypeRef"
+    """
+
+    helps[
+        "iot ops ns asset stream list"
+    ] = """
+        type: command
+        short-summary: List streams for a namespaced asset in an IoT Operations instance.
+
+        examples:
+        - name: List all streams for an asset
+          text: >
+            az iot ops ns asset stream list --asset myasset --instance myInstance
+            -g myInstanceResourceGroup
+    """
+
+    helps[
+        "iot ops ns asset stream remove"
+    ] = """
+        type: command
+        short-summary: Remove a stream from a namespaced asset in an IoT Operations instance.
+
+        examples:
+        - name: Remove a stream from an asset
+          text: >
+            az iot ops ns asset stream remove --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name videoStream
+    """
+
+    helps[
+        "iot ops ns asset stream show"
+    ] = """
+        type: command
+        short-summary: Show details of a stream for a namespaced asset in an IoT Operations instance.
+
+        examples:
+        - name: Show stream details
+          text: >
+            az iot ops ns asset stream show --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --name videoStream
+    """
+
+    helps[
+        "iot ops ns asset stream export"
+    ] = """
+        type: command
+        short-summary: Export streams to file.
+
+        examples:
+        - name: Export streams to JSON
+          text: >
+            az iot ops ns asset stream export --asset myasset --instance myInstance
+            -g myInstanceResourceGroup
+    """
+
+    helps[
+        "iot ops ns asset stream import"
+    ] = """
+        type: command
+        short-summary: Import streams from file.
+
+        examples:
+        - name: Import streams from a JSON file
+          text: >
+            az iot ops ns asset stream import --asset myasset --instance myInstance
+            -g myInstanceResourceGroup --input-file ./streams.json
+    """
+
+    helps[
         "iot ops ns asset opcua dataset"
     ] = """
         type: group
