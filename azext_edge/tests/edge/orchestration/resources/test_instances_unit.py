@@ -36,6 +36,7 @@ from azext_edge.edge.providers.orchestration.resources.instances import (
     get_fc_name,
     get_spc_name,
     parse_feature_kvp_nargs,
+    resolve_oidc_issuer,
 )
 from azext_edge.edge.util.machinery import scoped_semver_import
 from ....generators import (
@@ -74,6 +75,15 @@ def mocked_get_tenant_id(mocker):
     yield mocker.patch(
         "azext_edge.edge.providers.orchestration.resources.instances.get_tenant_id",
         return_value=generate_random_string(),
+    )
+
+
+@pytest.fixture(autouse=True)
+def mocked_resolve_oidc_issuer(mocker):
+    yield mocker.patch(
+        "azext_edge.edge.providers.orchestration.resources.instances.resolve_oidc_issuer",
+        autospec=True,
+        wraps=lambda arm_issuer, **_: arm_issuer,
     )
 
 
@@ -898,6 +908,35 @@ def test_secretsync_enable(
             assert ra_put_request["properties"]["roleDefinitionId"] == role_ids[i]
             assert ra_put_request["properties"]["principalId"] == principal_id
             assert ra_put_request["properties"]["principalType"] == "ServicePrincipal"
+
+
+def test_resolve_oidc_issuer_uses_kubernetes_issuer_for_trailing_slash(mocker):
+    arm_issuer = "https://localhost/issuer/"
+    kubernetes_issuer = "https://localhost/issuer"
+    mocker.patch(
+        "azext_edge.edge.providers.orchestration.resources.instances.load_config_context", autospec=True
+    )
+    mocker.patch(
+        "azext_edge.edge.providers.orchestration.resources.instances._get_service_account_issuer",
+        autospec=True,
+        return_value=kubernetes_issuer,
+    )
+
+    assert resolve_oidc_issuer(arm_issuer, "namespace", "service-account") == kubernetes_issuer
+
+
+def test_resolve_oidc_issuer_keeps_arm_issuer_when_issuers_differ(mocker):
+    arm_issuer = "https://localhost/issuer/"
+    mocker.patch(
+        "azext_edge.edge.providers.orchestration.resources.instances.load_config_context", autospec=True
+    )
+    mocker.patch(
+        "azext_edge.edge.providers.orchestration.resources.instances._get_service_account_issuer",
+        autospec=True,
+        return_value="https://other/issuer",
+    )
+
+    assert resolve_oidc_issuer(arm_issuer, "namespace", "service-account") == arm_issuer
 
 
 @pytest.mark.parametrize(

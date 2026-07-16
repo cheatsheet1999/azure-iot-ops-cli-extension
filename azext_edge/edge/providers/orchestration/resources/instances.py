@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from typing import Dict, Iterable, List, Optional
 
 import yaml
+from azure.cli.core.auth.util import decode_access_token
 from azure.cli.core.azclierror import (
     AzureResponseError,
     InvalidArgumentValueError,
@@ -16,9 +17,14 @@ from azure.cli.core.azclierror import (
 )
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 from knack.log import get_logger
+from kubernetes import client
+from kubernetes.client.exceptions import ApiException
+from kubernetes.config.config_exception import ConfigException
 from rich import print
 from rich.console import Console
+from urllib3.exceptions import HTTPError
 
+from ...base import load_config_context
 from ....util.az_client import (
     ResourceIdContainer,
     get_iotops_mgmt_client,
@@ -90,6 +96,43 @@ def get_fc_name(cluster_name: str, oidc_issuer: str, subject: str) -> str:
 
 def get_cred_subject(namespace: str, service_account_name: str):
     return f"system:serviceaccount:{namespace}:{service_account_name}"
+
+
+def _get_service_account_issuer(namespace: str, service_account_name: str) -> Optional[str]:
+    token_request = client.AuthenticationV1TokenRequest(
+        spec=client.V1TokenRequestSpec(
+            audiences=["api://AzureADTokenExchange"],
+        )
+    )
+    core_v1_api = client.CoreV1Api()
+    with core_v1_api.create_namespaced_service_account_token(
+        name=service_account_name,
+        namespace=namespace,
+        body=token_request,
+        _preload_content=False,
+        _request_timeout=5,
+    ) as response:
+        token_response = core_v1_api.api_client.deserialize(
+            response,
+            client.AuthenticationV1TokenRequest,
+        )
+    return decode_access_token(token_response.status.token).get("iss")
+
+
+def resolve_oidc_issuer(arm_issuer: str, namespace: str, service_account_name: str) -> str:
+    try:
+        load_config_context()
+        kubernetes_issuer = _get_service_account_issuer(
+            namespace=namespace,
+            service_account_name=service_account_name,
+        )
+    except (ApiException, ConfigException, HTTPError, OSError, yaml.YAMLError):
+        return arm_issuer
+
+    if not kubernetes_issuer or kubernetes_issuer.rstrip("/") != arm_issuer.rstrip("/"):
+        return arm_issuer
+
+    return kubernetes_issuer
 
 
 def get_enable_syntax(instance_name: str, resource_group_name: str) -> str:
@@ -393,6 +436,11 @@ class Instances(Queryable):
                 )
                 return
 
+            oidc_issuer = resolve_oidc_issuer(
+                arm_issuer=oidc_issuer,
+                namespace=namespace,
+                service_account_name=SERVICE_ACCOUNT_SECRETSYNC,
+            )
             if not federated_credential_name:
                 federated_credential_name = get_fc_name(
                     cluster_name=cluster_resource["name"],

@@ -72,6 +72,7 @@ from .resources.instances import (
     SERVICE_ACCOUNT_SECRETSYNC,
     SERVICE_ACCOUNT_SCHEMA,
     get_fc_name,
+    resolve_oidc_issuer,
 )
 
 if TYPE_CHECKING:
@@ -481,6 +482,11 @@ class InstanceRestore:
         cluster_resource = self.connected_cluster.resource
         oidc_issuer = self.instances._ensure_oidc_issuer(
             cluster_resource, use_self_hosted_issuer=use_self_hosted_issuer
+        )
+        oidc_issuer = resolve_oidc_issuer(
+            arm_issuer=oidc_issuer,
+            namespace=self.namespace,
+            service_account_name=SERVICE_ACCOUNT_SECRETSYNC,
         )
 
         for mid in self.user_assigned_mis:
