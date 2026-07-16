@@ -531,7 +531,12 @@ class NamespaceDevices(Queryable):
         # That output is a dict with 'connectorType' and 'endpointConfig' keys;
         # --endpoint-config expects only the inner endpointConfig value.
         _parsed = json.loads(additional_configuration)
-        if isinstance(_parsed, dict) and "endpointConfig" in _parsed and "connectorType" in _parsed:
+        if isinstance(_parsed, dict) and "endpointConfig" in _parsed:
+            provided = _parsed.get("connectorType")
+            if provided and connector_type and provided.lower() != connector_type.lower():
+                raise InvalidArgumentValueError(
+                    f"Config connectorType '{provided}' does not match endpoint connectorType '{connector_type}'."
+                )
             additional_configuration = json.dumps(_parsed["endpointConfig"])
 
         if skip_connector_check:

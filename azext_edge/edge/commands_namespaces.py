@@ -1923,12 +1923,12 @@ def _make_datapoint_import_func(method_name: str):
 def _make_event_export_func(method_name: str):
     """Factory that generates a typed event export command function."""
     def export_func(
-        cmd, asset_name: str, event_group_name: str, instance_name: str,
+        cmd, asset_name: str, group_name: str, instance_name: str,
         instance_resource_group: str, extension: str = "json",
         output_dir: str = ".", replace: bool = False,
     ) -> dict:
         return getattr(NamespaceAssets(cmd), method_name)(
-            asset_name=asset_name, event_group_name=event_group_name,
+            asset_name=asset_name, event_group_name=group_name,
             instance_name=instance_name, instance_resource_group=instance_resource_group,
             extension=extension, output_dir=output_dir, replace=replace,
         )
@@ -1938,12 +1938,12 @@ def _make_event_export_func(method_name: str):
 def _make_event_import_func(method_name: str):
     """Factory that generates a typed event import command function."""
     def import_func(
-        cmd, asset_name: str, event_group_name: str, instance_name: str,
+        cmd, asset_name: str, group_name: str, instance_name: str,
         instance_resource_group: str, file_path: str,
         replace: bool = False, **kwargs
     ) -> List[dict]:
         return getattr(NamespaceAssets(cmd), method_name)(
-            asset_name=asset_name, event_group_name=event_group_name,
+            asset_name=asset_name, event_group_name=group_name,
             instance_name=instance_name, instance_resource_group=instance_resource_group,
             file_path=file_path, replace=replace, **kwargs
         )
@@ -3182,3 +3182,262 @@ def add_namespace_asset_dataset_point(
 
 export_namespace_asset_dataset_point = _make_datapoint_export_func("export_dataset_datapoints")
 import_namespace_asset_dataset_point = _make_datapoint_import_func("import_dataset_datapoints")
+
+
+# GENERALIZED EVENT-GROUP COMMANDS
+
+
+def add_namespace_asset_event_group(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    group_name: str,
+    data_source: Optional[str] = None,
+    type_ref: Optional[str] = None,
+    replace: Optional[bool] = False,
+    event_group_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    **kwargs
+) -> dict:
+    return NamespaceAssets(cmd).add_event_group_generalized(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        group_name=group_name,
+        data_source=data_source,
+        type_ref=type_ref,
+        replace=replace,
+        event_group_config=event_group_config,
+        show_template=show_template,
+        **kwargs
+    )
+
+
+def update_namespace_asset_event_group(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    group_name: str,
+    data_source: Optional[str] = None,
+    type_ref: Optional[str] = None,
+    event_group_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    **kwargs
+) -> dict:
+    return NamespaceAssets(cmd).update_event_group_generalized(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        group_name=group_name,
+        data_source=data_source,
+        type_ref=type_ref,
+        event_group_config=event_group_config,
+        show_template=show_template,
+        **kwargs
+    )
+
+
+export_namespace_asset_event_group = _make_export_func("export_event_groups")
+import_namespace_asset_event_group = _make_import_func("import_event_groups")
+
+
+# GENERALIZED EVENT COMMANDS
+
+
+def add_namespace_asset_event_group_event(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    group_name: str,
+    event_name: str,
+    data_source: Optional[str] = None,
+    type_ref: Optional[str] = None,
+    replace: Optional[bool] = False,
+    event_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    **kwargs
+) -> List[dict]:
+    return NamespaceAssets(cmd).add_event_group_event_generalized(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        group_name=group_name,
+        event_name=event_name,
+        data_source=data_source,
+        type_ref=type_ref,
+        replace=replace,
+        event_config=event_config,
+        show_template=show_template,
+        **kwargs
+    )
+
+
+export_namespace_asset_event_group_event = _make_event_export_func("export_event_group_events")
+import_namespace_asset_event_group_event = _make_event_import_func("import_event_group_events")
+
+
+# GENERALIZED MANAGEMENT GROUP COMMANDS
+
+
+def add_namespace_asset_management_group(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    group_name: str,
+    data_source: Optional[str] = None,
+    default_topic: Optional[str] = None,
+    default_timeout: Optional[int] = None,
+    type_ref: Optional[str] = None,
+    replace: Optional[bool] = False,
+    mgmt_group_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    **kwargs
+) -> dict:
+    return NamespaceAssets(cmd).add_management_group_generalized(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        group_name=group_name,
+        data_source=data_source,
+        default_topic=default_topic,
+        default_timeout=default_timeout,
+        type_ref=type_ref,
+        replace=replace,
+        mgmt_group_config=mgmt_group_config,
+        show_template=show_template,
+        **kwargs
+    )
+
+
+def update_namespace_asset_management_group(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    group_name: str,
+    data_source: Optional[str] = None,
+    default_topic: Optional[str] = None,
+    default_timeout: Optional[int] = None,
+    type_ref: Optional[str] = None,
+    mgmt_group_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    **kwargs
+) -> dict:
+    return NamespaceAssets(cmd).update_management_group_generalized(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        group_name=group_name,
+        data_source=data_source,
+        default_topic=default_topic,
+        default_timeout=default_timeout,
+        type_ref=type_ref,
+        mgmt_group_config=mgmt_group_config,
+        show_template=show_template,
+        **kwargs
+    )
+
+
+export_namespace_asset_management_group = _make_export_func("export_management_groups")
+import_namespace_asset_management_group = _make_import_func("import_management_groups")
+
+
+# GENERALIZED MANAGEMENT GROUP ACTION COMMANDS
+
+
+def add_namespace_asset_management_group_action(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    group_name: str,
+    action_name: str,
+    target_uri: Optional[str] = None,
+    topic: Optional[str] = None,
+    action_type: Optional[str] = None,
+    timeout: Optional[int] = None,
+    type_ref: Optional[str] = None,
+    replace: Optional[bool] = False,
+    action_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    **kwargs
+) -> List[dict]:
+    return NamespaceAssets(cmd).add_management_group_action_generalized(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        group_name=group_name,
+        action_name=action_name,
+        target_uri=target_uri,
+        topic=topic,
+        action_type=action_type,
+        timeout=timeout,
+        type_ref=type_ref,
+        replace=replace,
+        action_config=action_config,
+        show_template=show_template,
+        **kwargs
+    )
+
+
+export_namespace_asset_management_group_action = _make_mgmt_action_export_func("export_management_group_actions")
+import_namespace_asset_management_group_action = _make_mgmt_action_import_func("import_management_group_actions")
+
+
+# GENERALIZED STREAM COMMANDS
+
+
+def add_namespace_asset_stream(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    stream_name: str,
+    type_ref: Optional[str] = None,
+    replace: Optional[bool] = False,
+    stream_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    **kwargs
+) -> dict:
+    return NamespaceAssets(cmd).add_stream_generalized(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        stream_name=stream_name,
+        type_ref=type_ref,
+        replace=replace,
+        stream_config=stream_config,
+        show_template=show_template,
+        **kwargs
+    )
+
+
+def update_namespace_asset_stream(
+    cmd,
+    asset_name: str,
+    instance_name: str,
+    instance_resource_group: str,
+    stream_name: str,
+    type_ref: Optional[str] = None,
+    stream_config: Optional[str] = None,
+    show_template: Optional[str] = None,
+    **kwargs
+) -> dict:
+    return NamespaceAssets(cmd).update_stream_generalized(
+        asset_name=asset_name,
+        instance_name=instance_name,
+        instance_resource_group=instance_resource_group,
+        stream_name=stream_name,
+        type_ref=type_ref,
+        stream_config=stream_config,
+        show_template=show_template,
+        **kwargs
+    )
+
+
+export_namespace_asset_stream = _make_export_func("export_streams")
+import_namespace_asset_stream = _make_import_func("import_streams")

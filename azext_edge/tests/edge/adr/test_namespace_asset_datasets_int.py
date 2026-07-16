@@ -4,15 +4,18 @@
 # Licensed under the MIT License. See License file in the project root for license information.
 # ----------------------------------------------------------------------------------------------
 
-import json
 import pytest
 from typing import List
 
-from azure.cli.core.azclierror import CLIInternalError
-
 from ...generators import generate_random_string
-from ...helpers import create_file, run, wait_for_expected_count
-from .namespace_helpers import create_config_file, assert_point_properties, assert_dataset_properties
+from ...helpers import run, wait_for_expected_count
+from .namespace_helpers import (
+    create_config_file,
+    assert_point_properties,
+    assert_dataset_properties,
+    _save_json_to_file,
+    _try_show_template,
+)
 
 
 pytestmark = [pytest.mark.rpsaas, pytest.mark.long_running]
@@ -846,31 +849,6 @@ def test_namespace_mqtt_asset_dataset_lifecycle_operations(asset_factory):
 
     remaining_dataset_names = [dataset["name"] for dataset in datasets_list_after_remove]
     assert dataset_name_1 not in remaining_dataset_names
-
-
-# ---------------------------------------------------------------------------
-# Helpers for generalized (connector-agnostic) tests
-# ---------------------------------------------------------------------------
-
-def _save_json_to_file(content: dict, tracked_files: List[str]) -> str:
-    """Serialize content to a temp JSON file and return its path."""
-    return create_file(
-        file_name=f"template_{generate_random_string(6)}.json",
-        module_file=__file__,
-        tracked_files=tracked_files,
-        content=json.dumps(content),
-    )
-
-
-def _try_show_template(cmd: str) -> dict:
-    """Run a --show-template command and return the parsed result.
-
-    Returns an empty dict if the command fails (e.g. no connector template installed).
-    """
-    try:
-        return run(cmd) or {}
-    except CLIInternalError:
-        return {}
 
 
 # ---------------------------------------------------------------------------

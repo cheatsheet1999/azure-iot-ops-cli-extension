@@ -10,7 +10,8 @@ import pytest
 from ...generators import generate_random_string
 from ...helpers import run
 from .namespace_helpers import (
-    create_config_file, assert_stream_properties, check_destinations
+    create_config_file, assert_stream_properties, check_destinations,
+    _save_json_to_file, _try_show_template
 )
 
 
@@ -312,3 +313,110 @@ def assert_media_stream_properties(result, **expected):
 
     if "destinations" in expected:
         check_destinations(result, expected)
+
+
+# ---------------------------------------------------------------------------
+# Generalized (connector-agnostic) stream commands
+# ---------------------------------------------------------------------------
+
+
+def test_generalized_stream_lifecycle_custom(asset_factory, tracked_files: List[str]):
+    """Generalized stream lifecycle on a custom asset.
+
+    A connector template must exist in the instance for --show-template / --stream-config
+    to resolve connector metadata. When no template is installed, --show-template returns an
+    empty dict and the test exercises the metadata-free path (no config payload).
+    """
+    info = asset_factory("custom")
+    asset_name = info["name"]
+    instance_name = info["instanceName"]
+    resource_group = info["resourceGroup"]
+    stream_name = f"gen-stream-{generate_random_string(6, force_lower=True)}"
+    stream_name_2 = f"gen-stream2-{generate_random_string(6, force_lower=True)}"
+
+    # 1. SHOW-TEMPLATE - stream (may be empty when no connector template installed)
+    stream_template = _try_show_template(
+        f"az iot ops ns asset stream add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {stream_name} --show-template config"
+    )
+
+    stream_config_arg = ""
+    if stream_template:
+        assert "connectorType" in stream_template
+        assert "streamConfig" in stream_template
+        stream_config = stream_template.copy()
+        stream_config["streamConfig"].pop("destinations", None)
+        stream_config_file = _save_json_to_file(stream_config, tracked_files)
+        stream_config_arg = f"--stream-config {stream_config_file}"
+
+    # 2. ADD stream
+    added_stream = run(
+        f"az iot ops ns asset stream add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {stream_name} {stream_config_arg}"
+    )
+    assert_stream_properties(added_stream, name=stream_name)
+
+    # 3. SHOW stream
+    shown_stream = run(
+        f"az iot ops ns asset stream show --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --name {stream_name}"
+    )
+    assert_stream_properties(shown_stream, name=stream_name)
+
+    # 4. LIST streams
+    stream_list = run(
+        f"az iot ops ns asset stream list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group}"
+    )
+    assert any(s["name"] == stream_name for s in stream_list)
+
+    # 5. ADD a second stream (minimal)
+    added_stream_2 = run(
+        f"az iot ops ns asset stream add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --name {stream_name_2}"
+    )
+    assert_stream_properties(added_stream_2, name=stream_name_2)
+    stream_names = [s["name"] for s in run(
+        f"az iot ops ns asset stream list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group}"
+    )]
+    assert stream_name in stream_names and stream_name_2 in stream_names
+
+    # 6. UPDATE stream (type reference)
+    updated_stream = run(
+        f"az iot ops ns asset stream update --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {stream_name} --type-ref myTypeRef"
+    )
+    assert_stream_properties(updated_stream, name=stream_name)
+    assert updated_stream.get("typeRef") == "myTypeRef"
+
+    # 7. REPLACE stream
+    replaced_stream = run(
+        f"az iot ops ns asset stream add --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--name {stream_name} --replace"
+    )
+    assert_stream_properties(replaced_stream, name=stream_name)
+
+    # 8. EXPORT streams
+    export_result = run(
+        f"az iot ops ns asset stream export --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group} --output-dir /tmp --replace"
+    )
+    assert export_result["stream_count"] >= 1
+    tracked_files.append(export_result["file_path"])
+
+    # 9. REMOVE streams
+    for stream in [stream_name, stream_name_2]:
+        run(
+            f"az iot ops ns asset stream remove --asset {asset_name} "
+            f"--instance {instance_name} -g {resource_group} --name {stream}"
+        )
+    remaining = [s["name"] for s in (run(
+        f"az iot ops ns asset stream list --asset {asset_name} "
+        f"--instance {instance_name} -g {resource_group}"
+    ) or [])]
+    assert stream_name not in remaining and stream_name_2 not in remaining

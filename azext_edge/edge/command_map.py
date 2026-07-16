@@ -364,6 +364,67 @@ def load_iotops_commands(self, _):
         cmd_group.command("list", "list_namespace_asset_dataset_points", is_preview=True)
         cmd_group.command("remove", "remove_namespace_asset_dataset_point", is_preview=True)
 
+    # generalized event-group group (connector-agnostic)
+    with self.command_group(
+        "iot ops ns asset event-group",
+        command_type=namespace_resource_ops,
+    ) as cmd_group:
+        cmd_group.command("add", "add_namespace_asset_event_group", is_preview=True)
+        cmd_group.command("export", "export_namespace_asset_event_group", is_preview=True)
+        cmd_group.command("import", "import_namespace_asset_event_group", is_preview=True)
+        cmd_group.command("list", "list_namespace_asset_event_groups", is_preview=True)
+        cmd_group.command("remove", "remove_namespace_asset_event_group", is_preview=True)
+        cmd_group.show_command("show", "show_namespace_asset_event_group", is_preview=True)
+        cmd_group.command("update", "update_namespace_asset_event_group", is_preview=True)
+
+    # generalized event group event (connector-agnostic)
+    with self.command_group(
+        "iot ops ns asset event",
+        command_type=namespace_resource_ops,
+    ) as cmd_group:
+        cmd_group.command("add", "add_namespace_asset_event_group_event", is_preview=True)
+        cmd_group.command("export", "export_namespace_asset_event_group_event", is_preview=True)
+        cmd_group.command("import", "import_namespace_asset_event_group_event", is_preview=True)
+        cmd_group.command("list", "list_namespace_asset_event_group_events", is_preview=True)
+        cmd_group.command("remove", "remove_namespace_asset_event_group_event", is_preview=True)
+
+    # generalized stream group (connector-agnostic)
+    with self.command_group(
+        "iot ops ns asset stream",
+        command_type=namespace_resource_ops,
+    ) as cmd_group:
+        cmd_group.command("add", "add_namespace_asset_stream", is_preview=True)
+        cmd_group.command("export", "export_namespace_asset_stream", is_preview=True)
+        cmd_group.command("import", "import_namespace_asset_stream", is_preview=True)
+        cmd_group.command("list", "list_namespace_asset_streams", is_preview=True)
+        cmd_group.command("remove", "remove_namespace_asset_stream", is_preview=True)
+        cmd_group.show_command("show", "show_namespace_asset_stream", is_preview=True)
+        cmd_group.command("update", "update_namespace_asset_stream", is_preview=True)
+
+    # generalized management group (connector-agnostic)
+    with self.command_group(
+        "iot ops ns asset mgmt-group",
+        command_type=namespace_resource_ops,
+    ) as cmd_group:
+        cmd_group.command("add", "add_namespace_asset_management_group", is_preview=True)
+        cmd_group.command("export", "export_namespace_asset_management_group", is_preview=True)
+        cmd_group.command("import", "import_namespace_asset_management_group", is_preview=True)
+        cmd_group.command("list", "list_namespace_asset_management_groups", is_preview=True)
+        cmd_group.command("remove", "remove_namespace_asset_management_group", is_preview=True)
+        cmd_group.show_command("show", "show_namespace_asset_management_group", is_preview=True)
+        cmd_group.command("update", "update_namespace_asset_management_group", is_preview=True)
+
+    # generalized management group action (connector-agnostic)
+    with self.command_group(
+        "iot ops ns asset mgmt-action",
+        command_type=namespace_resource_ops,
+    ) as cmd_group:
+        cmd_group.command("add", "add_namespace_asset_management_group_action", is_preview=True)
+        cmd_group.command("export", "export_namespace_asset_management_group_action", is_preview=True)
+        cmd_group.command("import", "import_namespace_asset_management_group_action", is_preview=True)
+        cmd_group.command("list", "list_namespace_asset_management_group_actions", is_preview=True)
+        cmd_group.command("remove", "remove_namespace_asset_management_group_action", is_preview=True)
+
     # dataset
     for asset_type in ["custom", "opcua", "rest", "sse", "mqtt"]:
         with self.command_group(

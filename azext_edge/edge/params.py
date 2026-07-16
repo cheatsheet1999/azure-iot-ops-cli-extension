@@ -49,7 +49,7 @@ from .providers.orchestration.common import (
     TlsKeyAlgo,
     TlsKeyRotation,
 )
-from .providers.adr.common import EndpointTemplateMode, FileType
+from .providers.adr.common import ActionType, EndpointTemplateMode, FileType
 
 
 def load_iotops_arguments(self, _):
@@ -2316,6 +2316,455 @@ def load_iotops_arguments(self, _):
             "replace",
             options_list=["--replace"],
             help="Replace existing data points that share a name with an imported data point.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset event-group") as context:
+        context.argument(
+            "asset_name",
+            options_list=["--asset", "-a"],
+            help="Asset name.",
+        )
+        context.argument(
+            "group_name",
+            options_list=["--name", "-n"],
+            help="Event-group name.",
+        )
+        context.argument(
+            "data_source",
+            options_list=["--data-source", "--ds"],
+            help="Data source for the event-group.",
+        )
+        context.argument(
+            "type_ref",
+            options_list=["--type-ref", "--tr"],
+            help="Type definition ID or URI.",
+        )
+        context.argument(
+            "event_group_config",
+            options_list=["--event-group-config", "--egc"],
+            help="Inline JSON string or path to a JSON/YAML file (.json, .yaml, .yml) containing "
+            "connector-specific event-group configuration and/or default destinations. Accepted keys "
+            "are 'eventGroupConfiguration' (connector-specific config object) and 'destinations' (list "
+            "of destination objects). Use --show-template to discover the supported keys and schema "
+            "for the asset's connector type. Cannot be combined with --show-template. "
+            "For non-OPC UA connectors, a connector template must exist in the instance.",
+        )
+        context.argument(
+            "show_template",
+            options_list=["--show-template"],
+            arg_type=get_enum_type(EndpointTemplateMode),
+            help="Show a starter event-group configuration template for the asset's connector type and "
+            "exit without modifying the event-group. The connector type is read from the existing asset. "
+            "config: fields shown with their default values (null if no default); output is "
+            "directly usable as --event-group-config input. "
+            "schema: every field includes type, default, and constraints (min, max, enum, pattern). "
+            "Draft-07 $ref pointers (#/definitions/...) are resolved inline in both modes.",
+        )
+
+    with self.argument_context("iot ops ns asset event-group add") as context:
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the event-group if another event-group with the same name is already present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset event-group export") as context:
+        context.argument(
+            "extension",
+            options_list=["--format", "-f"],
+            arg_type=get_enum_type([FileType.json.value, FileType.yaml.value], default=FileType.json.value),
+            help="Export file format (JSON or YAML).",
+        )
+        context.argument(
+            "output_dir",
+            options_list=["--output-dir", "--od"],
+            help="Output directory for export.",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the local file if present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset event-group import") as context:
+        context.argument(
+            "file_path",
+            options_list=["--input-file", "--if"],
+            help="Path to import file (JSON or YAML).",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace existing event-groups that share a name with an imported event-group.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset event") as context:
+        context.argument(
+            "asset_name",
+            options_list=["--asset", "-a"],
+            help="Asset name.",
+        )
+        context.argument(
+            "group_name",
+            options_list=["--event-group", "--eg"],
+            help="Event-group name.",
+        )
+        context.argument(
+            "event_name",
+            options_list=["--name", "-n"],
+            help="Event name.",
+        )
+        context.argument(
+            "data_source",
+            options_list=["--data-source", "--ds"],
+            help="Data source for the event.",
+        )
+        context.argument(
+            "type_ref",
+            options_list=["--type-ref", "--tr"],
+            help="Type definition ID or URI.",
+        )
+        context.argument(
+            "event_config",
+            options_list=["--event-config", "--ec"],
+            help="Inline JSON string or path to a JSON/YAML file (.json, .yaml, .yml) containing "
+            "connector-specific event configuration and/or destinations. Accepted keys are "
+            "'eventConfiguration' (connector-specific config object) and 'destinations' (list of "
+            "destination objects). Use --show-template to discover the supported keys and schema "
+            "for the asset's connector type. Cannot be combined with --show-template. "
+            "For non-OPC UA connectors, a connector template must exist in the instance.",
+        )
+        context.argument(
+            "show_template",
+            options_list=["--show-template"],
+            arg_type=get_enum_type(EndpointTemplateMode),
+            help="Show a starter event configuration template for the asset's connector type "
+            "and exit without modifying the event. The connector type is read from the existing "
+            "asset. config: fields shown with their default values (null if no default); output is "
+            "directly usable as --event-config input. "
+            "schema: every field includes type, default, and constraints (min, max, enum, pattern). "
+            "Draft-07 $ref pointers (#/definitions/...) are resolved inline in both modes.",
+        )
+
+    with self.argument_context("iot ops ns asset event add") as context:
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the event if another event with the same name is already present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset event export") as context:
+        context.argument(
+            "extension",
+            options_list=["--format", "-f"],
+            arg_type=get_enum_type(FileType, default=FileType.json.value),
+            help="Export file format.",
+        )
+        context.argument(
+            "output_dir",
+            options_list=["--output-dir", "--od"],
+            help="Output directory for export.",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the local file if present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset event import") as context:
+        context.argument(
+            "file_path",
+            options_list=["--input-file", "--if"],
+            help="Path to import file (JSON, YAML, or CSV).",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace existing events that share a name with an imported event.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset mgmt-group") as context:
+        context.argument(
+            "asset_name",
+            options_list=["--asset", "-a"],
+            help="Asset name.",
+        )
+        context.argument(
+            "group_name",
+            options_list=["--name", "-n"],
+            help="Management group name.",
+        )
+        context.argument(
+            "data_source",
+            options_list=["--data-source", "--ds"],
+            help="Data source for the management group.",
+        )
+        context.argument(
+            "default_topic",
+            options_list=["--default-topic", "--dt"],
+            help="Default topic for management group actions.",
+        )
+        context.argument(
+            "default_timeout",
+            options_list=["--default-timeout", "--dto"],
+            help="Default timeout in seconds for management group actions. Minimum: 0",
+            type=int,
+        )
+        context.argument(
+            "type_ref",
+            options_list=["--type-ref", "--tr"],
+            help="Type definition ID or URI.",
+        )
+        context.argument(
+            "mgmt_group_config",
+            options_list=["--mgmt-group-config", "--mgc"],
+            help="Inline JSON string or path to a JSON/YAML file (.json, .yaml, .yml) containing "
+            "connector-specific management-group configuration. The accepted key is "
+            "'managementGroupConfiguration' (connector-specific config object). Use --show-template "
+            "to discover the supported keys and schema for the asset's connector type. Cannot be "
+            "combined with --show-template. For non-OPC UA connectors, a connector template must "
+            "exist in the instance.",
+        )
+        context.argument(
+            "show_template",
+            options_list=["--show-template"],
+            arg_type=get_enum_type(EndpointTemplateMode),
+            help="Show a starter management-group configuration template for the asset's connector "
+            "type and exit without modifying the management group. The connector type is read from "
+            "the existing asset. config: fields shown with their default values (null if no default); "
+            "output is directly usable as --mgmt-group-config input. "
+            "schema: every field includes type, default, and constraints (min, max, enum, pattern). "
+            "Draft-07 $ref pointers (#/definitions/...) are resolved inline in both modes.",
+        )
+
+    with self.argument_context("iot ops ns asset mgmt-group add") as context:
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the management group if another management group with the same name is "
+            "already present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset mgmt-group export") as context:
+        context.argument(
+            "extension",
+            options_list=["--format", "-f"],
+            arg_type=get_enum_type([FileType.json.value, FileType.yaml.value], default=FileType.json.value),
+            help="Export file format (JSON or YAML).",
+        )
+        context.argument(
+            "output_dir",
+            options_list=["--output-dir", "--od"],
+            help="Output directory for export.",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the local file if present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset mgmt-group import") as context:
+        context.argument(
+            "file_path",
+            options_list=["--input-file", "--if"],
+            help="Path to import file (JSON or YAML).",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace existing management groups that share a name with an imported management group.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset mgmt-action") as context:
+        context.argument(
+            "asset_name",
+            options_list=["--asset", "-a"],
+            help="Asset name.",
+        )
+        context.argument(
+            "group_name",
+            options_list=["--group"],
+            help="Management group name.",
+        )
+        context.argument(
+            "action_name",
+            options_list=["--name", "-n"],
+            help="Action name.",
+        )
+        context.argument(
+            "target_uri",
+            options_list=["--target-uri", "--uri"],
+            help="Target URI for the management action.",
+        )
+        context.argument(
+            "topic",
+            options_list=["--topic", "-t"],
+            help="Topic override for this specific action.",
+        )
+        context.argument(
+            "action_type",
+            options_list=["--action-type", "--at"],
+            help="Type of management action.",
+            default=ActionType.call.value,
+            arg_type=get_enum_type(ActionType),
+        )
+        context.argument(
+            "timeout",
+            options_list=["--timeout", "--to"],
+            help="Timeout in seconds for this specific action. Minimum: 0",
+            type=int,
+        )
+        context.argument(
+            "type_ref",
+            options_list=["--type-ref", "--tr"],
+            help="Type definition ID or URI.",
+        )
+        context.argument(
+            "action_config",
+            options_list=["--action-config", "--ac"],
+            help="Inline JSON string or path to a JSON/YAML file (.json, .yaml, .yml) containing "
+            "connector-specific action configuration. The accepted key is 'actionConfiguration' "
+            "(connector-specific config object). Use --show-template to discover the supported keys "
+            "and schema for the asset's connector type. Cannot be combined with --show-template. "
+            "For non-OPC UA connectors, a connector template must exist in the instance.",
+        )
+        context.argument(
+            "show_template",
+            options_list=["--show-template"],
+            arg_type=get_enum_type(EndpointTemplateMode),
+            help="Show a starter action configuration template for the asset's connector type and "
+            "exit without modifying the action. The connector type is read from the existing asset. "
+            "config: fields shown with their default values (null if no default); output is directly "
+            "usable as --action-config input. "
+            "schema: every field includes type, default, and constraints (min, max, enum, pattern). "
+            "Draft-07 $ref pointers (#/definitions/...) are resolved inline in both modes.",
+        )
+
+    with self.argument_context("iot ops ns asset mgmt-action add") as context:
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the action if another action with the same name is already present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset mgmt-action export") as context:
+        context.argument(
+            "extension",
+            options_list=["--format", "-f"],
+            arg_type=get_enum_type(FileType, default=FileType.json.value),
+            help="Export file format.",
+        )
+        context.argument(
+            "output_dir",
+            options_list=["--output-dir", "--od"],
+            help="Output directory for export.",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the local file if present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset mgmt-action import") as context:
+        context.argument(
+            "file_path",
+            options_list=["--input-file", "--if"],
+            help="Path to import file (JSON, YAML, or CSV).",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace existing actions that share a name with an imported action.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset stream") as context:
+        context.argument(
+            "asset_name",
+            options_list=["--asset", "-a"],
+            help="Asset name.",
+        )
+        context.argument(
+            "stream_name",
+            options_list=["--name", "-n"],
+            help="Stream name.",
+        )
+        context.argument(
+            "type_ref",
+            options_list=["--type-ref", "--tr"],
+            help="Type definition ID or URI.",
+        )
+        context.argument(
+            "stream_config",
+            options_list=["--stream-config", "--stc"],
+            help="Inline JSON string or path to a JSON/YAML file (.json, .yaml, .yml) containing "
+            "connector-specific stream configuration and/or destinations. Accepted keys are "
+            "'streamConfiguration' (connector-specific config object) and 'destinations' (list of "
+            "destination objects). Use --show-template to discover the supported keys and schema "
+            "for the asset's connector type. Cannot be combined with --show-template. "
+            "For non-OPC UA connectors, a connector template must exist in the instance.",
+        )
+        context.argument(
+            "show_template",
+            options_list=["--show-template"],
+            arg_type=get_enum_type(EndpointTemplateMode),
+            help="Show a starter stream configuration template for the asset's connector type "
+            "and exit without modifying the stream. The connector type is read from the existing "
+            "asset. config: fields shown with their default values (null if no default); output is "
+            "directly usable as --stream-config input. "
+            "schema: every field includes type, default, and constraints (min, max, enum, pattern). "
+            "Draft-07 $ref pointers (#/definitions/...) are resolved inline in both modes.",
+        )
+
+    with self.argument_context("iot ops ns asset stream add") as context:
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the stream if another stream with the same name is already present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset stream export") as context:
+        context.argument(
+            "extension",
+            options_list=["--format", "-f"],
+            arg_type=get_enum_type([FileType.json.value, FileType.yaml.value], default=FileType.json.value),
+            help="Export file format (JSON or YAML).",
+        )
+        context.argument(
+            "output_dir",
+            options_list=["--output-dir", "--od"],
+            help="Output directory for export.",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace the local file if present.",
+            arg_type=get_three_state_flag(),
+        )
+
+    with self.argument_context("iot ops ns asset stream import") as context:
+        context.argument(
+            "file_path",
+            options_list=["--input-file", "--if"],
+            help="Path to import file (JSON or YAML).",
+        )
+        context.argument(
+            "replace",
+            options_list=["--replace"],
+            help="Replace existing streams that share a name with an imported stream.",
             arg_type=get_three_state_flag(),
         )
 

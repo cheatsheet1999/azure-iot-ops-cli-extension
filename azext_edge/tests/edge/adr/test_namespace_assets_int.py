@@ -17,7 +17,8 @@ from .namespace_helpers import (
     assert_stream_properties,
     create_config_file,
     assert_point_properties,
-    assert_dataset_properties
+    assert_dataset_properties,
+    _save_json_to_file,
 )
 
 pytestmark = pytest.mark.rpsaas
@@ -717,12 +718,10 @@ def test_generalized_asset_error_cases(require_namespace_init_module):
 
 
 def test_generalized_asset_lifecycle(
-    require_namespace_init_module, shared_device, tracked_resources: List[str]
+    require_namespace_init_module, shared_device, tracked_resources: List[str], tracked_files: List[str]
 ):
     """Integration lifecycle test for the generalized ns asset create / update commands."""
     import json
-    import os
-    import tempfile
 
     instance_name = require_namespace_init_module["instanceName"]
     resource_group = require_namespace_init_module["resourceGroup"]
@@ -774,28 +773,23 @@ def test_generalized_asset_lifecycle(
     assert "assetConfig" in template_result
     assert "defaultDatasetsConfiguration" in template_result["assetConfig"]
 
-    config_fd, config_path = tempfile.mkstemp(suffix=".json")
-    try:
-        with os.fdopen(config_fd, "w") as f:
-            json.dump(template_result["assetConfig"], f)
-        asset_name_2 = f"gen-asset2-{generate_random_string(8, force_lower=True)}"
-        created_2 = run(
-            f"az iot ops ns asset create "
-            f"--connector-type opcua "
-            f"--name {asset_name_2} "
-            f"--device {device_name} "
-            f"--endpoint {endpoint_name} "
-            f"--instance {instance_name} -g {resource_group} "
-            f"--asset-config {config_path}"
-        )
-        tracked_resources.append(created_2["id"])
-        assert created_2["name"] == asset_name_2
-        asset_props = created_2["properties"]
-        datasets_config = json.loads(asset_props.get("defaultDatasetsConfiguration", "{}"))
-        assert datasets_config.get("publishingInterval") == 1000
-        assert datasets_config.get("samplingInterval") == 1000
-    finally:
-        os.unlink(config_path)
+    config_path = _save_json_to_file(template_result["assetConfig"], tracked_files)
+    asset_name_2 = f"gen-asset2-{generate_random_string(8, force_lower=True)}"
+    created_2 = run(
+        f"az iot ops ns asset create "
+        f"--connector-type opcua "
+        f"--name {asset_name_2} "
+        f"--device {device_name} "
+        f"--endpoint {endpoint_name} "
+        f"--instance {instance_name} -g {resource_group} "
+        f"--asset-config {config_path}"
+    )
+    tracked_resources.append(created_2["id"])
+    assert created_2["name"] == asset_name_2
+    asset_props = created_2["properties"]
+    datasets_config = json.loads(asset_props.get("defaultDatasetsConfiguration", "{}"))
+    assert datasets_config.get("publishingInterval") == 1000
+    assert datasets_config.get("samplingInterval") == 1000
 
     # --- Update asset using the generalized update command ---
     updated = run(

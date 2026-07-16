@@ -6,11 +6,35 @@
 
 from functools import partial
 import json
-from typing import Optional, Callable, Tuple
+from typing import List, Optional, Callable, Tuple
+
+from azure.cli.core.azclierror import CLIInternalError
+
 from ...generators import generate_random_string
-from ...helpers import create_file
+from ...helpers import create_file, run
 
 """Helpers for ADR v2 tests."""
+
+
+def _save_json_to_file(content: dict, tracked_files: List[str]) -> str:
+    """Serialize content to a temp JSON file and return its path."""
+    return create_file(
+        file_name=f"template_{generate_random_string(6)}.json",
+        module_file=__file__,
+        tracked_files=tracked_files,
+        content=json.dumps(content),
+    )
+
+
+def _try_show_template(cmd: str) -> dict:
+    """Run a --show-template command and return the parsed result.
+
+    Returns an empty dict if the command fails (e.g. no connector template installed).
+    """
+    try:
+        return run(cmd) or {}
+    except CLIInternalError:
+        return {}
 
 
 def assert_dataset_properties(result, **expected):

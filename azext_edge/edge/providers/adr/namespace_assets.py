@@ -725,8 +725,12 @@ class NamespaceAssets(Queryable):
                 resource_group=namespace["resource_group"],
             )
 
-    def _get_connector_type_from_asset(self, asset: dict) -> str:
-        """Extract the connector type from an existing asset via its device endpoint type."""
+    def _get_connector_type_and_device(self, asset: dict) -> Tuple[str, dict]:
+        """Extract the connector type from an asset and return the fetched device.
+
+        Returns the device alongside the connector type so callers can reuse the device
+        (e.g. pass it into ``_check_device_props``) instead of re-fetching it.
+        """
         device_ref = asset.get("properties", {}).get("deviceRef", {})
         device_name = device_ref.get("deviceName", "")
         endpoint_name = device_ref.get("endpointName", "")
@@ -750,7 +754,7 @@ class NamespaceAssets(Queryable):
                 f"Device '{device_name}' endpoint '{endpoint_name}' is missing 'endpointType'. "
                 "Verify the device endpoint was created correctly."
             )
-        return connector_type
+        return connector_type, device
 
     def _get_connector_metadata(
         self,
@@ -898,10 +902,15 @@ class NamespaceAssets(Queryable):
         )
         parsed = json.loads(raw)
 
-        if isinstance(parsed, dict) and "datasetConfig" in parsed and "connectorType" in parsed:
+        if isinstance(parsed, dict) and "datasetConfig" in parsed:
+            provided = parsed.get("connectorType")
+            if provided and connector_type and provided.lower() != connector_type.lower():
+                raise InvalidArgumentValueError(
+                    f"Config connectorType '{provided}' does not match asset connectorType '{connector_type}'."
+                )
             parsed = parsed["datasetConfig"]
 
-        if not isinstance(parsed, dict):
+        if not isinstance(parsed, dict) or not {"datasetConfiguration", "destinations"}.intersection(parsed):
             raise InvalidArgumentValueError(
                 "--dataset-config must be a JSON object with 'datasetConfiguration' "
                 "and/or 'destinations' keys."
@@ -1040,10 +1049,15 @@ class NamespaceAssets(Queryable):
         )
         parsed = json.loads(raw)
 
-        if isinstance(parsed, dict) and "datapointConfig" in parsed and "connectorType" in parsed:
+        if isinstance(parsed, dict) and "datapointConfig" in parsed:
+            provided = parsed.get("connectorType")
+            if provided and connector_type and provided.lower() != connector_type.lower():
+                raise InvalidArgumentValueError(
+                    f"Config connectorType '{provided}' does not match asset connectorType '{connector_type}'."
+                )
             parsed = parsed["datapointConfig"]
 
-        if not isinstance(parsed, dict):
+        if not isinstance(parsed, dict) or "datapointConfiguration" not in parsed:
             raise InvalidArgumentValueError(
                 "--datapoint-config must be a JSON object with a 'datapointConfiguration' key."
             )
@@ -1098,7 +1112,7 @@ class NamespaceAssets(Queryable):
             instance_name=instance_name,
             resource_group=instance_resource_group,
         )
-        connector_type = self._get_connector_type_from_asset(asset)
+        connector_type, device = self._get_connector_type_and_device(asset)
 
         if show_template:
             return self._handle_dataset_show_template(
@@ -1115,6 +1129,8 @@ class NamespaceAssets(Queryable):
             instance_name=instance_name,
             asset_type=connector_type,
             asset_name=asset_name,
+            asset=asset,
+            device=device,
         )
 
         datasets = asset["properties"].get("datasets", [])
@@ -1193,7 +1209,7 @@ class NamespaceAssets(Queryable):
             instance_name=instance_name,
             resource_group=instance_resource_group,
         )
-        connector_type = self._get_connector_type_from_asset(asset)
+        connector_type, device = self._get_connector_type_and_device(asset)
 
         if show_template:
             from .common import EndpointTemplateMode
@@ -1255,6 +1271,8 @@ class NamespaceAssets(Queryable):
             instance_name=instance_name,
             asset_type=connector_type,
             asset_name=asset_name,
+            asset=asset,
+            device=device,
         )
 
         datasets = asset["properties"].get("datasets", [])
@@ -1328,7 +1346,7 @@ class NamespaceAssets(Queryable):
             instance_name=instance_name,
             resource_group=instance_resource_group,
         )
-        connector_type = self._get_connector_type_from_asset(asset)
+        connector_type, device = self._get_connector_type_and_device(asset)
 
         if show_template:
             return self._handle_datapoint_show_template(
@@ -1344,6 +1362,8 @@ class NamespaceAssets(Queryable):
             instance_name=instance_name,
             asset_type=connector_type,
             asset_name=asset_name,
+            asset=asset,
+            device=device,
         )
 
         dataset = _get_sub_property(asset, dataset_name, property_key="datasets")
@@ -1418,10 +1438,16 @@ class NamespaceAssets(Queryable):
         parsed = json.loads(raw)
 
         # Auto-unwrap --show-template output
-        if isinstance(parsed, dict) and "assetConfig" in parsed and "connectorType" in parsed:
+        if isinstance(parsed, dict) and "assetConfig" in parsed:
+            provided = parsed.get("connectorType")
+            if provided and connector_type and provided.lower() != connector_type.lower():
+                raise InvalidArgumentValueError(
+                    f"Config connectorType '{provided}' does not match asset connectorType '{connector_type}'."
+                )
             parsed = parsed["assetConfig"]
 
-        if not isinstance(parsed, dict):
+        _asset_config_keys = {s[2] for s in _ASSET_SCHEMA_SECTIONS} | {s[4] for s in _ASSET_SCHEMA_SECTIONS if s[4]}
+        if not isinstance(parsed, dict) or not _asset_config_keys.intersection(parsed):
             raise InvalidArgumentValueError(
                 "--asset-config must be a JSON object with defaultDatasetsConfiguration, "
                 "defaultEventsConfiguration, and/or defaultStreamsConfiguration keys."
@@ -2479,6 +2505,631 @@ class NamespaceAssets(Queryable):
             )
             return _get_sub_property(asset, event_group_name, property_key="eventGroups")["events"]
 
+    def _handle_event_group_show_template(
+        self,
+        connector_type: str,
+        instance_name: str,
+        instance_resource_group: str,
+        template_mode: str,
+        event_group_config: Optional[str],
+    ) -> dict:
+        """Return an event-group config/schema template for --show-template and exit early.
+
+        Discovers the eventGroupConfigurationSchema and supported destinations from connector
+        metadata and returns a slimmed template. OPC UA uses bundled metadata; all other types
+        require a connector template in the instance.
+        """
+        from .helpers import _slim_schema, _consolidate_warnings
+        from .common import EndpointTemplateMode
+
+        if event_group_config:
+            raise InvalidArgumentValueError(
+                "--show-template and --event-group-config cannot be used together. "
+                "--show-template displays the template and exits without modifying the event-group."
+            )
+
+        metadata = self._get_connector_metadata(
+            connector_type=connector_type,
+            instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+        )
+        endpoint = _get_metadata_endpoint(metadata, connector_type)
+        eg_section = endpoint.get("eventGroups", {})
+        schema = eg_section.get("eventGroupConfigurationSchema")
+
+        event_group_config_template: dict = {}
+        all_warnings: List[str] = []
+
+        if schema:
+            warnings: List[str] = []
+            slimmed = _slim_schema(schema, mode=template_mode, _warnings=warnings)
+            all_warnings.extend(warnings)
+            if template_mode == EndpointTemplateMode.SCHEMA.value and isinstance(slimmed, dict):
+                slimmed.pop("$id", None)
+            event_group_config_template["eventGroupConfiguration"] = slimmed
+
+        # Destinations metadata lives at the event level; the event-group's defaultDestinations
+        # share the same supported destination set.
+        destinations = self._build_event_destinations_template(eg_section, template_mode)
+        if destinations is not None:
+            event_group_config_template["destinations"] = destinations
+
+        for w in _consolidate_warnings(all_warnings):
+            logger.warning(w)
+
+        return {"connectorType": connector_type, "eventGroupConfig": event_group_config_template}
+
+    def _build_event_destinations_template(self, eg_section: dict, template_mode: str) -> Optional[list]:
+        """Build a destinations template from the connector's supported event destinations.
+
+        Event-group defaultDestinations and event destinations share the same supported set, which
+        lives at ``eventGroups.events.destinations``. Returns None when no destinations are supported.
+        """
+        events_section = eg_section.get("events", {}) if isinstance(eg_section, dict) else {}
+        dest_section = events_section.get("destinations", {}) if isinstance(events_section, dict) else {}
+        supported = dest_section.get("supportedDestinations", []) if isinstance(dest_section, dict) else []
+        if not supported:
+            return None
+        return _build_destination_template(
+            supported_destinations=supported,
+            default_destination=dest_section.get("defaultDestination"),
+            mode=template_mode,
+        )
+
+    def _load_and_validate_event_group_config(
+        self,
+        event_group_config: str,
+        connector_type: str,
+        instance_name: str,
+        instance_resource_group: str,
+    ) -> dict:
+        """Load event-group config from file/inline JSON, validate against connector schema, and
+        return ARM-ready values.
+
+        Input JSON is expected to be the 'eventGroupConfig' dict (output of --show-template), e.g.:
+          {
+            "eventGroupConfiguration": {...},
+            "destinations": [...]
+          }
+        Or the full --show-template output with 'connectorType' and 'eventGroupConfig' keys,
+        which is auto-unwrapped.
+
+        Returns a dict with:
+          - "eventGroupConfiguration": serialized JSON string (if present)
+          - "destinations": list of destination dicts (if present)
+        """
+        from .helpers import strip_nulls as _strip_nulls
+
+        raw = process_additional_configuration(
+            additional_configuration=event_group_config,
+            config_type="event-group",
+        )
+        parsed = json.loads(raw)
+
+        if isinstance(parsed, dict) and "eventGroupConfig" in parsed:
+            provided = parsed.get("connectorType")
+            if provided and connector_type and provided.lower() != connector_type.lower():
+                raise InvalidArgumentValueError(
+                    f"Config connectorType '{provided}' does not match asset connectorType '{connector_type}'."
+                )
+            parsed = parsed["eventGroupConfig"]
+
+        if not isinstance(parsed, dict) or not {"eventGroupConfiguration", "destinations"}.intersection(parsed):
+            raise InvalidArgumentValueError(
+                "--event-group-config must be a JSON object with 'eventGroupConfiguration' "
+                "and/or 'destinations' keys."
+            )
+
+        metadata = self._get_connector_metadata(
+            connector_type=connector_type,
+            instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+        )
+        endpoint = _get_metadata_endpoint(metadata, connector_type) if metadata else None
+        eg_section = endpoint.get("eventGroups", {}) if endpoint else {}
+
+        result = {}
+
+        config_data_raw = parsed.get("eventGroupConfiguration")
+        if config_data_raw is not None:
+            config_data = _strip_nulls(config_data_raw)
+            schema = eg_section.get("eventGroupConfigurationSchema") if eg_section else None
+            if schema:
+                from ...util.schema_validation import check_json_schema, validate_data_against_schema
+                skip_reason = check_json_schema(schema)
+                if skip_reason:
+                    logger.warning("Skipping eventGroupConfiguration validation: %s", skip_reason)
+                else:
+                    validate_data_against_schema(schema, config_data, name="eventGroupConfiguration")
+            result["eventGroupConfiguration"] = json.dumps(config_data)
+
+        dest_raw = parsed.get("destinations")
+        if dest_raw is not None:
+            dest_data = self._validate_event_destinations(dest_raw, eg_section)
+            if dest_data:
+                result["destinations"] = dest_data
+
+        return result
+
+    def _filter_and_validate_destinations(
+        self, dest_raw, supported: List[str], resource_label: str
+    ) -> List[dict]:
+        """Filter a destinations list (dropping entries with empty configuration) and validate the
+        remaining targets against the connector's supported destination set.
+
+        Shared by the event, event-group, and stream config loaders. ``supported`` is the already
+        resolved ``supportedDestinations`` list; ``resource_label`` is used in error messages.
+        """
+        from .helpers import strip_nulls as _strip_nulls
+
+        dest_data = _strip_nulls(dest_raw)
+        if not isinstance(dest_data, list):
+            raise InvalidArgumentValueError(
+                "'destinations' must be a JSON array of destination objects."
+            )
+        filtered: List[dict] = []
+        for item in dest_data:
+            if not isinstance(item, dict):
+                raise InvalidArgumentValueError(
+                    "'destinations' entries must be JSON objects."
+                )
+            if not item.get("configuration"):
+                logger.warning(
+                    "Ignoring destination '%s' because its configuration is empty.",
+                    item.get("target"),
+                )
+                continue
+            filtered.append(item)
+        if filtered and supported:
+            for dest_item in filtered:
+                target = dest_item.get("target")
+                if target and target not in supported:
+                    raise InvalidArgumentValueError(
+                        f"Destination target '{target}' is not supported for {resource_label}. "
+                        f"Supported: {supported}."
+                    )
+        return filtered
+
+    def _validate_event_destinations(self, dest_raw, eg_section: dict) -> List[dict]:
+        """Validate and filter a destinations list against the connector's supported event
+        destinations. Shared by event-group and event config loaders."""
+        events_section = eg_section.get("events", {}) if eg_section else {}
+        dest_section = events_section.get("destinations", {}) if isinstance(events_section, dict) else {}
+        supported = (
+            dest_section.get("supportedDestinations", [])
+            if isinstance(dest_section, dict) else []
+        )
+        return self._filter_and_validate_destinations(dest_raw, supported, "events")
+
+    def _handle_event_show_template(
+        self,
+        connector_type: str,
+        instance_name: str,
+        instance_resource_group: str,
+        template_mode: str,
+        event_config: Optional[str],
+    ) -> dict:
+        """Return an event config/schema template for --show-template and exit early."""
+        from .helpers import _slim_schema, _consolidate_warnings
+        from .common import EndpointTemplateMode
+
+        if event_config:
+            raise InvalidArgumentValueError(
+                "--show-template and --event-config cannot be used together. "
+                "--show-template displays the template and exits without modifying the event."
+            )
+
+        metadata = self._get_connector_metadata(
+            connector_type=connector_type,
+            instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+        )
+        endpoint = _get_metadata_endpoint(metadata, connector_type)
+        eg_section = endpoint.get("eventGroups", {})
+        events_section = eg_section.get("events", {})
+        schema = events_section.get("eventConfigurationSchema")
+
+        event_config_template: dict = {}
+        all_warnings: List[str] = []
+
+        if schema:
+            warnings: List[str] = []
+            slimmed = _slim_schema(schema, mode=template_mode, _warnings=warnings)
+            all_warnings.extend(warnings)
+            if template_mode == EndpointTemplateMode.SCHEMA.value and isinstance(slimmed, dict):
+                slimmed.pop("$id", None)
+            event_config_template["eventConfiguration"] = slimmed
+
+        destinations = self._build_event_destinations_template(eg_section, template_mode)
+        if destinations is not None:
+            event_config_template["destinations"] = destinations
+
+        for w in _consolidate_warnings(all_warnings):
+            logger.warning(w)
+
+        return {"connectorType": connector_type, "eventConfig": event_config_template}
+
+    def _load_and_validate_event_config(
+        self,
+        event_config: str,
+        connector_type: str,
+        instance_name: str,
+        instance_resource_group: str,
+    ) -> dict:
+        """Load event config from file/inline JSON, validate against connector schema.
+
+        Input JSON is expected to be the 'eventConfig' dict (output of --show-template), e.g.:
+          {
+            "eventConfiguration": {...},
+            "destinations": [...]
+          }
+        Or the full --show-template output with 'connectorType' and 'eventConfig' keys,
+        which is auto-unwrapped.
+
+        Returns a dict with:
+          - "eventConfiguration": serialized JSON string (if present)
+          - "destinations": list of destination dicts (if present)
+        """
+        from .helpers import strip_nulls as _strip_nulls
+
+        raw = process_additional_configuration(
+            additional_configuration=event_config,
+            config_type="event",
+        )
+        parsed = json.loads(raw)
+
+        if isinstance(parsed, dict) and "eventConfig" in parsed:
+            provided = parsed.get("connectorType")
+            if provided and connector_type and provided.lower() != connector_type.lower():
+                raise InvalidArgumentValueError(
+                    f"Config connectorType '{provided}' does not match asset connectorType '{connector_type}'."
+                )
+            parsed = parsed["eventConfig"]
+
+        if not isinstance(parsed, dict) or not {"eventConfiguration", "destinations"}.intersection(parsed):
+            raise InvalidArgumentValueError(
+                "--event-config must be a JSON object with 'eventConfiguration' "
+                "and/or 'destinations' keys."
+            )
+
+        metadata = self._get_connector_metadata(
+            connector_type=connector_type,
+            instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+        )
+        endpoint = _get_metadata_endpoint(metadata, connector_type) if metadata else None
+        eg_section = endpoint.get("eventGroups", {}) if endpoint else {}
+        events_section = eg_section.get("events", {}) if eg_section else {}
+
+        result = {}
+
+        config_data_raw = parsed.get("eventConfiguration")
+        if config_data_raw is not None:
+            config_data = _strip_nulls(config_data_raw)
+            schema = events_section.get("eventConfigurationSchema") if events_section else None
+            if schema:
+                from ...util.schema_validation import check_json_schema, validate_data_against_schema
+                skip_reason = check_json_schema(schema)
+                if skip_reason:
+                    logger.warning("Skipping eventConfiguration validation: %s", skip_reason)
+                else:
+                    validate_data_against_schema(schema, config_data, name="eventConfiguration")
+            result["eventConfiguration"] = json.dumps(config_data)
+
+        dest_raw = parsed.get("destinations")
+        if dest_raw is not None:
+            dest_data = self._validate_event_destinations(dest_raw, eg_section)
+            if dest_data:
+                result["destinations"] = dest_data
+
+        return result
+
+    def add_event_group_generalized(
+        self,
+        asset_name: str,
+        instance_name: str,
+        instance_resource_group: str,
+        group_name: str,
+        data_source: Optional[str] = None,
+        type_ref: Optional[str] = None,
+        replace: bool = False,
+        event_group_config: Optional[str] = None,
+        show_template: Optional[str] = None,
+        **kwargs,
+    ) -> dict:
+        """Generalized add-event-group that detects connector type from the asset.
+
+        Supports --show-template for config/schema discovery and --event-group-config for
+        JSON or file-based connector-specific event-group configuration. For non-OPC UA
+        connectors, a connector template must exist in the instance.
+        """
+        asset = self.show(
+            asset_name=asset_name,
+            instance_name=instance_name,
+            resource_group=instance_resource_group,
+        )
+        connector_type, device = self._get_connector_type_and_device(asset)
+
+        if show_template:
+            return self._handle_event_group_show_template(
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+                template_mode=show_template.lower(),
+                event_group_config=event_group_config,
+            )
+
+        _, namespace = self._check_device_props(
+            instance_resource_group=instance_resource_group,
+            instance_name=instance_name,
+            asset_type=connector_type,
+            asset_name=asset_name,
+            asset=asset,
+            device=device,
+        )
+
+        original_egs = asset["properties"].get("eventGroups", [])
+        new_egs = [event for event in original_egs if event["name"] != group_name]
+        if len(new_egs) < len(original_egs) and not replace:
+            raise InvalidArgumentValueError(
+                f"Event group '{group_name}' already exists in asset '{asset_name}'. "
+                "Use --replace to overwrite the existing event group."
+            )
+
+        new_eg: dict = {
+            "name": group_name,
+            "eventGroupConfiguration": None,
+            "defaultDestinations": [],
+            "events": [],
+            "typeRef": type_ref,
+        }
+        if data_source:
+            new_eg["dataSource"] = data_source
+
+        if event_group_config:
+            config_result = self._load_and_validate_event_group_config(
+                event_group_config=event_group_config,
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+            )
+            if "eventGroupConfiguration" in config_result:
+                new_eg["eventGroupConfiguration"] = config_result["eventGroupConfiguration"]
+            if "destinations" in config_result:
+                new_eg["defaultDestinations"] = config_result["destinations"]
+
+        new_egs.append(new_eg)
+        update_payload = {"properties": {"eventGroups": new_egs}}
+
+        with console.status(f"Adding event group {group_name} to asset {asset_name}..."):
+            poller = self.ops.begin_update(
+                resource_group_name=namespace["resource_group"],
+                namespace_name=namespace["name"],
+                asset_name=asset_name,
+                properties=update_payload,
+            )
+            wait_for_terminal_state(poller, **kwargs)
+            asset = self.show(
+                asset_name=asset_name,
+                namespace_name=namespace["name"],
+                resource_group=namespace["resource_group"],
+            )
+            return _get_sub_property(asset, group_name, property_key="eventGroups")
+
+    def update_event_group_generalized(
+        self,
+        asset_name: str,
+        instance_name: str,
+        instance_resource_group: str,
+        group_name: str,
+        data_source: Optional[str] = None,
+        type_ref: Optional[str] = None,
+        event_group_config: Optional[str] = None,
+        show_template: Optional[str] = None,
+        **kwargs,
+    ) -> dict:
+        """Generalized update-event-group that detects connector type from the asset.
+
+        Supports --show-template for config/schema discovery and --event-group-config for
+        JSON or file-based connector-specific event-group configuration. For non-OPC UA
+        connectors, a connector template must exist in the instance.
+        """
+        asset = self.show(
+            asset_name=asset_name,
+            instance_name=instance_name,
+            resource_group=instance_resource_group,
+        )
+        connector_type, device = self._get_connector_type_and_device(asset)
+
+        if show_template:
+            from .common import EndpointTemplateMode
+            template_mode = show_template.lower()
+            if template_mode == EndpointTemplateMode.CONFIG.value:
+                if event_group_config:
+                    raise InvalidArgumentValueError(
+                        "--show-template and --event-group-config cannot be used together. "
+                        "--show-template displays the template and exits without modifying the event-group."
+                    )
+                egs_existing = asset["properties"].get("eventGroups", [])
+                existing = next((d for d in egs_existing if d["name"] == group_name), None)
+                if existing is None:
+                    raise InvalidArgumentValueError(
+                        f"Event group '{group_name}' not found in asset '{asset_name}'."
+                    )
+                template_result = self._handle_event_group_show_template(
+                    connector_type=connector_type,
+                    instance_name=instance_name,
+                    instance_resource_group=instance_resource_group,
+                    template_mode=template_mode,
+                    event_group_config=None,
+                )
+                eg_config_tmpl = template_result.get("eventGroupConfig", {})
+                raw_config = existing.get("eventGroupConfiguration")
+                if raw_config:
+                    existing_config = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+                    tmpl_ec = eg_config_tmpl.get("eventGroupConfiguration")
+                    eg_config_tmpl["eventGroupConfiguration"] = (
+                        _deep_merge_template(tmpl_ec, existing_config)
+                        if isinstance(tmpl_ec, dict)
+                        else existing_config
+                    )
+                existing_dests = existing.get("defaultDestinations", [])
+                if existing_dests:
+                    tmpl_dests = eg_config_tmpl.get("destinations", [])
+                    eg_config_tmpl["destinations"] = _merge_destinations_template(
+                        tmpl_dests, existing_dests
+                    )
+                return {"connectorType": connector_type, "eventGroupConfig": eg_config_tmpl}
+            else:
+                return self._handle_event_group_show_template(
+                    connector_type=connector_type,
+                    instance_name=instance_name,
+                    instance_resource_group=instance_resource_group,
+                    template_mode=template_mode,
+                    event_group_config=event_group_config,
+                )
+
+        _, namespace = self._check_device_props(
+            instance_resource_group=instance_resource_group,
+            instance_name=instance_name,
+            asset_type=connector_type,
+            asset_name=asset_name,
+            asset=asset,
+            device=device,
+        )
+
+        event_groups = asset["properties"].get("eventGroups", [])
+        group_list = [eg for eg in event_groups if eg["name"] == group_name]
+        if not group_list:
+            raise InvalidArgumentValueError(
+                f"Event group '{group_name}' not found in asset '{asset_name}'."
+            )
+        group = group_list[0]
+
+        if event_group_config is not None:
+            config_result = self._load_and_validate_event_group_config(
+                event_group_config=event_group_config,
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+            )
+            if "eventGroupConfiguration" in config_result:
+                group["eventGroupConfiguration"] = config_result["eventGroupConfiguration"]
+            if "destinations" in config_result:
+                group["defaultDestinations"] = config_result["destinations"]
+
+        if data_source is not None:
+            group["dataSource"] = data_source
+        if type_ref is not None:
+            group["typeRef"] = type_ref
+
+        update_payload = {"properties": {"eventGroups": event_groups}}
+        with console.status(f"Updating event group {group_name} in asset {asset_name}..."):
+            poller = self.ops.begin_update(
+                resource_group_name=namespace["resource_group"],
+                namespace_name=namespace["name"],
+                asset_name=asset_name,
+                properties=update_payload,
+            )
+            wait_for_terminal_state(poller, **kwargs)
+            asset = self.show(
+                asset_name=asset_name,
+                namespace_name=namespace["name"],
+                resource_group=namespace["resource_group"],
+            )
+            return _get_sub_property(asset, group_name, property_key="eventGroups")
+
+    def add_event_group_event_generalized(
+        self,
+        asset_name: str,
+        instance_name: str,
+        instance_resource_group: str,
+        group_name: str,
+        event_name: str,
+        data_source: Optional[str] = None,
+        type_ref: Optional[str] = None,
+        replace: bool = False,
+        event_config: Optional[str] = None,
+        show_template: Optional[str] = None,
+        **kwargs,
+    ) -> List[dict]:
+        """Generalized add-event that detects connector type from the asset.
+
+        Supports --show-template for config/schema discovery and --event-config for
+        JSON or file-based connector-specific event configuration. For non-OPC UA
+        connectors, a connector template must exist in the instance.
+        """
+        asset = self.show(
+            asset_name=asset_name,
+            instance_name=instance_name,
+            resource_group=instance_resource_group,
+        )
+        connector_type, device = self._get_connector_type_and_device(asset)
+
+        if show_template:
+            return self._handle_event_show_template(
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+                template_mode=show_template.lower(),
+                event_config=event_config,
+            )
+
+        _, namespace = self._check_device_props(
+            instance_resource_group=instance_resource_group,
+            instance_name=instance_name,
+            asset_type=connector_type,
+            asset_name=asset_name,
+            asset=asset,
+            device=device,
+        )
+
+        event_group = _get_sub_property(asset, group_name, property_key="eventGroups")
+        og_events = event_group.get("events", [])
+        remaining_events = [ev for ev in og_events if ev["name"] != event_name]
+        if len(remaining_events) < len(og_events) and not replace:
+            raise InvalidArgumentValueError(
+                f"event '{event_name}' already exists in event group '{group_name}' of asset '{asset_name}'. "
+                "Use --replace to overwrite the existing event."
+            )
+
+        event: dict = {"name": event_name}
+        if data_source:
+            event["dataSource"] = data_source
+        if type_ref:
+            event["typeRef"] = type_ref
+
+        if event_config:
+            config_result = self._load_and_validate_event_config(
+                event_config=event_config,
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+            )
+            if "eventConfiguration" in config_result:
+                event["eventConfiguration"] = config_result["eventConfiguration"]
+            if "destinations" in config_result:
+                event["destinations"] = config_result["destinations"]
+
+        remaining_events.append(event)
+        event_group["events"] = remaining_events
+
+        update_payload = {"properties": {"eventGroups": asset["properties"]["eventGroups"]}}
+        with console.status(f"Adding event {event_name} to event group {group_name} in asset {asset_name}..."):
+            poller = self.ops.begin_update(
+                resource_group_name=namespace["resource_group"],
+                namespace_name=namespace["name"],
+                asset_name=asset_name,
+                properties=update_payload,
+            )
+            wait_for_terminal_state(poller, **kwargs)
+            asset = self.show(
+                asset_name=asset_name,
+                namespace_name=namespace["name"],
+                resource_group=namespace["resource_group"],
+            )
+            return _get_sub_property(asset, group_name, property_key="eventGroups")["events"]
+
     # EVENT GROUPS - allowed for opcua, onvif, and custom assets
     def add_event_group(
         self,
@@ -2804,6 +3455,368 @@ class NamespaceAssets(Queryable):
             # note that we return a list of events
             return _get_sub_property(asset, group_name, property_key="eventGroups")["events"]
 
+    def _handle_stream_show_template(
+        self,
+        connector_type: str,
+        instance_name: str,
+        instance_resource_group: str,
+        template_mode: str,
+        stream_config: Optional[str],
+    ) -> dict:
+        """Return a stream config/schema template for --show-template and exit early.
+
+        Discovers the streamConfigurationSchema and supported destinations from connector
+        metadata and returns a slimmed template. OPC UA uses bundled metadata; all other types
+        require a connector template in the instance.
+        """
+        from .helpers import _slim_schema, _consolidate_warnings
+        from .common import EndpointTemplateMode
+
+        if stream_config:
+            raise InvalidArgumentValueError(
+                "--show-template and --stream-config cannot be used together. "
+                "--show-template displays the template and exits without modifying the stream."
+            )
+
+        metadata = self._get_connector_metadata(
+            connector_type=connector_type,
+            instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+        )
+        endpoint = _get_metadata_endpoint(metadata, connector_type)
+        stream_section = endpoint.get("streams", {})
+        schema = stream_section.get("streamConfigurationSchema")
+
+        stream_config_template: dict = {}
+        all_warnings: List[str] = []
+
+        if schema:
+            warnings: List[str] = []
+            slimmed = _slim_schema(schema, mode=template_mode, _warnings=warnings)
+            all_warnings.extend(warnings)
+            if template_mode == EndpointTemplateMode.SCHEMA.value and isinstance(slimmed, dict):
+                slimmed.pop("$id", None)
+            stream_config_template["streamConfiguration"] = slimmed
+
+        destinations = self._build_stream_destinations_template(stream_section, template_mode)
+        if destinations is not None:
+            stream_config_template["destinations"] = destinations
+
+        for w in _consolidate_warnings(all_warnings):
+            logger.warning(w)
+
+        return {"connectorType": connector_type, "streamConfig": stream_config_template}
+
+    def _build_stream_destinations_template(self, stream_section: dict, template_mode: str) -> Optional[list]:
+        """Build a destinations template from the connector's supported stream destinations.
+
+        Stream destinations live at ``streams.destinations``. Returns None when no destinations
+        are supported.
+        """
+        dest_section = stream_section.get("destinations", {}) if isinstance(stream_section, dict) else {}
+        supported = dest_section.get("supportedDestinations", []) if isinstance(dest_section, dict) else []
+        if not supported:
+            return None
+        return _build_destination_template(
+            supported_destinations=supported,
+            default_destination=dest_section.get("defaultDestination"),
+            mode=template_mode,
+        )
+
+    def _validate_stream_destinations(self, dest_raw, stream_section: dict) -> List[dict]:
+        """Validate and filter a destinations list against the connector's supported stream
+        destinations."""
+        dest_section = stream_section.get("destinations", {}) if isinstance(stream_section, dict) else {}
+        supported = (
+            dest_section.get("supportedDestinations", [])
+            if isinstance(dest_section, dict) else []
+        )
+        return self._filter_and_validate_destinations(dest_raw, supported, "streams")
+
+    def _load_and_validate_stream_config(
+        self,
+        stream_config: str,
+        connector_type: str,
+        instance_name: str,
+        instance_resource_group: str,
+    ) -> dict:
+        """Load stream config from file/inline JSON, validate against connector schema, and
+        return ARM-ready values.
+
+        Input JSON is expected to be the 'streamConfig' dict (output of --show-template), e.g.:
+          {
+            "streamConfiguration": {...},
+            "destinations": [...]
+          }
+        Or the full --show-template output with 'connectorType' and 'streamConfig' keys,
+        which is auto-unwrapped.
+
+        Returns a dict with:
+          - "streamConfiguration": serialized JSON string (if present)
+          - "destinations": list of destination dicts (if present)
+        """
+        from .helpers import strip_nulls as _strip_nulls
+
+        raw = process_additional_configuration(
+            additional_configuration=stream_config,
+            config_type="stream",
+        )
+        parsed = json.loads(raw)
+
+        if isinstance(parsed, dict) and "streamConfig" in parsed:
+            provided = parsed.get("connectorType")
+            if provided and connector_type and provided.lower() != connector_type.lower():
+                raise InvalidArgumentValueError(
+                    f"Config connectorType '{provided}' does not match asset connectorType '{connector_type}'."
+                )
+            parsed = parsed["streamConfig"]
+
+        if not isinstance(parsed, dict) or not {"streamConfiguration", "destinations"}.intersection(parsed):
+            raise InvalidArgumentValueError(
+                "--stream-config must be a JSON object with 'streamConfiguration' "
+                "and/or 'destinations' keys."
+            )
+
+        metadata = self._get_connector_metadata(
+            connector_type=connector_type,
+            instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+        )
+        endpoint = _get_metadata_endpoint(metadata, connector_type) if metadata else None
+        stream_section = endpoint.get("streams", {}) if endpoint else {}
+
+        result = {}
+
+        config_data_raw = parsed.get("streamConfiguration")
+        if config_data_raw is not None:
+            config_data = _strip_nulls(config_data_raw)
+            schema = stream_section.get("streamConfigurationSchema") if stream_section else None
+            if schema:
+                from ...util.schema_validation import check_json_schema, validate_data_against_schema
+                skip_reason = check_json_schema(schema)
+                if skip_reason:
+                    logger.warning("Skipping streamConfiguration validation: %s", skip_reason)
+                else:
+                    validate_data_against_schema(schema, config_data, name="streamConfiguration")
+            result["streamConfiguration"] = json.dumps(config_data)
+
+        dest_raw = parsed.get("destinations")
+        if dest_raw is not None:
+            dest_data = self._validate_stream_destinations(dest_raw, stream_section)
+            # Preserve an explicitly empty list so callers can clear destinations.
+            if dest_data or dest_raw == []:
+                result["destinations"] = dest_data
+
+        return result
+
+    def add_stream_generalized(
+        self,
+        asset_name: str,
+        instance_name: str,
+        instance_resource_group: str,
+        stream_name: str,
+        type_ref: Optional[str] = None,
+        replace: bool = False,
+        stream_config: Optional[str] = None,
+        show_template: Optional[str] = None,
+        **kwargs,
+    ) -> dict:
+        """Generalized add-stream that detects connector type from the asset.
+
+        Supports --show-template for config/schema discovery and --stream-config for
+        JSON or file-based connector-specific stream configuration. For non-OPC UA
+        connectors, a connector template must exist in the instance.
+        """
+        asset = self.show(
+            asset_name=asset_name,
+            instance_name=instance_name,
+            resource_group=instance_resource_group,
+        )
+        connector_type, device = self._get_connector_type_and_device(asset)
+
+        if show_template:
+            return self._handle_stream_show_template(
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+                template_mode=show_template.lower(),
+                stream_config=stream_config,
+            )
+
+        _, namespace = self._check_device_props(
+            instance_resource_group=instance_resource_group,
+            instance_name=instance_name,
+            asset_type=connector_type,
+            asset_name=asset_name,
+            asset=asset,
+            device=device,
+        )
+
+        original_streams = asset["properties"].get("streams", [])
+        new_streams = [stream for stream in original_streams if stream["name"] != stream_name]
+        if len(new_streams) < len(original_streams) and not replace:
+            raise InvalidArgumentValueError(
+                f"Stream '{stream_name}' already exists in asset '{asset_name}'. "
+                "Use --replace to overwrite the existing stream."
+            )
+
+        new_stream: dict = {
+            "name": stream_name,
+            "streamConfiguration": None,
+            "destinations": [],
+            "typeRef": type_ref,
+        }
+
+        if stream_config:
+            config_result = self._load_and_validate_stream_config(
+                stream_config=stream_config,
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+            )
+            if "streamConfiguration" in config_result:
+                new_stream["streamConfiguration"] = config_result["streamConfiguration"]
+            if "destinations" in config_result:
+                new_stream["destinations"] = config_result["destinations"]
+
+        new_streams.append(new_stream)
+        update_payload = {"properties": {"streams": new_streams}}
+
+        with console.status(f"Adding stream {stream_name} to asset {asset_name}..."):
+            poller = self.ops.begin_update(
+                resource_group_name=namespace["resource_group"],
+                namespace_name=namespace["name"],
+                asset_name=asset_name,
+                properties=update_payload,
+            )
+            wait_for_terminal_state(poller, **kwargs)
+            asset = self.show(
+                asset_name=asset_name,
+                namespace_name=namespace["name"],
+                resource_group=namespace["resource_group"],
+            )
+            return _get_sub_property(asset, stream_name, property_key="streams")
+
+    def update_stream_generalized(
+        self,
+        asset_name: str,
+        instance_name: str,
+        instance_resource_group: str,
+        stream_name: str,
+        type_ref: Optional[str] = None,
+        stream_config: Optional[str] = None,
+        show_template: Optional[str] = None,
+        **kwargs,
+    ) -> dict:
+        """Generalized update-stream that detects connector type from the asset.
+
+        Supports --show-template for config/schema discovery and --stream-config for
+        JSON or file-based connector-specific stream configuration. For non-OPC UA
+        connectors, a connector template must exist in the instance.
+        """
+        asset = self.show(
+            asset_name=asset_name,
+            instance_name=instance_name,
+            resource_group=instance_resource_group,
+        )
+        connector_type, device = self._get_connector_type_and_device(asset)
+
+        if show_template:
+            from .common import EndpointTemplateMode
+            template_mode = show_template.lower()
+            if template_mode == EndpointTemplateMode.CONFIG.value:
+                if stream_config:
+                    raise InvalidArgumentValueError(
+                        "--show-template and --stream-config cannot be used together. "
+                        "--show-template displays the template and exits without modifying the stream."
+                    )
+                streams_existing = asset["properties"].get("streams", [])
+                existing = next((s for s in streams_existing if s["name"] == stream_name), None)
+                if existing is None:
+                    raise InvalidArgumentValueError(
+                        f"Stream '{stream_name}' not found in asset '{asset_name}'."
+                    )
+                template_result = self._handle_stream_show_template(
+                    connector_type=connector_type,
+                    instance_name=instance_name,
+                    instance_resource_group=instance_resource_group,
+                    template_mode=template_mode,
+                    stream_config=None,
+                )
+                stream_config_tmpl = template_result.get("streamConfig", {})
+                raw_config = existing.get("streamConfiguration")
+                if raw_config:
+                    existing_config = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+                    tmpl_sc = stream_config_tmpl.get("streamConfiguration")
+                    stream_config_tmpl["streamConfiguration"] = (
+                        _deep_merge_template(tmpl_sc, existing_config)
+                        if isinstance(tmpl_sc, dict)
+                        else existing_config
+                    )
+                existing_dests = existing.get("destinations", [])
+                if existing_dests:
+                    tmpl_dests = stream_config_tmpl.get("destinations", [])
+                    stream_config_tmpl["destinations"] = _merge_destinations_template(
+                        tmpl_dests, existing_dests
+                    )
+                return {"connectorType": connector_type, "streamConfig": stream_config_tmpl}
+            else:
+                return self._handle_stream_show_template(
+                    connector_type=connector_type,
+                    instance_name=instance_name,
+                    instance_resource_group=instance_resource_group,
+                    template_mode=template_mode,
+                    stream_config=stream_config,
+                )
+
+        _, namespace = self._check_device_props(
+            instance_resource_group=instance_resource_group,
+            instance_name=instance_name,
+            asset_type=connector_type,
+            asset_name=asset_name,
+            asset=asset,
+            device=device,
+        )
+
+        streams = asset["properties"].get("streams", [])
+        stream_list = [s for s in streams if s["name"] == stream_name]
+        if not stream_list:
+            raise InvalidArgumentValueError(
+                f"Stream '{stream_name}' not found in asset '{asset_name}'."
+            )
+        stream = stream_list[0]
+
+        if stream_config is not None:
+            config_result = self._load_and_validate_stream_config(
+                stream_config=stream_config,
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+            )
+            if "streamConfiguration" in config_result:
+                stream["streamConfiguration"] = config_result["streamConfiguration"]
+            if "destinations" in config_result:
+                stream["destinations"] = config_result["destinations"]
+
+        if type_ref is not None:
+            stream["typeRef"] = type_ref
+
+        update_payload = {"properties": {"streams": streams}}
+        with console.status(f"Updating stream {stream_name} in asset {asset_name}..."):
+            poller = self.ops.begin_update(
+                resource_group_name=namespace["resource_group"],
+                namespace_name=namespace["name"],
+                asset_name=asset_name,
+                properties=update_payload,
+            )
+            wait_for_terminal_state(poller, **kwargs)
+            asset = self.show(
+                asset_name=asset_name,
+                namespace_name=namespace["name"],
+                resource_group=namespace["resource_group"],
+            )
+            return _get_sub_property(asset, stream_name, property_key="streams")
+
     # STREAMS - allowed for media and custom assets
     def add_stream(
         self,
@@ -3100,6 +4113,459 @@ class NamespaceAssets(Queryable):
                 resource_group=namespace["resource_group"],
             )
             return asset["properties"].get("streams", [])
+
+    # GENERALIZED MANAGEMENT GROUP / ACTION HELPERS AND METHODS
+    def _handle_management_show_template(
+        self,
+        connector_type: str,
+        instance_name: str,
+        instance_resource_group: str,
+        template_mode: str,
+        config: Optional[str],
+        *,
+        is_action: bool,
+    ) -> dict:
+        """Return a management group/action config or schema template for --show-template and exit early.
+
+        Discovers the relevant *ConfigurationSchema from connector metadata and returns a slimmed
+        template. Management groups and actions have no destinations in the metadata schema. OPC UA
+        uses bundled metadata; all other types require a connector template in the instance.
+        """
+        from .helpers import _slim_schema, _consolidate_warnings
+        from .common import EndpointTemplateMode
+
+        config_arg = "--action-config" if is_action else "--mgmt-group-config"
+        label = "action" if is_action else "management group"
+        config_key = "actionConfiguration" if is_action else "managementGroupConfiguration"
+        result_key = "actionConfig" if is_action else "mgmtGroupConfig"
+
+        if config:
+            raise InvalidArgumentValueError(
+                f"--show-template and {config_arg} cannot be used together. "
+                f"--show-template displays the template and exits without modifying the {label}."
+            )
+
+        metadata = self._get_connector_metadata(
+            connector_type=connector_type,
+            instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+        )
+        endpoint = _get_metadata_endpoint(metadata, connector_type)
+        mg_section = endpoint.get("managementGroups", {})
+        if is_action:
+            schema = mg_section.get("managementGroupActions", {}).get("actionConfigurationSchema")
+        else:
+            schema = mg_section.get("managementGroupConfigurationSchema")
+
+        config_template: dict = {}
+        all_warnings: List[str] = []
+
+        if schema:
+            warnings: List[str] = []
+            slimmed = _slim_schema(schema, mode=template_mode, _warnings=warnings)
+            all_warnings.extend(warnings)
+            if template_mode == EndpointTemplateMode.SCHEMA.value and isinstance(slimmed, dict):
+                slimmed.pop("$id", None)
+            config_template[config_key] = slimmed
+
+        for w in _consolidate_warnings(all_warnings):
+            logger.warning(w)
+
+        return {"connectorType": connector_type, result_key: config_template}
+
+    def _load_and_validate_management_config(
+        self,
+        config: str,
+        connector_type: str,
+        instance_name: str,
+        instance_resource_group: str,
+        *,
+        is_action: bool,
+    ) -> dict:
+        """Load management group/action config from file/inline JSON, validate against the connector
+        schema, and return ARM-ready values.
+
+        Input JSON is expected to be the 'mgmtGroupConfig'/'actionConfig' dict (output of
+        --show-template), e.g. ``{"managementGroupConfiguration": {...}}``, or the full
+        --show-template output with 'connectorType' and the config wrapper key, which is
+        auto-unwrapped.
+
+        Returns a dict with the serialized configuration JSON string (if present).
+        """
+        from .helpers import strip_nulls as _strip_nulls
+
+        config_arg = "--action-config" if is_action else "--mgmt-group-config"
+        config_type = "action" if is_action else "management group"
+        config_key = "actionConfiguration" if is_action else "managementGroupConfiguration"
+        result_key = "actionConfig" if is_action else "mgmtGroupConfig"
+
+        raw = process_additional_configuration(
+            additional_configuration=config,
+            config_type=config_type,
+        )
+        parsed = json.loads(raw)
+
+        if isinstance(parsed, dict) and result_key in parsed:
+            provided = parsed.get("connectorType")
+            if provided and connector_type and provided.lower() != connector_type.lower():
+                raise InvalidArgumentValueError(
+                    f"Config connectorType '{provided}' does not match asset connectorType '{connector_type}'."
+                )
+            parsed = parsed[result_key]
+
+        if not isinstance(parsed, dict) or config_key not in parsed:
+            raise InvalidArgumentValueError(
+                f"{config_arg} must be a JSON object with a '{config_key}' key."
+            )
+
+        metadata = self._get_connector_metadata(
+            connector_type=connector_type,
+            instance_name=instance_name,
+            instance_resource_group=instance_resource_group,
+        )
+        endpoint = _get_metadata_endpoint(metadata, connector_type) if metadata else None
+        mg_section = endpoint.get("managementGroups", {}) if endpoint else {}
+        if is_action:
+            schema_owner = mg_section.get("managementGroupActions", {}) if mg_section else {}
+            schema_key = "actionConfigurationSchema"
+        else:
+            schema_owner = mg_section
+            schema_key = "managementGroupConfigurationSchema"
+
+        result = {}
+
+        config_data_raw = parsed.get(config_key)
+        if config_data_raw is not None:
+            config_data = _strip_nulls(config_data_raw)
+            schema = schema_owner.get(schema_key) if schema_owner else None
+            if schema:
+                from ...util.schema_validation import check_json_schema, validate_data_against_schema
+                skip_reason = check_json_schema(schema)
+                if skip_reason:
+                    logger.warning("Skipping %s validation: %s", config_key, skip_reason)
+                else:
+                    validate_data_against_schema(schema, config_data, name=config_key)
+            result[config_key] = json.dumps(config_data)
+
+        return result
+
+    def add_management_group_generalized(
+        self,
+        asset_name: str,
+        instance_name: str,
+        instance_resource_group: str,
+        group_name: str,
+        data_source: Optional[str] = None,
+        default_topic: Optional[str] = None,
+        default_timeout: Optional[int] = None,
+        type_ref: Optional[str] = None,
+        replace: bool = False,
+        mgmt_group_config: Optional[str] = None,
+        show_template: Optional[str] = None,
+        **kwargs,
+    ) -> dict:
+        """Generalized add-management-group that detects connector type from the asset.
+
+        Supports --show-template for config/schema discovery and --mgmt-group-config for
+        JSON or file-based connector-specific management-group configuration. For non-OPC UA
+        connectors, a connector template must exist in the instance.
+        """
+        asset = self.show(
+            asset_name=asset_name,
+            instance_name=instance_name,
+            resource_group=instance_resource_group,
+        )
+        connector_type, device = self._get_connector_type_and_device(asset)
+
+        if show_template:
+            return self._handle_management_show_template(
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+                template_mode=show_template.lower(),
+                config=mgmt_group_config,
+                is_action=False,
+            )
+
+        _, namespace = self._check_device_props(
+            instance_resource_group=instance_resource_group,
+            instance_name=instance_name,
+            asset_type=connector_type,
+            asset_name=asset_name,
+            asset=asset,
+            device=device,
+        )
+
+        og_mgmt_groups = asset["properties"].get("managementGroups", [])
+        remaining_mgmt_groups = [mgmt for mgmt in og_mgmt_groups if mgmt["name"] != group_name]
+        if len(remaining_mgmt_groups) < len(og_mgmt_groups) and not replace:
+            raise InvalidArgumentValueError(
+                f"Management group '{group_name}' already exists in asset '{asset_name}'. "
+                "Use --replace to overwrite the existing management group."
+            )
+
+        new_mgmt_group: dict = {
+            "name": group_name,
+            "defaultTopic": default_topic,
+            "defaultTimeoutInSeconds": default_timeout,
+            "managementGroupConfiguration": None,
+            "typeRef": type_ref,
+            "actions": [],
+        }
+        if data_source:
+            new_mgmt_group["dataSource"] = data_source
+
+        if mgmt_group_config:
+            config_result = self._load_and_validate_management_config(
+                config=mgmt_group_config,
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+                is_action=False,
+            )
+            if "managementGroupConfiguration" in config_result:
+                new_mgmt_group["managementGroupConfiguration"] = config_result["managementGroupConfiguration"]
+
+        remaining_mgmt_groups.append(new_mgmt_group)
+        update_payload = {"properties": {"managementGroups": remaining_mgmt_groups}}
+
+        with console.status(f"Adding management group {group_name} to asset {asset_name}..."):
+            poller = self.ops.begin_update(
+                resource_group_name=namespace["resource_group"],
+                namespace_name=namespace["name"],
+                asset_name=asset_name,
+                properties=update_payload,
+            )
+            wait_for_terminal_state(poller, **kwargs)
+            asset = self.show(
+                asset_name=asset_name,
+                namespace_name=namespace["name"],
+                resource_group=namespace["resource_group"],
+            )
+            return _get_sub_property(asset, group_name, property_key="managementGroups")
+
+    def update_management_group_generalized(
+        self,
+        asset_name: str,
+        instance_name: str,
+        instance_resource_group: str,
+        group_name: str,
+        data_source: Optional[str] = None,
+        default_topic: Optional[str] = None,
+        default_timeout: Optional[int] = None,
+        type_ref: Optional[str] = None,
+        mgmt_group_config: Optional[str] = None,
+        show_template: Optional[str] = None,
+        **kwargs,
+    ) -> dict:
+        """Generalized update-management-group that detects connector type from the asset.
+
+        Supports --show-template for config/schema discovery and --mgmt-group-config for
+        JSON or file-based connector-specific management-group configuration. For non-OPC UA
+        connectors, a connector template must exist in the instance.
+        """
+        asset = self.show(
+            asset_name=asset_name,
+            instance_name=instance_name,
+            resource_group=instance_resource_group,
+        )
+        connector_type, device = self._get_connector_type_and_device(asset)
+
+        if show_template:
+            from .common import EndpointTemplateMode
+            template_mode = show_template.lower()
+            if template_mode == EndpointTemplateMode.CONFIG.value:
+                if mgmt_group_config:
+                    raise InvalidArgumentValueError(
+                        "--show-template and --mgmt-group-config cannot be used together. "
+                        "--show-template displays the template and exits without modifying the management group."
+                    )
+                mgs_existing = asset["properties"].get("managementGroups", [])
+                existing = next((d for d in mgs_existing if d["name"] == group_name), None)
+                if existing is None:
+                    raise InvalidArgumentValueError(
+                        f"Management group '{group_name}' not found in asset '{asset_name}'."
+                    )
+                template_result = self._handle_management_show_template(
+                    connector_type=connector_type,
+                    instance_name=instance_name,
+                    instance_resource_group=instance_resource_group,
+                    template_mode=template_mode,
+                    config=None,
+                    is_action=False,
+                )
+                mg_config_tmpl = template_result.get("mgmtGroupConfig", {})
+                raw_config = existing.get("managementGroupConfiguration")
+                if raw_config:
+                    existing_config = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+                    tmpl_c = mg_config_tmpl.get("managementGroupConfiguration")
+                    mg_config_tmpl["managementGroupConfiguration"] = (
+                        _deep_merge_template(tmpl_c, existing_config)
+                        if isinstance(tmpl_c, dict)
+                        else existing_config
+                    )
+                return {"connectorType": connector_type, "mgmtGroupConfig": mg_config_tmpl}
+            else:
+                return self._handle_management_show_template(
+                    connector_type=connector_type,
+                    instance_name=instance_name,
+                    instance_resource_group=instance_resource_group,
+                    template_mode=template_mode,
+                    config=mgmt_group_config,
+                    is_action=False,
+                )
+
+        _, namespace = self._check_device_props(
+            instance_resource_group=instance_resource_group,
+            instance_name=instance_name,
+            asset_type=connector_type,
+            asset_name=asset_name,
+            asset=asset,
+            device=device,
+        )
+
+        mgmt_groups = asset["properties"].get("managementGroups", [])
+        group_list = [mgmt for mgmt in mgmt_groups if mgmt["name"] == group_name]
+        if not group_list:
+            raise InvalidArgumentValueError(
+                f"Management group '{group_name}' not found in asset '{asset_name}'."
+            )
+        group = group_list[0]
+
+        if mgmt_group_config is not None:
+            config_result = self._load_and_validate_management_config(
+                config=mgmt_group_config,
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+                is_action=False,
+            )
+            if "managementGroupConfiguration" in config_result:
+                group["managementGroupConfiguration"] = config_result["managementGroupConfiguration"]
+
+        if default_topic == "":
+            group.pop("defaultTopic", None)
+        elif default_topic:
+            group["defaultTopic"] = default_topic
+        if default_timeout is not None:
+            group["defaultTimeoutInSeconds"] = default_timeout
+        if data_source:
+            group["dataSource"] = data_source
+        if type_ref:
+            group["typeRef"] = type_ref
+
+        update_payload = {"properties": {"managementGroups": mgmt_groups}}
+        with console.status(f"Updating management group {group_name} in asset {asset_name}..."):
+            poller = self.ops.begin_update(
+                resource_group_name=namespace["resource_group"],
+                namespace_name=namespace["name"],
+                asset_name=asset_name,
+                properties=update_payload,
+            )
+            wait_for_terminal_state(poller, **kwargs)
+            asset = self.show(
+                asset_name=asset_name,
+                namespace_name=namespace["name"],
+                resource_group=namespace["resource_group"],
+            )
+            return _get_sub_property(asset, group_name, property_key="managementGroups")
+
+    def add_management_group_action_generalized(
+        self,
+        asset_name: str,
+        instance_name: str,
+        instance_resource_group: str,
+        group_name: str,
+        action_name: str,
+        target_uri: Optional[str] = None,
+        topic: Optional[str] = None,
+        action_type: Optional[str] = None,
+        timeout: Optional[int] = None,
+        type_ref: Optional[str] = None,
+        replace: bool = False,
+        action_config: Optional[str] = None,
+        show_template: Optional[str] = None,
+        **kwargs,
+    ) -> List[dict]:
+        """Generalized add-management-action that detects connector type from the asset.
+
+        Supports --show-template for config/schema discovery and --action-config for
+        JSON or file-based connector-specific action configuration. For non-OPC UA
+        connectors, a connector template must exist in the instance.
+        """
+        asset = self.show(
+            asset_name=asset_name,
+            instance_name=instance_name,
+            resource_group=instance_resource_group,
+        )
+        connector_type, device = self._get_connector_type_and_device(asset)
+
+        if show_template:
+            return self._handle_management_show_template(
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+                template_mode=show_template.lower(),
+                config=action_config,
+                is_action=True,
+            )
+
+        _, namespace = self._check_device_props(
+            instance_resource_group=instance_resource_group,
+            instance_name=instance_name,
+            asset_type=connector_type,
+            asset_name=asset_name,
+            asset=asset,
+            device=device,
+        )
+
+        mgmt_group = _get_sub_property(asset, group_name, property_key="managementGroups")
+        actions = mgmt_group.get("actions", [])
+        unmatched_actions = [action for action in actions if action["name"] != action_name]
+        if len(unmatched_actions) < len(actions) and not replace:
+            raise InvalidArgumentValueError(
+                f"Action '{action_name}' already exists in management group '{group_name}' "
+                f"of asset '{asset_name}'. Use --replace to overwrite the existing action."
+            )
+
+        action: dict = {
+            "name": action_name,
+            "targetUri": target_uri,
+            "topic": topic,
+            "actionType": action_type,
+            "timeoutInSeconds": timeout,
+            "typeRef": type_ref,
+        }
+
+        if action_config:
+            config_result = self._load_and_validate_management_config(
+                config=action_config,
+                connector_type=connector_type,
+                instance_name=instance_name,
+                instance_resource_group=instance_resource_group,
+                is_action=True,
+            )
+            if "actionConfiguration" in config_result:
+                action["actionConfiguration"] = config_result["actionConfiguration"]
+
+        unmatched_actions.append(action)
+        mgmt_group["actions"] = unmatched_actions
+
+        update_payload = {"properties": {"managementGroups": asset["properties"]["managementGroups"]}}
+        with console.status(f"Adding action {action_name} to management group {group_name}..."):
+            poller = self.ops.begin_update(
+                resource_group_name=namespace["resource_group"],
+                namespace_name=namespace["name"],
+                asset_name=asset_name,
+                properties=update_payload,
+            )
+            wait_for_terminal_state(poller, **kwargs)
+            asset = self.show(
+                asset_name=asset_name,
+                namespace_name=namespace["name"],
+                resource_group=namespace["resource_group"],
+            )
+            return _get_sub_property(asset, group_name, property_key="managementGroups")["actions"]
 
     # Management Groups - allowed for opcua, onvif, and custom assets
     def add_management_group(
@@ -3709,7 +5175,9 @@ class NamespaceAssets(Queryable):
         asset_type: Union[List[str], str],  # change to list
         asset_name: Optional[str] = None,
         device_name: Optional[str] = None,
-        device_endpoint_name: Optional[str] = None
+        device_endpoint_name: Optional[str] = None,
+        asset: Optional[dict] = None,
+        device: Optional[dict] = None,
     ) -> Tuple[dict, Dict[str, str]]:
         """
         Checks the device properties to ensure the endpoint type matches the asset operation's type.
@@ -3719,17 +5187,18 @@ class NamespaceAssets(Queryable):
         This also includes the cluster connectivity check.
 
         If asset_name is provided (in the case of the asset is already created), it will retrieve the
-        asset to populate the device_name and device_endpoint_name.
+        asset to populate the device_name and device_endpoint_name. A previously fetched ``asset``
+        and/or ``device`` may be passed in to avoid redundant round trips.
         """
-        asset = None
         namespace = None
         if asset_name:
             # get the asset to populate the device name and endpoint name
-            asset = self.show(
-                resource_group=instance_resource_group,
-                instance_name=instance_name,
-                asset_name=asset_name
-            )
+            if asset is None:
+                asset = self.show(
+                    resource_group=instance_resource_group,
+                    instance_name=instance_name,
+                    asset_name=asset_name
+                )
             device_name = asset["properties"]["deviceRef"]["deviceName"]
             device_endpoint_name = asset["properties"]["deviceRef"]["endpointName"]
             namespace = parse_resource_id(asset["id"])
@@ -3740,11 +5209,12 @@ class NamespaceAssets(Queryable):
                 instance_resource_group=instance_resource_group
             )
 
-        device = self.device_ops.get(
-            resource_group_name=namespace["resource_group"],
-            namespace_name=namespace["name"],
-            device_name=device_name
-        )
+        if device is None:
+            device = self.device_ops.get(
+                resource_group_name=namespace["resource_group"],
+                namespace_name=namespace["name"],
+                device_name=device_name
+            )
 
         # use the device to check cluster connectivity
         check_cluster_connectivity(self.cmd, device)
