@@ -196,7 +196,7 @@ def mocked_clone_resolve_oidc_issuer(mocker):
     yield mocker.patch(
         "azext_edge.edge.providers.orchestration.clone.resolve_oidc_issuer",
         autospec=True,
-        wraps=lambda arm_issuer, **_: arm_issuer,
+        side_effect=lambda arm_issuer, **_: arm_issuer,
     )
 
 
