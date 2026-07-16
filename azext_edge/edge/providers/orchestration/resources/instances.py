@@ -116,7 +116,12 @@ def _get_service_account_issuer(namespace: str, service_account_name: str) -> Op
             response,
             client.AuthenticationV1TokenRequest,
         )
-    return decode_access_token(token_response.status.token).get("iss")
+
+    try:
+        issuer = decode_access_token(token_response.status.token).get("iss")
+    except (AttributeError, IndexError, ValueError):
+        return None
+    return issuer if isinstance(issuer, str) else None
 
 
 def resolve_oidc_issuer(arm_issuer: str, namespace: str, service_account_name: str) -> str:
