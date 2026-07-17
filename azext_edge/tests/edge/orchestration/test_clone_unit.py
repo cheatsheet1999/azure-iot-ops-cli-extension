@@ -1327,8 +1327,6 @@ def test_clone_resolves_oidc_issuer(
 
     mocked_clone_resolve_oidc_issuer.assert_called_once_with(
         arm_issuer=arm_issuer,
-        namespace="namespace",
-        service_account_name=SERVICE_ACCOUNT_SECRETSYNC,
     )
 
 

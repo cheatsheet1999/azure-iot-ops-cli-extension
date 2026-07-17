@@ -36,7 +36,6 @@ from azext_edge.edge.providers.orchestration.resources.instances import (
     get_fc_name,
     get_spc_name,
     parse_feature_kvp_nargs,
-    resolve_oidc_issuer,
 )
 from azext_edge.edge.util.machinery import scoped_semver_import
 from ....generators import (
@@ -676,6 +675,7 @@ def test_secretsync_enable(
     custom_role_id: Optional[str],
     tags: Optional[dict],
     mocked_get_tenant_id: Mock,
+    mocked_resolve_oidc_issuer: Mock,
 ):
     oidc_issuer_def = {
         "oidcIssuerProfile": {
@@ -874,6 +874,7 @@ def test_secretsync_enable(
         wait_sec=0.1,
     )
     assert result == spc_payload
+    mocked_resolve_oidc_issuer.assert_called_once_with(arm_issuer=oidc_issuer)
     spc_create_request = json.loads(spc_create.calls[0].request.body)
     assert spc_create_request["extendedLocation"] == instance_record["extendedLocation"]
     assert spc_create_request["location"] == cluster_location
@@ -908,35 +909,6 @@ def test_secretsync_enable(
             assert ra_put_request["properties"]["roleDefinitionId"] == role_ids[i]
             assert ra_put_request["properties"]["principalId"] == principal_id
             assert ra_put_request["properties"]["principalType"] == "ServicePrincipal"
-
-
-def test_resolve_oidc_issuer_uses_kubernetes_issuer_for_trailing_slash(mocker):
-    arm_issuer = "https://localhost/issuer/"
-    kubernetes_issuer = "https://localhost/issuer"
-    mocker.patch(
-        "azext_edge.edge.providers.orchestration.resources.instances.load_config_context", autospec=True
-    )
-    mocker.patch(
-        "azext_edge.edge.providers.orchestration.resources.instances._get_service_account_issuer",
-        autospec=True,
-        return_value=kubernetes_issuer,
-    )
-
-    assert resolve_oidc_issuer(arm_issuer, "namespace", "service-account") == kubernetes_issuer
-
-
-def test_resolve_oidc_issuer_keeps_arm_issuer_when_issuers_differ(mocker):
-    arm_issuer = "https://localhost/issuer/"
-    mocker.patch(
-        "azext_edge.edge.providers.orchestration.resources.instances.load_config_context", autospec=True
-    )
-    mocker.patch(
-        "azext_edge.edge.providers.orchestration.resources.instances._get_service_account_issuer",
-        autospec=True,
-        return_value="https://other/issuer",
-    )
-
-    assert resolve_oidc_issuer(arm_issuer, "namespace", "service-account") == arm_issuer
 
 
 @pytest.mark.parametrize(
