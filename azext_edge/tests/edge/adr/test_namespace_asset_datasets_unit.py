@@ -31,7 +31,12 @@ from azext_edge.edge.commands_namespaces import (
     remove_namespace_asset_dataset_point
 )
 
-from .namespace_helpers import check_dataset_configuration, check_destinations
+from .namespace_helpers import (
+    CONFIG_INPUT_FORMS,
+    check_dataset_configuration,
+    check_destinations,
+    materialize_config,
+)
 from .test_namespace_assets_unit import (
     get_namespace_asset_mgmt_uri, get_namespace_asset_record, add_device_get_call
 )
@@ -2852,5 +2857,306 @@ def test_add_namespace_asset_dataset_point_generalized_raises_on_duplicate(
             datapoint_name=datapoint_name,
             data_source="sensors/new",
             replace=False,
+            wait_sec=0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# unsupported-capability guard tests (datasets + datapoints)
+# ---------------------------------------------------------------------------
+
+
+def _dataset_metadata(connector_type: str, ds_schema=None, dp_schema=None, supported=("Mqtt",)) -> dict:
+    """Build a connector metadata payload for the generalized dataset/datapoint path."""
+    return {
+        "inboundEndpoints": [{
+            "endpointType": f"Microsoft.{connector_type}",
+            "datasets": {
+                "datasetConfigurationSchema": ds_schema,
+                "dataPoints": {"dataPointConfigurationSchema": dp_schema},
+                "destinations": {"supportedDestinations": list(supported)},
+            },
+        }]
+    }
+
+
+def _register_asset_and_device_get(
+    mocked_responses: responses,
+    asset: dict,
+    namespace_name: str,
+    resource_group_name: str,
+    asset_name: str,
+    connector_type: str,
+) -> None:
+    """Register the single asset GET + device GET used by the generalized front-door."""
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized(mocked_responses, asset, namespace_name, resource_group_name, connector_type)
+
+
+@pytest.mark.parametrize("command", [add_namespace_asset_dataset, update_namespace_asset_dataset])
+@pytest.mark.parametrize("config_form", CONFIG_INPUT_FORMS)
+def test_dataset_generalized_config_unsupported_capability_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    tmp_path,
+    config_form: str,
+    command,
+):
+    """--dataset-config for a connector whose metadata omits 'datasets' must raise a clear
+    'does not support datasets' error. Covers both add and update commands, for every accepted
+    input form (inline JSON, JSON file, YAML file)."""
+    asset_name = "gen-asset"
+    dataset_name = "target-ds"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    is_update = command is update_namespace_asset_dataset
+    datasets = [generate_dataset(dataset_name=dataset_name)] if is_update else []
+    asset = _build_asset_with_connector(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        connector_type=connector_type,
+        datasets=datasets,
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    metadata = _dataset_metadata(connector_type)
+    metadata["inboundEndpoints"][0].pop("datasets")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    config = materialize_config(
+        {"datasetConfiguration": {"anything": "goes"}}, config_form, tmp_path
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support datasets"):
+        command(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            dataset_name=dataset_name,
+            dataset_config=config,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize("command", [add_namespace_asset_dataset, update_namespace_asset_dataset])
+def test_dataset_generalized_no_config_unsupported_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    command,
+):
+    """Even with no --dataset-config and no --show-template, adding/updating a dataset on a
+    connector that doesn't support datasets must be blocked (DOE parity)."""
+    asset_name = "gen-asset"
+    dataset_name = "target-ds"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    is_update = command is update_namespace_asset_dataset
+    datasets = [generate_dataset(dataset_name=dataset_name)] if is_update else []
+    asset = _build_asset_with_connector(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        connector_type=connector_type,
+        datasets=datasets,
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    metadata = _dataset_metadata(connector_type)
+    metadata["inboundEndpoints"][0].pop("datasets")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support datasets"):
+        command(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            dataset_name=dataset_name,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize("command", [add_namespace_asset_dataset, update_namespace_asset_dataset])
+@pytest.mark.parametrize("template_mode", ["config", "schema"])
+def test_dataset_generalized_show_template_unsupported_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    template_mode: str,
+    command,
+):
+    """--show-template (config or schema) for a connector without a 'datasets' section must raise
+    rather than returning an empty template. Covers both add and update commands."""
+    asset_name = "gen-asset"
+    dataset_name = "target-ds"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    is_update = command is update_namespace_asset_dataset
+    datasets = [generate_dataset(dataset_name=dataset_name)] if is_update else []
+    asset = _build_asset_with_connector(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        connector_type=connector_type,
+        datasets=datasets,
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    metadata = _dataset_metadata(connector_type)
+    metadata["inboundEndpoints"][0].pop("datasets")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support datasets"):
+        command(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            dataset_name=dataset_name,
+            show_template=template_mode,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize("config_form", CONFIG_INPUT_FORMS)
+def test_add_datapoint_generalized_config_unsupported_capability_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    tmp_path,
+    config_form: str,
+):
+    """--datapoint-config for a connector whose metadata omits 'datasets.dataPoints' must raise a
+    clear 'does not support datapoints' error, for every accepted input form."""
+    asset_name = "gen-asset"
+    dataset_name = "sensor-ds"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        connector_type=connector_type,
+        datasets=[{"name": dataset_name, "dataSource": "s/src", "dataPoints": []}],
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    # datasets exists (datasets supported) but the nested 'dataPoints' capability is absent.
+    metadata = _dataset_metadata(connector_type)
+    metadata["inboundEndpoints"][0]["datasets"].pop("dataPoints")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    config = materialize_config(
+        {"datapointConfiguration": {"anything": "goes"}}, config_form, tmp_path
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support datapoints"):
+        add_namespace_asset_dataset_point(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            dataset_name=dataset_name,
+            datapoint_name="temp-dp",
+            data_source="sensors/temp",
+            datapoint_config=config,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize("template_mode", ["config", "schema"])
+def test_add_datapoint_generalized_show_template_unsupported_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    template_mode: str,
+):
+    """--show-template (config or schema) on the add-datapoint path for a connector without
+    'datasets.dataPoints' must raise rather than returning an empty template."""
+    asset_name = "gen-asset"
+    dataset_name = "sensor-ds"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        connector_type=connector_type,
+        datasets=[{"name": dataset_name, "dataSource": "s/src", "dataPoints": []}],
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    metadata = _dataset_metadata(connector_type)
+    metadata["inboundEndpoints"][0]["datasets"].pop("dataPoints")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support datapoints"):
+        add_namespace_asset_dataset_point(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            dataset_name=dataset_name,
+            datapoint_name="temp-dp",
+            data_source="sensors/temp",
+            show_template=template_mode,
             wait_sec=0,
         )

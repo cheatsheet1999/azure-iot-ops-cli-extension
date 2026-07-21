@@ -520,8 +520,13 @@ def test_generalized_management_lifecycle(asset_factory, tracked_files: List[str
         f"--instance {instance_name} -g {resource_group} "
         f"--name {mg_name} --show-template config"
     )
+    if not mg_template:
+        pytest.skip(
+            "Generalized management commands require connector metadata; no connector template "
+            "supporting management groups is installed for this connector."
+        )
     mg_config_arg = ""
-    if mg_template and mg_template.get("mgmtGroupConfig", {}).get("managementGroupConfiguration"):
+    if mg_template.get("mgmtGroupConfig", {}).get("managementGroupConfiguration"):
         assert "connectorType" in mg_template
         mg_config_file = _save_json_to_file(mg_template, tracked_files)
         mg_config_arg = f"--mgmt-group-config {mg_config_file}"
@@ -582,8 +587,13 @@ def test_generalized_management_lifecycle(asset_factory, tracked_files: List[str
         f"--instance {instance_name} -g {resource_group} --group {mg_name} "
         f"--name {action_name} --target-uri '{target_uri}' --show-template config"
     )
+    if not act_template:
+        pytest.skip(
+            "Generalized management commands require connector metadata; no connector template "
+            "supporting management actions is installed for this connector."
+        )
     act_config_arg = ""
-    if act_template and act_template.get("actionConfig", {}).get("actionConfiguration"):
+    if act_template.get("actionConfig", {}).get("actionConfiguration"):
         assert "connectorType" in act_template
         act_config_file = _save_json_to_file(act_template, tracked_files)
         act_config_arg = f"--action-config {act_config_file}"
