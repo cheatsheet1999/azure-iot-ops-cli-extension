@@ -17,7 +17,7 @@ from .base import (
     process_v1_pods,
     process_replicasets,
 )
-from .common import NAME_LABEL_FORMAT
+from .common import NAME_LABEL_FORMAT, RESOURCE_NAME_FIELD_FORMAT
 
 logger = get_logger(__name__)
 
@@ -33,6 +33,7 @@ AIO_MEDIA_PREFIX = "aio-media"
 
 # TODO: once this label is stabled, we can remove the other labels
 OPCUA_NAME_LABEL = NAME_LABEL_FORMAT.format(label="microsoft-iotoperations-opcuabroker")
+GDS_CA_STATE_FIELD_SELECTOR = RESOURCE_NAME_FIELD_FORMAT.format(name="aio-opc-ua-gds-ca-state")
 
 
 def fetch_pods(since_seconds: int = DAY_IN_SECONDS):
@@ -126,10 +127,17 @@ def fetch_services():
 
 
 def fetch_configmaps():
-    return process_config_maps(
+    processed = process_config_maps(
         directory_path=CONNECTORS_DIRECTORY_PATH,
         label_selector=OPCUA_NAME_LABEL,
     )
+    processed.extend(
+        process_config_maps(
+            directory_path=CONNECTORS_DIRECTORY_PATH,
+            field_selector=GDS_CA_STATE_FIELD_SELECTOR,
+        )
+    )
+    return processed
 
 
 def fetch_daemonsets():

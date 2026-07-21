@@ -11,9 +11,11 @@ from azext_edge.edge.common import OpsServiceType
 from azext_edge.edge.providers.support.connectors import (
     OPC_APP_LABEL,
     CONNECTORS_DIRECTORY_PATH,
+    GDS_CA_STATE_FIELD_SELECTOR,
     OPC_NAME_LABEL,
     OPC_NAME_VAR_LABEL,
     OPCUA_NAME_LABEL,
+    fetch_configmaps,
 )
 from azext_edge.tests.edge.support.test_support_unit import (
     assert_list_config_maps,
@@ -158,3 +160,24 @@ def test_create_bundle_connectors(
         label_selector=OPCUA_NAME_LABEL,
         directory_path=CONNECTORS_DIRECTORY_PATH,
     )
+
+
+def test_fetch_configmaps_includes_gds_state(mocker):
+    opcua_config_map = {"zinfo": "configmap.opcua.yaml"}
+    gds_config_map = {"zinfo": "configmap.aio-opc-ua-gds-ca-state.yaml"}
+    mocked_process_config_maps = mocker.patch(
+        "azext_edge.edge.providers.support.connectors.process_config_maps",
+        side_effect=[[opcua_config_map], [gds_config_map]],
+    )
+
+    assert fetch_configmaps() == [opcua_config_map, gds_config_map]
+    assert mocked_process_config_maps.call_args_list == [
+        mocker.call(
+            directory_path=CONNECTORS_DIRECTORY_PATH,
+            label_selector=OPCUA_NAME_LABEL,
+        ),
+        mocker.call(
+            directory_path=CONNECTORS_DIRECTORY_PATH,
+            field_selector=GDS_CA_STATE_FIELD_SELECTOR,
+        ),
+    ]
