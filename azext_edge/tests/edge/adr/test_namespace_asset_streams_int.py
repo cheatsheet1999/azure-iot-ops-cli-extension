@@ -341,14 +341,17 @@ def test_generalized_stream_lifecycle_custom(asset_factory, tracked_files: List[
         f"--name {stream_name} --show-template config"
     )
 
-    stream_config_arg = ""
-    if stream_template:
-        assert "connectorType" in stream_template
-        assert "streamConfig" in stream_template
-        stream_config = stream_template.copy()
-        stream_config["streamConfig"].pop("destinations", None)
-        stream_config_file = _save_json_to_file(stream_config, tracked_files)
-        stream_config_arg = f"--stream-config {stream_config_file}"
+    if not stream_template:
+        pytest.skip(
+            "Generalized stream commands require connector metadata; no connector template "
+            "supporting streams is installed for this connector."
+        )
+    assert "connectorType" in stream_template
+    assert "streamConfig" in stream_template
+    stream_config = stream_template.copy()
+    stream_config["streamConfig"].pop("destinations", None)
+    stream_config_file = _save_json_to_file(stream_config, tracked_files)
+    stream_config_arg = f"--stream-config {stream_config_file}"
 
     # 2. ADD stream
     added_stream = run(

@@ -15,6 +15,7 @@ from .export_import_helpers import (
     ensure_device_and_endpoint,
     validate_export_result,
 )
+from .namespace_helpers import _try_show_template
 
 pytestmark = [pytest.mark.rpsaas, pytest.mark.long_running]
 
@@ -130,6 +131,13 @@ def test_namespace_asset_stream_export_import_generalized(
         cmd_args = f"--asset {asset_name} --instance {instance_name} -g {resource_group}"
 
         with log.step(3, "Add Streams"):
+            # Generalized commands require connector metadata; skip when the connector has no
+            # template supporting streams (a bare add can no longer run metadata-free).
+            if not _try_show_template(f"{cmd_prefix} add {cmd_args} --name probe --show-template config"):
+                pytest.skip(
+                    "Generalized stream commands require connector metadata; no connector "
+                    "template supporting streams is installed for this connector."
+                )
             for name in stream_names:
                 log.run_command(f"{cmd_prefix} add {cmd_args} --name {name}")
             result = log.run_command(f"{cmd_prefix} list {cmd_args}")

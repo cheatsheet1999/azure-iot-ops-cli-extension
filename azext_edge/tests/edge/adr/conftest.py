@@ -13,6 +13,51 @@ from ...generators import generate_random_string, get_zeroed_subscription
 from ...helpers import run
 
 
+# Generalized asset sub-resource unit test modules. Their commands verify that the asset's
+# connector supports the requested capability (datasets, streams, etc.) on every add/update,
+# even when no config is supplied. That verification fetches connector metadata, so provide a
+# default that advertises support for all capabilities. Tests needing specific metadata (e.g.
+# unsupported-capability guards) override this by patching _get_connector_metadata themselves.
+_GENERALIZED_UNIT_MODULES = {
+    "test_namespace_asset_streams_unit",
+    "test_namespace_asset_events_unit",
+    "test_namespace_asset_datasets_unit",
+    "test_namespace_asset_mgmt_unit",
+}
+
+
+@pytest.fixture(autouse=True)
+def default_connector_metadata(request, mocker):
+    """Default connector metadata advertising every capability, scoped to generalized unit tests."""
+    module_name = request.module.__name__.rsplit(".", 1)[-1]
+    if module_name not in _GENERALIZED_UNIT_MODULES:
+        yield
+        return
+
+    def _fake(connector_type, instance_name=None, instance_resource_group=None):
+        return {
+            "inboundEndpoints": [{
+                "endpointType": connector_type,
+                "datasets": {
+                    "dataPoints": {"destinations": {"supportedDestinations": ["Mqtt"]}},
+                    "destinations": {"supportedDestinations": ["Mqtt"]},
+                },
+                "eventGroups": {
+                    "events": {"destinations": {"supportedDestinations": ["Mqtt"]}},
+                    "destinations": {"supportedDestinations": ["Mqtt"]},
+                },
+                "streams": {"destinations": {"supportedDestinations": ["Mqtt"]}},
+                "managementGroups": {"managementGroupActions": {}},
+            }]
+        }
+
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        side_effect=_fake,
+    )
+    yield
+
+
 @pytest.fixture()
 def require_namespace_init(require_init):
     """Extends require_init to ensure the instance has an ADR namespace reference.

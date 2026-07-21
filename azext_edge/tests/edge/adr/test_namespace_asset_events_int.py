@@ -812,14 +812,17 @@ def test_generalized_event_lifecycle_custom(asset_factory, tracked_files: List[s
         f"--name {eg_name} --show-template config"
     )
 
-    eg_config_arg = ""
-    if eg_template:
-        assert "connectorType" in eg_template
-        assert "eventGroupConfig" in eg_template
-        eg_config = eg_template.copy()
-        eg_config["eventGroupConfig"].pop("destinations", None)
-        eg_config_file = _save_json_to_file(eg_config, tracked_files)
-        eg_config_arg = f"--event-group-config {eg_config_file}"
+    if not eg_template:
+        pytest.skip(
+            "Generalized event commands require connector metadata; no connector template "
+            "supporting event groups is installed for this connector."
+        )
+    assert "connectorType" in eg_template
+    assert "eventGroupConfig" in eg_template
+    eg_config = eg_template.copy()
+    eg_config["eventGroupConfig"].pop("destinations", None)
+    eg_config_file = _save_json_to_file(eg_config, tracked_files)
+    eg_config_arg = f"--event-group-config {eg_config_file}"
 
     # 2. ADD event-group
     added_eg = run(
@@ -844,14 +847,17 @@ def test_generalized_event_lifecycle_custom(asset_factory, tracked_files: List[s
         f"--data-source '{ev_data_source}' --show-template config"
     )
 
-    event_config_arg = ""
-    if event_template:
-        assert "connectorType" in event_template
-        assert "eventConfig" in event_template
-        event_config = event_template.copy()
-        event_config["eventConfig"].pop("destinations", None)
-        event_config_file = _save_json_to_file(event_config, tracked_files)
-        event_config_arg = f"--event-config {event_config_file}"
+    if not event_template:
+        pytest.skip(
+            "Generalized event commands require connector metadata; no connector template "
+            "supporting events is installed for this connector."
+        )
+    assert "connectorType" in event_template
+    assert "eventConfig" in event_template
+    event_config = event_template.copy()
+    event_config["eventConfig"].pop("destinations", None)
+    event_config_file = _save_json_to_file(event_config, tracked_files)
+    event_config_arg = f"--event-config {event_config_file}"
 
     # 5. ADD event
     added_events = run(

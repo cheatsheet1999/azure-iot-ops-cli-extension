@@ -26,6 +26,30 @@ def _save_json_to_file(content: dict, tracked_files: List[str]) -> str:
     )
 
 
+# All accepted input forms for a connector-specific *-config parameter. Parametrize capability
+# guard tests over this so a single test proves the guard fires no matter how config is supplied.
+CONFIG_INPUT_FORMS = ["inline", "json_file", "yaml_file"]
+
+
+def materialize_config(config_dict: dict, config_form: str, tmp_path) -> str:
+    """Render a config dict as one of the accepted input forms (inline JSON, JSON file, YAML file).
+
+    Used to prove that connector-capability guards fire regardless of how the config is supplied.
+    """
+    if config_form == "inline":
+        return json.dumps(config_dict)
+    if config_form == "json_file":
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps(config_dict))
+        return str(path)
+    if config_form == "yaml_file":
+        import yaml
+        path = tmp_path / "config.yaml"
+        path.write_text(yaml.safe_dump(config_dict))
+        return str(path)
+    raise ValueError(f"Unknown config_form: {config_form}")
+
+
 def _try_show_template(cmd: str) -> dict:
     """Run a --show-template command and return the parsed result.
 

@@ -35,6 +35,7 @@ from azext_edge.edge.commands_namespaces import (
 from .test_namespace_assets_unit import (
     get_namespace_asset_mgmt_uri, get_namespace_asset_record, add_device_get_call
 )
+from .namespace_helpers import CONFIG_INPUT_FORMS, materialize_config
 from ...generators import generate_random_string
 
 
@@ -2372,3 +2373,293 @@ def test_add_namespace_asset_management_group_action_generalized_show_template_c
     assert "actionConfiguration" in action_cfg
     # Management actions have no destinations
     assert "destinations" not in action_cfg
+
+
+# ---------------------------------------------------------------------------
+# unsupported-capability guard tests (management groups + actions)
+# ---------------------------------------------------------------------------
+
+
+def _register_asset_and_device_get(
+    mocked_responses: responses,
+    asset: dict,
+    namespace_name: str,
+    resource_group_name: str,
+    asset_name: str,
+    connector_type: str,
+) -> None:
+    """Register the single asset GET + device GET used by the generalized front-door."""
+    mocked_responses.add(
+        responses.GET,
+        get_namespace_asset_mgmt_uri(namespace_name, resource_group_name, asset_name),
+        json=asset, status=200,
+    )
+    _add_device_get_for_generalized_mgmt(
+        mocked_responses, asset, namespace_name, resource_group_name, connector_type
+    )
+
+
+@pytest.mark.parametrize(
+    "command", [add_namespace_asset_management_group, update_namespace_asset_management_group]
+)
+@pytest.mark.parametrize("config_form", CONFIG_INPUT_FORMS)
+def test_management_group_generalized_config_unsupported_capability_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    tmp_path,
+    config_form: str,
+    command,
+):
+    """--mgmt-group-config for a connector whose metadata omits 'managementGroups' must raise a
+    clear 'does not support management groups' error. Covers both add and update commands, for
+    every accepted input form (inline JSON, JSON file, YAML file)."""
+    asset_name = "gen-asset"
+    group_name = "target-mg"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    is_update = command is update_namespace_asset_management_group
+    management_groups = [generate_management_group(group_name=group_name)] if is_update else []
+    asset = _build_asset_with_mgmt_groups(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        management_groups=management_groups,
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    metadata = _mgmt_metadata(connector_type)
+    metadata["inboundEndpoints"][0].pop("managementGroups")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    config = materialize_config(
+        {"managementGroupConfiguration": {"anything": "goes"}}, config_form, tmp_path
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support management groups"):
+        command(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            group_name=group_name,
+            mgmt_group_config=config,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize(
+    "command", [add_namespace_asset_management_group, update_namespace_asset_management_group]
+)
+def test_management_group_generalized_no_config_unsupported_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    command,
+):
+    """Even with no --mgmt-group-config and no --show-template, adding/updating a management group
+    on a connector that doesn't support management groups must be blocked (DOE parity)."""
+    asset_name = "gen-asset"
+    group_name = "target-mg"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    is_update = command is update_namespace_asset_management_group
+    management_groups = [generate_management_group(group_name=group_name)] if is_update else []
+    asset = _build_asset_with_mgmt_groups(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        management_groups=management_groups,
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    metadata = _mgmt_metadata(connector_type)
+    metadata["inboundEndpoints"][0].pop("managementGroups")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support management groups"):
+        command(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            group_name=group_name,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize(
+    "command", [add_namespace_asset_management_group, update_namespace_asset_management_group]
+)
+@pytest.mark.parametrize("template_mode", ["config", "schema"])
+def test_management_group_generalized_show_template_unsupported_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    template_mode: str,
+    command,
+):
+    """--show-template (config or schema) for a connector without a 'managementGroups' section
+    must raise rather than returning an empty template. Covers both add and update commands."""
+    asset_name = "gen-asset"
+    group_name = "target-mg"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    is_update = command is update_namespace_asset_management_group
+    management_groups = [generate_management_group(group_name=group_name)] if is_update else []
+    asset = _build_asset_with_mgmt_groups(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        management_groups=management_groups,
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    metadata = _mgmt_metadata(connector_type)
+    metadata["inboundEndpoints"][0].pop("managementGroups")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support management groups"):
+        command(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            group_name=group_name,
+            show_template=template_mode,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize("config_form", CONFIG_INPUT_FORMS)
+def test_add_management_action_generalized_config_unsupported_capability_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    tmp_path,
+    config_form: str,
+):
+    """--action-config for a connector whose metadata omits 'managementGroups.managementGroupActions'
+    must raise a clear 'does not support management actions' error, for every accepted input form."""
+    asset_name = "gen-asset"
+    group_name = "sensor-mg"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_mgmt_groups(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        management_groups=[{"name": group_name, "actions": []}],
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    # managementGroups exists (groups supported) but the nested actions capability is absent.
+    metadata = _mgmt_metadata(connector_type)
+    metadata["inboundEndpoints"][0]["managementGroups"].pop("managementGroupActions")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    config = materialize_config(
+        {"actionConfiguration": {"anything": "goes"}}, config_form, tmp_path
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support management actions"):
+        add_namespace_asset_management_group_action(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            group_name=group_name,
+            action_name="reboot-act",
+            target_uri="ns=2;s=Reboot",
+            action_config=config,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize("template_mode", ["config", "schema"])
+def test_add_management_action_generalized_show_template_unsupported_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    template_mode: str,
+):
+    """--show-template (config or schema) on the add-action path for a connector without
+    'managementGroups.managementGroupActions' must raise rather than returning an empty template."""
+    asset_name = "gen-asset"
+    group_name = "sensor-mg"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_mgmt_groups(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        management_groups=[{"name": group_name, "actions": []}],
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    metadata = _mgmt_metadata(connector_type)
+    metadata["inboundEndpoints"][0]["managementGroups"].pop("managementGroupActions")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support management actions"):
+        add_namespace_asset_management_group_action(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            group_name=group_name,
+            action_name="reboot-act",
+            target_uri="ns=2;s=Reboot",
+            show_template=template_mode,
+            wait_sec=0,
+        )
