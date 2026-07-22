@@ -46,8 +46,6 @@ from azext_edge.edge.providers.orchestration.upgrade2 import (
     OPS_APPLICATION_URI_CONFIG,
     OPS_APPLICATION_URI_PREFIX,
     OPS_EXTENSION_NAME_PREFIX,
-    OPS_GDS_MANAGER_CONFIG,
-    OPS_GDS_MANAGER_DEFAULT,
     OPS_SUBJECT_NAME_CONFIG,
     OPS_SUBJECT_NAME_PREFIX,
 )
@@ -94,7 +92,6 @@ DEFAULT_OPS_SUBJECT_NAME = f"{OPS_SUBJECT_NAME_PREFIX}{DEFAULT_OPS_EXTENSION_SUF
 DEFAULT_OPS_CONFIG = {
     OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI,
     OPS_SUBJECT_NAME_CONFIG: DEFAULT_OPS_SUBJECT_NAME,
-    OPS_GDS_MANAGER_CONFIG: OPS_GDS_MANAGER_DEFAULT,
 }
 
 expected_default_registry = {
@@ -1024,10 +1021,7 @@ def assert_operation_order(target_scenario: UpgradeScenario, upgrade_result: Lis
                 EXTENSION_TYPE_OPS: build_extension_props(
                     EXTENSION_TYPE_OPS,
                     version=BUILT_IN_VALUE,
-                    config={
-                        OPS_GDS_MANAGER_CONFIG: OPS_GDS_MANAGER_DEFAULT,
-                        OPS_SUBJECT_NAME_CONFIG: DEFAULT_OPS_SUBJECT_NAME,
-                    },
+                    config={OPS_SUBJECT_NAME_CONFIG: DEFAULT_OPS_SUBJECT_NAME},
                 ),
             },
         ),
@@ -2454,20 +2448,7 @@ def build_extension_upgrade_state(
         pytest.param(
             EXTENSION_TYPE_OPS,
             "1.4.41",
-            {
-                OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI,
-                OPS_SUBJECT_NAME_CONFIG: "CN=custom-subject",
-            },
-            {OPS_GDS_MANAGER_CONFIG: OPS_GDS_MANAGER_DEFAULT},
-            id="ops-gds-only",
-        ),
-        pytest.param(
-            EXTENSION_TYPE_OPS,
-            "1.4.41",
-            {
-                OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI,
-                OPS_GDS_MANAGER_CONFIG: "false",
-            },
+            {OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI},
             {OPS_SUBJECT_NAME_CONFIG: DEFAULT_OPS_SUBJECT_NAME},
             id="ops-subject-only",
         ),
@@ -2508,15 +2489,9 @@ def test_2607_config_migration_backfills_only_missing_settings(
             "1.3.137",
             "1.4.41",
             {OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI},
-            [
-                f"{OPS_SUBJECT_NAME_CONFIG}=CN=custom-subject",
-                f"{OPS_GDS_MANAGER_CONFIG}=false",
-            ],
-            {
-                OPS_SUBJECT_NAME_CONFIG: "CN=custom-subject",
-                OPS_GDS_MANAGER_CONFIG: "false",
-            },
-            id="ops-values",
+            [f"{OPS_SUBJECT_NAME_CONFIG}=CN=custom-subject"],
+            {OPS_SUBJECT_NAME_CONFIG: "CN=custom-subject"},
+            id="ops-subject",
         ),
         pytest.param(
             EXTENSION_TYPE_CM,
@@ -2540,7 +2515,6 @@ def test_2607_config_migration_backfills_only_missing_settings(
             {OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI},
             [f"{OPS_APPLICATION_URI_CONFIG}={OPS_APPLICATION_URI_PREFIX}xy789"],
             {
-                OPS_GDS_MANAGER_CONFIG: OPS_GDS_MANAGER_DEFAULT,
                 OPS_SUBJECT_NAME_CONFIG: f"{OPS_SUBJECT_NAME_PREFIX}xy789",
                 OPS_APPLICATION_URI_CONFIG: f"{OPS_APPLICATION_URI_PREFIX}xy789",
             },
@@ -2552,10 +2526,7 @@ def test_2607_config_migration_backfills_only_missing_settings(
             "1.4.41",
             {OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI},
             [OPS_APPLICATION_URI_CONFIG],
-            {
-                OPS_GDS_MANAGER_CONFIG: OPS_GDS_MANAGER_DEFAULT,
-                OPS_APPLICATION_URI_CONFIG: None,
-            },
+            {OPS_APPLICATION_URI_CONFIG: None},
             id="application-uri-removal",
         ),
     ],
@@ -2590,7 +2561,6 @@ def test_ops_2607_config_migration_uses_desired_application_uri():
     assert patch == {
         "properties": {
             "configurationSettings": {
-                OPS_GDS_MANAGER_CONFIG: OPS_GDS_MANAGER_DEFAULT,
                 OPS_SUBJECT_NAME_CONFIG: f"{OPS_SUBJECT_NAME_PREFIX}{desired_suffix}",
                 OPS_APPLICATION_URI_CONFIG: desired_uri,
             }
@@ -2626,13 +2596,12 @@ def test_ops_2607_config_migration_subject_fallback(
         extension_name=extension_name,
     )
 
-    expected_config = {
-        OPS_GDS_MANAGER_CONFIG: OPS_GDS_MANAGER_DEFAULT
-    }
+    expected_config = {}
     if expected_subject:
         expected_config[OPS_SUBJECT_NAME_CONFIG] = DEFAULT_OPS_SUBJECT_NAME
 
-    assert state.get_patch()["properties"]["configurationSettings"] == expected_config
+    expected_patch = {"properties": {"configurationSettings": expected_config}} if expected_config else {}
+    assert state.get_patch() == expected_patch
 
 
 @pytest.mark.parametrize(
@@ -2673,7 +2642,6 @@ def test_ops_2607_config_migration_preserves_mqtt_migration():
     )
 
     assert state.get_patch()["properties"]["configurationSettings"] == {
-        OPS_GDS_MANAGER_CONFIG: OPS_GDS_MANAGER_DEFAULT,
         OPS_SUBJECT_NAME_CONFIG: DEFAULT_OPS_SUBJECT_NAME,
         "dataFlows.values.tinyKube.mqttBroker.hostName": "aio-broker.azure-iot-operations",
         "dataFlows.values.tinyKube.mqttBroker.port": "18883",

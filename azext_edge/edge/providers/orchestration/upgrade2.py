@@ -35,7 +35,7 @@ from .common import (
     EXTENSION_TYPE_TO_MONIKER_MAP,
     MIN_INSTANCE_VERSION_FOR_CM_MIGRATE,
     MIN_CM_VERSION_FOR_SECRET_TARGETS,
-    MIN_INSTANCE_VERSION_FOR_GDS_MANAGER,
+    MIN_INSTANCE_VERSION_FOR_OPC_UA_SUBJECT,
     MIN_INSTANCE_VERSION_V1_FOR_V2_UPGRADE,
     MIN_INSTANCE_VERSION_V2,
     PROVISIONING_STATE_SUCCESS,
@@ -58,8 +58,6 @@ OPS_APPLICATION_URI_PREFIX = "urn:microsoft.com:aio:opc:ua:broker:"
 OPS_EXTENSION_NAME_PREFIX = "azure-iot-operations-"
 OPS_SUBJECT_NAME_CONFIG = "connectors.values.securityPki.subjectName"
 OPS_SUBJECT_NAME_PREFIX = "CN=aio-opc-opcuabroker-"
-OPS_GDS_MANAGER_CONFIG = "connectors.values.gdsManager.enabled"
-OPS_GDS_MANAGER_DEFAULT = "true"
 OPS_EXTENSION_SUFFIX_LENGTH = 5
 
 
@@ -1133,9 +1131,8 @@ class ExtensionUpgradeState:
         target_config = {}
 
         if self.moniker == EXTENSION_MONIKER_OPS and target_version >= self.semver.parse(
-            MIN_INSTANCE_VERSION_FOR_GDS_MANAGER
+            MIN_INSTANCE_VERSION_FOR_OPC_UA_SUBJECT
         ):
-            target_config[OPS_GDS_MANAGER_CONFIG] = OPS_GDS_MANAGER_DEFAULT
             application_uri = current_config.get(OPS_APPLICATION_URI_CONFIG)
             application_uri_is_configured = OPS_APPLICATION_URI_CONFIG in current_config
             if OPS_APPLICATION_URI_CONFIG in self.config_delta:
