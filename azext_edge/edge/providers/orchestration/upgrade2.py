@@ -34,6 +34,8 @@ from .common import (
     EXTENSION_TYPE_PLATFORM,
     EXTENSION_TYPE_TO_MONIKER_MAP,
     MIN_INSTANCE_VERSION_FOR_CM_MIGRATE,
+    MIN_CM_VERSION_FOR_SECRET_TARGETS,
+    MIN_INSTANCE_VERSION_FOR_GDS_MANAGER,
     MIN_INSTANCE_VERSION_V1_FOR_V2_UPGRADE,
     MIN_INSTANCE_VERSION_V2,
     PROVISIONING_STATE_SUCCESS,
@@ -42,7 +44,7 @@ from .common import (
 from .migration import SecretSyncMigrationManager
 from .resources import RegistryEndpoints
 from .resources.instances import SECRET_SYNC_RESOURCE_TYPE, SPC_RESOURCE_TYPE, Instances
-from .targets import InitTargets
+from .targets import DEFAULT_CM_SECRET_TARGET_CONFIG, InitTargets, get_default_cm_config
 
 logger = get_logger(__name__)
 
@@ -50,6 +52,15 @@ console = Console()
 
 
 IOT_OPS_DELAY = 30  # seconds
+
+OPS_APPLICATION_URI_CONFIG = "connectors.values.securityPki.applicationUri"
+OPS_APPLICATION_URI_PREFIX = "urn:microsoft.com:aio:opc:ua:broker:"
+OPS_EXTENSION_NAME_PREFIX = "azure-iot-operations-"
+OPS_SUBJECT_NAME_CONFIG = "connectors.values.securityPki.subjectName"
+OPS_SUBJECT_NAME_PREFIX = "CN=aio-opc-opcuabroker-"
+OPS_GDS_MANAGER_CONFIG = "connectors.values.gdsManager.enabled"
+OPS_GDS_MANAGER_DEFAULT = "true"
+OPS_EXTENSION_SUFFIX_LENGTH = 5
 
 
 class ExtensionOperation(Enum):
@@ -361,6 +372,9 @@ class UpgradeManager:
             cm_versions = self.targets.get_extension_versions(True).get(EXTENSION_MONIKER_CM, {})
             version = cm_versions.get("version", "0.6.2")
 
+        config_settings = dict(ext.desired_config or get_default_cm_config())
+        config_settings.update(ext.override.config)
+
         return {
             "properties": {
                 "extensionType": ext.extension_type or EXTENSION_TYPE_CM,
@@ -368,7 +382,7 @@ class UpgradeManager:
                 "releaseTrain": ext.desired_version[1] or "stable",
                 "autoUpgradeMinorVersion": False,
                 "scope": {"cluster": {"releaseNamespace": "cert-manager"}},
-                "configurationSettings": ext.desired_config or {"AgentOperationTimeoutInMinutes": "20"},
+                "configurationSettings": config_settings,
             },
             "identity": {"type": "SystemAssigned"},
         }
@@ -1009,6 +1023,8 @@ class ExtensionUpgradeState:
         if self._has_delta_in_config():
             config_settings = {}
 
+            config_settings.update(self._get_2607_config_delta())
+
             # Apply config delta first (respects sync_mode)
             config_settings.update(self.config_delta)
 
@@ -1108,6 +1124,52 @@ class ExtensionUpgradeState:
             self._mqtt_migration_config = mqtt_config
         return self._mqtt_migration_config
 
+    def _get_2607_config_delta(self) -> Dict[str, str]:
+        if not self.extension or not self.desired_version[0]:
+            return {}
+
+        target_version = self.semver.parse(self.desired_version[0])
+        current_config = self.extension.get("properties", {}).get("configurationSettings", {})
+        target_config = {}
+
+        if self.moniker == EXTENSION_MONIKER_OPS and target_version >= self.semver.parse(
+            MIN_INSTANCE_VERSION_FOR_GDS_MANAGER
+        ):
+            target_config[OPS_GDS_MANAGER_CONFIG] = OPS_GDS_MANAGER_DEFAULT
+            application_uri = current_config.get(OPS_APPLICATION_URI_CONFIG)
+            application_uri_is_configured = OPS_APPLICATION_URI_CONFIG in current_config
+            if OPS_APPLICATION_URI_CONFIG in self.config_delta:
+                application_uri = self.config_delta[OPS_APPLICATION_URI_CONFIG]
+                application_uri_is_configured = True
+            if OPS_APPLICATION_URI_CONFIG in self.override.config:
+                application_uri = self.override.config[OPS_APPLICATION_URI_CONFIG]
+                application_uri_is_configured = True
+
+            suffix = ""
+            if isinstance(application_uri, str) and application_uri.startswith(OPS_APPLICATION_URI_PREFIX):
+                suffix = application_uri.removeprefix(OPS_APPLICATION_URI_PREFIX)
+            elif not application_uri_is_configured:
+                extension_name = self.extension.get("name")
+                if isinstance(extension_name, str) and extension_name.startswith(OPS_EXTENSION_NAME_PREFIX):
+                    suffix = extension_name.removeprefix(OPS_EXTENSION_NAME_PREFIX)
+
+            if (
+                len(suffix) == OPS_EXTENSION_SUFFIX_LENGTH
+                and suffix.isascii()
+                and suffix.isalnum()
+            ):
+                target_config[OPS_SUBJECT_NAME_CONFIG] = f"{OPS_SUBJECT_NAME_PREFIX}{suffix}"
+        elif self.moniker == EXTENSION_MONIKER_CM and target_version >= self.semver.parse(
+            MIN_CM_VERSION_FOR_SECRET_TARGETS
+        ):
+            target_config = DEFAULT_CM_SECRET_TARGET_CONFIG
+
+        return calculate_config_delta(
+            current=current_config,
+            target=target_config,
+            sync_mode=ConfigSyncModeType.ADD.value,
+        )
+
     def _has_delta_in_version(self) -> bool:
         # Can't have delta if no current version
         if not self.extension:
@@ -1175,7 +1237,7 @@ class ExtensionUpgradeState:
                         has_mqtt_migration = True
                         break
 
-        return self.override.config or self.config_delta or has_mqtt_migration
+        return self.override.config or self.config_delta or has_mqtt_migration or self._get_2607_config_delta()
 
     def _has_non_success_state(self) -> bool:
         """

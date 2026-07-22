@@ -1924,6 +1924,8 @@ def load_iotops_help():
                       The default config settings for cert-manager are:
                         AgentOperationTimeoutInMinutes=20
                         global.telemetry.enabled=true
+                        trust-manager.secretTargets.enabled=false
+                        trust-manager.secretTargets.authorizedSecretsAll=false
 
         examples:
         - name: Usage with minimum input. This form will deploy the IoT Operations foundation layer.
