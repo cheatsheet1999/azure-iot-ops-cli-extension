@@ -49,12 +49,12 @@ class TemplateBlueprint(NamedTuple):
 
 
 TEMPLATE_BLUEPRINT_ENABLEMENT = TemplateBlueprint(
-    commit_id="e31ffadb87599430564995ed783fa7a9b59fbb3a",
+    commit_id="18e6821d7dac3e85dbf6ff4d0bba1510aaf3aab0",
     content={
         "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
         "languageVersion": "2.0",
         "contentVersion": "1.0.0.0",
-        "metadata": {"_generator": {"name": "bicep", "version": "0.44.1.10279", "templateHash": "7441326017904271928"}},
+        "metadata": {"_generator": {"name": "bicep", "version": "0.45.15.27210", "templateHash": "381872897952304332"}},
         "definitions": {
             "_1.AdvancedConfig": {
                 "type": "object",
@@ -75,6 +75,14 @@ TEMPLATE_BLUEPRINT_ENABLEMENT = TemplateBlueprint(
                             "telemetry": {
                                 "type": "object",
                                 "properties": {"enabled": {"type": "string", "nullable": True}},
+                                "nullable": True,
+                            },
+                            "secretTargets": {
+                                "type": "object",
+                                "properties": {
+                                    "enabled": {"type": "string", "nullable": True},
+                                    "authorizedSecretsAll": {"type": "string", "nullable": True},
+                                },
                                 "nullable": True,
                             },
                         },
@@ -676,7 +684,7 @@ TEMPLATE_BLUEPRINT_ENABLEMENT = TemplateBlueprint(
             "advancedConfig": {"$ref": "#/definitions/_1.AdvancedConfig", "defaultValue": {}},
         },
         "variables": {
-            "VERSIONS": {"certManager": "0.13.3", "secretStore": "1.5.0"},
+            "VERSIONS": {"certManager": "0.14.0", "secretStore": "1.5.1"},
             "TRAINS": {"certManager": "stable", "secretStore": "stable"},
         },
         "resources": {
@@ -702,6 +710,8 @@ TEMPLATE_BLUEPRINT_ENABLEMENT = TemplateBlueprint(
                     "configurationSettings": {
                         "AgentOperationTimeoutInMinutes": "20",
                         "global.telemetry.enabled": "[coalesce(tryGet(tryGet(tryGet(parameters('advancedConfig'), 'certManager'), 'telemetry'), 'enabled'), 'true')]",
+                        "trust-manager.secretTargets.enabled": "[coalesce(tryGet(tryGet(tryGet(parameters('advancedConfig'), 'certManager'), 'secretTargets'), 'enabled'), 'false')]",
+                        "trust-manager.secretTargets.authorizedSecretsAll": "[coalesce(tryGet(tryGet(tryGet(parameters('advancedConfig'), 'certManager'), 'secretTargets'), 'authorizedSecretsAll'), 'false')]",
                     },
                 },
             },
@@ -754,13 +764,13 @@ TEMPLATE_BLUEPRINT_ENABLEMENT = TemplateBlueprint(
 )
 
 TEMPLATE_BLUEPRINT_INSTANCE = TemplateBlueprint(
-    commit_id="bb2836289a5eca24eed43ae65b687afde3e630f8",
+    commit_id="8e8643fb4af5ae0724f4987e8bf85c094b6cee6f",
     content={
         "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
         "languageVersion": "2.0",
         "contentVersion": "1.0.0.0",
         "metadata": {
-            "_generator": {"name": "bicep", "version": "0.44.1.10279", "templateHash": "9460116843817118827"}
+            "_generator": {"name": "bicep", "version": "0.45.15.27210", "templateHash": "10091655467238651388"}
         },
         "definitions": {
             "_1.AdvancedConfig": {
@@ -782,6 +792,14 @@ TEMPLATE_BLUEPRINT_INSTANCE = TemplateBlueprint(
                             "telemetry": {
                                 "type": "object",
                                 "properties": {"enabled": {"type": "string", "nullable": True}},
+                                "nullable": True,
+                            },
+                            "secretTargets": {
+                                "type": "object",
+                                "properties": {
+                                    "enabled": {"type": "string", "nullable": True},
+                                    "authorizedSecretsAll": {"type": "string", "nullable": True},
+                                },
                                 "nullable": True,
                             },
                         },
@@ -1444,10 +1462,11 @@ TEMPLATE_BLUEPRINT_INSTANCE = TemplateBlueprint(
             "brokerConfig": {"$ref": "#/definitions/_1.BrokerConfig", "nullable": True},
             "trustConfig": {"$ref": "#/definitions/_1.TrustConfig", "defaultValue": {"source": "SelfSigned"}},
             "defaultDataflowInstanceCount": {"type": "int", "defaultValue": 1},
+            "enableGdsManager": {"type": "bool", "defaultValue": True},
             "advancedConfig": {"$ref": "#/definitions/_1.AdvancedConfig", "defaultValue": {}},
         },
         "variables": {
-            "VERSIONS": {"iotOperations": "1.3.137"},
+            "VERSIONS": {"iotOperations": "1.4.41"},
             "TRAINS": {"iotOperations": "stable"},
             "HASH": "[coalesce(tryGet(parameters('advancedConfig'), 'resourceSuffix'), take(uniqueString(resourceGroup().id, parameters('clusterName'), parameters('clusterNamespace')), 5))]",
             "AIO_EXTENSION_SUFFIX": "[take(uniqueString(resourceId('Microsoft.Kubernetes/connectedClusters', parameters('clusterName'))), 5)]",
@@ -1478,6 +1497,8 @@ TEMPLATE_BLUEPRINT_INSTANCE = TemplateBlueprint(
                 "connectors.values.mqttBroker.address": "[format('mqtts://{0}:{1}', variables('MQTT_SETTINGS').brokerListenerHost, variables('MQTT_SETTINGS').brokerListenerPort)]",
                 "connectors.values.mqttBroker.serviceAccountTokenAudience": "[variables('MQTT_SETTINGS').serviceAccountAudience]",
                 "connectors.values.securityPki.applicationUri": "[format('urn:microsoft.com:aio:opc:ua:broker:{0}', variables('AIO_EXTENSION_SUFFIX'))]",
+                "connectors.values.securityPki.subjectName": "[format('CN=aio-opc-opcuabroker-{0}', variables('AIO_EXTENSION_SUFFIX'))]",
+                "connectors.values.gdsManager.enabled": "[if(parameters('enableGdsManager'), 'true', 'false')]",
                 "dataFlows.values.tinyKube.mqttBroker.hostName": "[variables('MQTT_SETTINGS').brokerListenerHost]",
                 "dataFlows.values.tinyKube.mqttBroker.port": "[variables('MQTT_SETTINGS').brokerListenerPort]",
                 "dataFlows.values.tinyKube.mqttBroker.authentication.serviceAccountTokenAudience": "[variables('MQTT_SETTINGS').serviceAccountAudience]",
@@ -1533,7 +1554,7 @@ TEMPLATE_BLUEPRINT_INSTANCE = TemplateBlueprint(
             },
             "aioInstance": {
                 "type": "Microsoft.IoTOperations/instances",
-                "apiVersion": "2026-03-01",
+                "apiVersion": "2026-07-01",
                 "name": "[coalesce(parameters('aioInstanceName'), format('aio-{0}', variables('HASH')))]",
                 "location": "[parameters('clusterLocation')]",
                 "extendedLocation": "[variables('extendedLocation')]",
@@ -1548,7 +1569,7 @@ TEMPLATE_BLUEPRINT_INSTANCE = TemplateBlueprint(
             },
             "broker": {
                 "type": "Microsoft.IoTOperations/instances/brokers",
-                "apiVersion": "2026-03-01",
+                "apiVersion": "2026-07-01",
                 "name": "[format('{0}/{1}', coalesce(parameters('aioInstanceName'), format('aio-{0}', variables('HASH'))), 'default')]",
                 "extendedLocation": "[variables('extendedLocation')]",
                 "properties": {
@@ -1572,7 +1593,7 @@ TEMPLATE_BLUEPRINT_INSTANCE = TemplateBlueprint(
             },
             "brokerAuthn": {
                 "type": "Microsoft.IoTOperations/instances/brokers/authentications",
-                "apiVersion": "2026-03-01",
+                "apiVersion": "2026-07-01",
                 "name": "[format('{0}/{1}/{2}', coalesce(parameters('aioInstanceName'), format('aio-{0}', variables('HASH'))), 'default', 'default')]",
                 "extendedLocation": "[variables('extendedLocation')]",
                 "properties": {
@@ -1589,7 +1610,7 @@ TEMPLATE_BLUEPRINT_INSTANCE = TemplateBlueprint(
             },
             "brokerListener": {
                 "type": "Microsoft.IoTOperations/instances/brokers/listeners",
-                "apiVersion": "2026-03-01",
+                "apiVersion": "2026-07-01",
                 "name": "[format('{0}/{1}/{2}', coalesce(parameters('aioInstanceName'), format('aio-{0}', variables('HASH'))), 'default', 'default')]",
                 "extendedLocation": "[variables('extendedLocation')]",
                 "properties": {
@@ -1616,7 +1637,7 @@ TEMPLATE_BLUEPRINT_INSTANCE = TemplateBlueprint(
             },
             "dataflowProfile": {
                 "type": "Microsoft.IoTOperations/instances/dataflowProfiles",
-                "apiVersion": "2026-03-01",
+                "apiVersion": "2026-07-01",
                 "name": "[format('{0}/{1}', coalesce(parameters('aioInstanceName'), format('aio-{0}', variables('HASH'))), 'default')]",
                 "extendedLocation": "[variables('extendedLocation')]",
                 "properties": {"instanceCount": "[parameters('defaultDataflowInstanceCount')]"},
@@ -1624,7 +1645,7 @@ TEMPLATE_BLUEPRINT_INSTANCE = TemplateBlueprint(
             },
             "dataflowEndpoint": {
                 "type": "Microsoft.IoTOperations/instances/dataflowEndpoints",
-                "apiVersion": "2026-03-01",
+                "apiVersion": "2026-07-01",
                 "name": "[format('{0}/{1}', coalesce(parameters('aioInstanceName'), format('aio-{0}', variables('HASH'))), 'default')]",
                 "extendedLocation": "[variables('extendedLocation')]",
                 "properties": {
@@ -1647,7 +1668,7 @@ TEMPLATE_BLUEPRINT_INSTANCE = TemplateBlueprint(
             },
             "artifactRegistryEndpoint": {
                 "type": "Microsoft.IoTOperations/instances/registryEndpoints",
-                "apiVersion": "2026-03-01",
+                "apiVersion": "2026-07-01",
                 "name": "[format('{0}/{1}', coalesce(parameters('aioInstanceName'), format('aio-{0}', variables('HASH'))), 'default')]",
                 "extendedLocation": "[variables('extendedLocation')]",
                 "properties": {
