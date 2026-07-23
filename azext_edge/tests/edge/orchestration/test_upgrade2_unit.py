@@ -39,15 +39,7 @@ from azext_edge.edge.providers.orchestration.resources.instances import (
 from azext_edge.edge.providers.orchestration.targets import (
     CM_AUTHORIZED_SECRETS_ALL_CONFIG,
     CM_SECRET_TARGETS_ENABLED_CONFIG,
-    DEFAULT_CM_SECRET_TARGET_CONFIG,
     InitTargets,
-)
-from azext_edge.edge.providers.orchestration.upgrade2 import (
-    OPS_APPLICATION_URI_CONFIG,
-    OPS_APPLICATION_URI_PREFIX,
-    OPS_EXTENSION_NAME_PREFIX,
-    OPS_SUBJECT_NAME_CONFIG,
-    OPS_SUBJECT_NAME_PREFIX,
 )
 from azext_edge.edge.util import parse_kvp_nargs
 from azext_edge.edge.util.machinery import scoped_semver_import
@@ -84,15 +76,6 @@ HTTP_STATUS_SERVICE_UNAVAILABLE = 503
 
 DEFAULT_SPC_NAME = "spc-ops-abc123"
 OPC_UA_SPC_NAME = "opc-ua-connector"
-
-DEFAULT_OPS_EXTENSION_SUFFIX = "ab12c"
-DEFAULT_OPS_APPLICATION_URI = f"{OPS_APPLICATION_URI_PREFIX}{DEFAULT_OPS_EXTENSION_SUFFIX}"
-DEFAULT_OPS_SUBJECT_NAME = f"{OPS_SUBJECT_NAME_PREFIX}{DEFAULT_OPS_EXTENSION_SUFFIX}"
-
-DEFAULT_OPS_CONFIG = {
-    OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI,
-    OPS_SUBJECT_NAME_CONFIG: DEFAULT_OPS_SUBJECT_NAME,
-}
 
 expected_default_registry = {
     "name": "default",
@@ -254,19 +237,12 @@ class UpgradeScenario:
             if ext_type == EXTENSION_TYPE_OPS and train.lower() != "stable":
                 train = "stable"
 
-            # Default scenarios represent extensions already aligned with the current release.
-            config_settings = {}
-            if ext_type == EXTENSION_TYPE_OPS:
-                config_settings = deepcopy(DEFAULT_OPS_CONFIG)
-            elif ext_type == EXTENSION_TYPE_CM:
-                config_settings = deepcopy(DEFAULT_CM_SECRET_TARGET_CONFIG)
-
             self.extensions[ext_type] = {
                 "properties": {
                     "extensionType": ext_type,
                     "version": vers,
                     "releaseTrain": train,
-                    "configurationSettings": config_settings,
+                    "configurationSettings": {},
                     "provisioningState": PROVISIONING_STATE_SUCCESS,
                 },
                 "name": ext_moniker,
@@ -1003,27 +979,6 @@ def assert_operation_order(target_scenario: UpgradeScenario, upgrade_result: Lis
                 ext_type=EXTENSION_TYPE_CM, ext_vers="0.5.0"
             ),
             {EXTENSION_TYPE_CM: build_extension_props(EXTENSION_TYPE_CM, version=BUILT_IN_VALUE)},
-        ),
-        (
-            UpgradeScenario("Version upgrade: 2607 configuration migration")
-            .set_extension(
-                ext_type=EXTENSION_TYPE_OPS,
-                ext_vers="1.3.137",
-                config_settings={OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI},
-            )
-            .set_extension(ext_type=EXTENSION_TYPE_CM, ext_vers="0.13.3", config_settings={}),
-            {
-                EXTENSION_TYPE_CM: build_extension_props(
-                    EXTENSION_TYPE_CM,
-                    version=BUILT_IN_VALUE,
-                    config=DEFAULT_CM_SECRET_TARGET_CONFIG,
-                ),
-                EXTENSION_TYPE_OPS: build_extension_props(
-                    EXTENSION_TYPE_OPS,
-                    version=BUILT_IN_VALUE,
-                    config={OPS_SUBJECT_NAME_CONFIG: DEFAULT_OPS_SUBJECT_NAME},
-                ),
-            },
         ),
         (
             UpgradeScenario("Version upgrade: Compatible ops upgrade")
@@ -2406,249 +2361,6 @@ def assert_displays(
         assert len(print_calls) > 0, "Expected Console.print for table display"
 
 
-def build_extension_upgrade_state(
-    ext_type: str,
-    current_version: str,
-    desired_version: Optional[str],
-    config_settings: Optional[dict] = None,
-    desired_config: Optional[dict] = None,
-    override_config: Optional[List[str]] = None,
-    extension_name: Optional[str] = None,
-):
-    from azext_edge.edge.providers.orchestration.upgrade2 import (
-        ConfigOverride,
-        ExtensionUpgradeState,
-    )
-
-    return ExtensionUpgradeState(
-        extension={
-            "name": extension_name
-            or (
-                f"{OPS_EXTENSION_NAME_PREFIX}{DEFAULT_OPS_EXTENSION_SUFFIX}"
-                if ext_type == EXTENSION_TYPE_OPS
-                else "cert-manager"
-            ),
-            "properties": {
-                "extensionType": ext_type,
-                "version": current_version,
-                "releaseTrain": "stable",
-                "configurationSettings": config_settings if config_settings is not None else {},
-                "provisioningState": PROVISIONING_STATE_SUCCESS,
-            }
-        },
-        desired_version_map={"version": desired_version, "train": "stable"},
-        desired_config=desired_config,
-        override=ConfigOverride(config=override_config),
-    )
-
-
-@pytest.mark.parametrize(
-    "ext_type,version,current_config,expected_config",
-    [
-        pytest.param(
-            EXTENSION_TYPE_OPS,
-            "1.4.41",
-            {OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI},
-            {OPS_SUBJECT_NAME_CONFIG: DEFAULT_OPS_SUBJECT_NAME},
-            id="ops-subject-only",
-        ),
-        pytest.param(
-            EXTENSION_TYPE_CM,
-            "0.14.0",
-            {CM_SECRET_TARGETS_ENABLED_CONFIG: "true"},
-            {CM_AUTHORIZED_SECRETS_ALL_CONFIG: "false"},
-            id="cm-authorized-secrets-only",
-        ),
-        pytest.param(
-            EXTENSION_TYPE_CM,
-            "0.14.0",
-            {CM_AUTHORIZED_SECRETS_ALL_CONFIG: "true"},
-            {CM_SECRET_TARGETS_ENABLED_CONFIG: "false"},
-            id="cm-secret-targets-only",
-        ),
-    ],
-)
-def test_2607_config_migration_backfills_only_missing_settings(
-    ext_type, version, current_config, expected_config
-):
-    state = build_extension_upgrade_state(
-        ext_type=ext_type,
-        current_version=version,
-        desired_version=version,
-        config_settings=current_config,
-    )
-
-    assert state.get_patch() == {"properties": {"configurationSettings": expected_config}}
-
-
-@pytest.mark.parametrize(
-    "ext_type,current_version,desired_version,current_config,override_config,expected_config",
-    [
-        pytest.param(
-            EXTENSION_TYPE_OPS,
-            "1.3.137",
-            "1.4.41",
-            {OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI},
-            [f"{OPS_SUBJECT_NAME_CONFIG}=CN=custom-subject"],
-            {OPS_SUBJECT_NAME_CONFIG: "CN=custom-subject"},
-            id="ops-subject",
-        ),
-        pytest.param(
-            EXTENSION_TYPE_CM,
-            "0.13.3",
-            "0.14.0",
-            {},
-            [
-                f"{CM_SECRET_TARGETS_ENABLED_CONFIG}=true",
-                f"{CM_AUTHORIZED_SECRETS_ALL_CONFIG}=true",
-            ],
-            {
-                CM_SECRET_TARGETS_ENABLED_CONFIG: "true",
-                CM_AUTHORIZED_SECRETS_ALL_CONFIG: "true",
-            },
-            id="cm-values",
-        ),
-        pytest.param(
-            EXTENSION_TYPE_OPS,
-            "1.3.137",
-            "1.4.41",
-            {OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI},
-            [f"{OPS_APPLICATION_URI_CONFIG}={OPS_APPLICATION_URI_PREFIX}xy789"],
-            {
-                OPS_SUBJECT_NAME_CONFIG: f"{OPS_SUBJECT_NAME_PREFIX}xy789",
-                OPS_APPLICATION_URI_CONFIG: f"{OPS_APPLICATION_URI_PREFIX}xy789",
-            },
-            id="application-uri-change",
-        ),
-        pytest.param(
-            EXTENSION_TYPE_OPS,
-            "1.3.137",
-            "1.4.41",
-            {OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI},
-            [OPS_APPLICATION_URI_CONFIG],
-            {OPS_APPLICATION_URI_CONFIG: None},
-            id="application-uri-removal",
-        ),
-    ],
-)
-def test_2607_config_migration_user_overrides_win(
-    ext_type, current_version, desired_version, current_config, override_config, expected_config
-):
-    state = build_extension_upgrade_state(
-        ext_type=ext_type,
-        current_version=current_version,
-        desired_version=desired_version,
-        config_settings=current_config,
-        override_config=override_config,
-    )
-
-    assert state.get_patch()["properties"]["configurationSettings"] == expected_config
-
-
-def test_ops_2607_config_migration_uses_desired_application_uri():
-    desired_suffix = "xy789"
-    desired_uri = f"{OPS_APPLICATION_URI_PREFIX}{desired_suffix}"
-    state = build_extension_upgrade_state(
-        ext_type=EXTENSION_TYPE_OPS,
-        current_version="1.4.41",
-        desired_version="1.4.41",
-        config_settings={OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI},
-        desired_config={OPS_APPLICATION_URI_CONFIG: desired_uri},
-    )
-
-    patch = state.get_patch()
-
-    assert patch == {
-        "properties": {
-            "configurationSettings": {
-                OPS_SUBJECT_NAME_CONFIG: f"{OPS_SUBJECT_NAME_PREFIX}{desired_suffix}",
-                OPS_APPLICATION_URI_CONFIG: desired_uri,
-            }
-        }
-    }
-
-
-@pytest.mark.parametrize(
-    "current_config,extension_name,expected_subject",
-    [
-        pytest.param({}, f"{OPS_EXTENSION_NAME_PREFIX}ab12c", True, id="missing-with-name-fallback"),
-        pytest.param({}, "custom-extension-ab12c", False, id="missing-with-invalid-name"),
-        pytest.param({OPS_APPLICATION_URI_CONFIG: None}, None, False, id="null"),
-        pytest.param({OPS_APPLICATION_URI_CONFIG: "urn:custom:ab12c"}, None, False, id="wrong-prefix"),
-        pytest.param({OPS_APPLICATION_URI_CONFIG: f"{OPS_APPLICATION_URI_PREFIX}ab12"}, None, False, id="short-suffix"),
-        pytest.param(
-            {OPS_APPLICATION_URI_CONFIG: f"{OPS_APPLICATION_URI_PREFIX}ab-2c"},
-            None,
-            False,
-            id="non-alphanumeric",
-        ),
-        pytest.param({OPS_APPLICATION_URI_CONFIG: f"{OPS_APPLICATION_URI_PREFIX}åb12c"}, None, False, id="non-ascii"),
-    ],
-)
-def test_ops_2607_config_migration_subject_fallback(
-    current_config, extension_name, expected_subject
-):
-    state = build_extension_upgrade_state(
-        ext_type=EXTENSION_TYPE_OPS,
-        current_version="1.4.41",
-        desired_version="1.4.41",
-        config_settings=current_config,
-        extension_name=extension_name,
-    )
-
-    expected_config = {}
-    if expected_subject:
-        expected_config[OPS_SUBJECT_NAME_CONFIG] = DEFAULT_OPS_SUBJECT_NAME
-
-    expected_patch = {"properties": {"configurationSettings": expected_config}} if expected_config else {}
-    assert state.get_patch() == expected_patch
-
-
-@pytest.mark.parametrize(
-    "ext_type,current_version,desired_version,current_config",
-    [
-        (
-            EXTENSION_TYPE_OPS,
-            "1.3.137",
-            "1.4.40",
-            {OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI},
-        ),
-        (EXTENSION_TYPE_CM, "0.13.3", "0.13.999", {}),
-    ],
-)
-def test_2607_config_migration_not_applied_below_threshold(
-    ext_type, current_version, desired_version, current_config
-):
-    state = build_extension_upgrade_state(
-        ext_type=ext_type,
-        current_version=current_version,
-        desired_version=desired_version,
-        config_settings=current_config,
-    )
-
-    assert state.get_patch() == {"properties": {"version": desired_version}}
-
-
-def test_ops_2607_config_migration_preserves_mqtt_migration():
-    state = build_extension_upgrade_state(
-        ext_type=EXTENSION_TYPE_OPS,
-        current_version="1.3.137",
-        desired_version="1.4.41",
-        config_settings={
-            OPS_APPLICATION_URI_CONFIG: DEFAULT_OPS_APPLICATION_URI,
-            "connectors.values.mqttBroker.address": "mqtts://aio-broker.azure-iot-operations:18883",
-            "connectors.values.mqttBroker.serviceAccountTokenAudience": "aio-internal",
-        },
-    )
-
-    assert state.get_patch()["properties"]["configurationSettings"] == {
-        OPS_SUBJECT_NAME_CONFIG: DEFAULT_OPS_SUBJECT_NAME,
-        "dataFlows.values.tinyKube.mqttBroker.hostName": "aio-broker.azure-iot-operations",
-        "dataFlows.values.tinyKube.mqttBroker.port": "18883",
-        "dataFlows.values.tinyKube.mqttBroker.authentication.serviceAccountTokenAudience": "aio-internal",
-    }
-
-
 @pytest.mark.parametrize(
     "override_config,expected_secret_targets_enabled,expected_authorized_secrets_all",
     [
@@ -2705,6 +2417,7 @@ def test_cert_manager_creation_uses_default_config(
         ({"a": "b"}, {"c": None, "d": "e"}, {}, ConfigSyncModeType.NONE.value),
         ({"a": "b"}, {"a": "c"}, {}, ConfigSyncModeType.ADD.value),
         ({"a": "b"}, {"a": "c", "d": "e"}, {"d": "e"}, ConfigSyncModeType.ADD.value),
+        ({"a": "b"}, {"a": "c"}, {}, ConfigSyncModeType.ADD.value),
     ],
 )
 def test_calculate_config_delta(

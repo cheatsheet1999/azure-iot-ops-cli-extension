@@ -39,10 +39,6 @@ CLUSTER_EXTENSIONS_API_VERSION = "2023-05-01"
 # Version threshold: init deployed ACS only on versions up to and including this.
 MAX_INSTANCE_VERSION_ACS_DEPENDENCY = "1.1.69"
 
-# Version thresholds for configuration introduced in the 2607 - V2.8.0 release.
-MIN_INSTANCE_VERSION_FOR_OPC_UA_SUBJECT = "1.4.41"
-MIN_CM_VERSION_FOR_SECRET_TARGETS = "0.14.0"
-
 # Health check defaults
 DEFAULT_HEALTH_CHECKS_MAX = 4
 DEFAULT_HEALTH_CHECKS_INTERVAL = 30
