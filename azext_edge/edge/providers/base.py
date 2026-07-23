@@ -6,6 +6,7 @@
 
 import socket
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Dict, Iterator, List, Optional, Union
 from urllib.request import urlopen
 
@@ -46,6 +47,37 @@ def load_config_context(context_name: Optional[str] = None):
     DEFAULT_NAMESPACE = current_config.get("namespace") or "azure-iot-operations"
 
 
+class ClusterAccessDeniedError(Exception):
+    """Raised when a cluster API call is rejected with HTTP 401/403 (authentication/authorization failure)."""
+
+    def __init__(self, status: Optional[int], resource: Optional[str] = None):
+        self.status = int(status or 403)
+        self.resource = resource
+        super().__init__(f"Access denied (HTTP {self.status})" + (f" for '{resource}'" if resource else ""))
+
+
+_reraise_access_errors: ContextVar[bool] = ContextVar("aio_reraise_cluster_access_errors", default=False)
+
+
+@contextmanager
+def reraise_cluster_access_errors() -> Iterator[None]:
+    """
+    Within this context, the shared cluster read helpers raise ClusterAccessDeniedError on HTTP
+    401/403 instead of swallowing the error and returning an empty result. This lets the check
+    command surface a precise per-resource 'access denied' rather than a misleading false negative.
+    """
+    token = _reraise_access_errors.set(True)
+    try:
+        yield
+    finally:
+        _reraise_access_errors.reset(token)
+
+
+def reraise_if_access_denied(ae: ApiException, resource: Optional[str] = None) -> None:
+    if _reraise_access_errors.get() and int(getattr(ae, "status", 0) or 0) in (401, 403):
+        raise ClusterAccessDeniedError(status=ae.status, resource=resource)
+
+
 _namespaced_service_cache: dict = {}
 
 
@@ -66,6 +98,7 @@ def get_namespaced_service(name: str, namespace: str, as_dict: bool = False) -> 
         _namespaced_service_cache[target_service_key] = v1_service
     except ApiException as ae:
         logger.debug(str(ae))
+        reraise_if_access_denied(ae, resource=f"service/{name}")
     else:
         return retrieve_namespaced_service_from_cache(target_service_key)
 
@@ -101,6 +134,7 @@ def get_namespaced_pods_by_prefix(
         _namespaced_pods_cache[target_pods_key] = pods_list.items
     except ApiException as ae:
         logger.debug(str(ae))
+        reraise_if_access_denied(ae, resource="pods")
         return []
     else:
         return filter_pods_from_cache(target_pods_key)
@@ -110,7 +144,11 @@ _custom_object_cache: dict = {}
 
 
 def get_custom_objects(
-    group: str, version: str, plural: str, namespace: Optional[str] = None, use_cache: bool = True
+    group: str,
+    version: str,
+    plural: str,
+    namespace: Optional[str] = None,
+    use_cache: bool = True,
 ) -> Union[dict, None]:
     target_resource_key = (group, version, plural, namespace)
     if use_cache:
@@ -128,6 +166,7 @@ def get_custom_objects(
         _custom_object_cache[target_resource_key] = f(**kwargs)
     except ApiException as ae:
         logger.debug(str(ae))
+        reraise_if_access_denied(ae, resource=plural)
     else:
         return _custom_object_cache[target_resource_key]
 
@@ -149,6 +188,7 @@ def get_cluster_custom_api(group: str, version: str, raise_on_404: bool = False)
         logger.debug(msg=str(ae))
         if int(ae.status) == 404 and raise_on_404:
             raise ResourceNotFoundError(f"{group}/{version} resource API is not detected on the cluster.")
+        reraise_if_access_denied(ae, resource=f"{group}/{version}")
     else:
         return _cluster_resource_api_cache[target_resource_api_key]
 
@@ -277,6 +317,7 @@ def get_namespaced_secret(namespace: str, secret_name: str) -> dict:
     except ApiException as ae:
         error_msg = str(ae)
         logger.debug(msg=error_msg)
+        reraise_if_access_denied(ae, resource=f"secret/{secret_name}")
     else:
         if result:
             return generic.sanitize_for_serialization(obj=result)

@@ -18,8 +18,14 @@ from azext_edge.edge.providers.k8s.config_map import get_config_map
 
 from .check_manager import CheckManager
 from .display import process_value_color
-from ..common import COLOR_STR_FORMAT, PADDING_SIZE, ResourceOutputDetailLevel, ValidationResourceType
-from ...base import get_cluster_custom_api, get_namespaced_secret
+from ..common import (
+    COLOR_STR_FORMAT,
+    PADDING_SIZE,
+    ResourceOutputDetailLevel,
+    ValidationResourceType,
+    build_access_denied_text,
+)
+from ...base import get_cluster_custom_api, get_namespaced_secret, ClusterAccessDeniedError
 from ...edge_api import EdgeResourceApi
 from ....common import CheckTaskStatus, ResourceState
 
@@ -46,7 +52,19 @@ def enumerate_ops_service_resources(
     check_manager = CheckManager(check_name=check_name, check_desc=check_desc)
     check_manager.add_target(target_name=target_api)
 
-    api_resources: V1APIResourceList = get_cluster_custom_api(group=api_info.group, version=api_info.version)
+    try:
+        api_resources: V1APIResourceList = get_cluster_custom_api(group=api_info.group, version=api_info.version)
+    except ClusterAccessDeniedError as access_error:
+        denied_text = build_access_denied_text(access_error.status, f"{target_api} API resources")
+        check_manager.add_target_eval(
+            target_name=target_api,
+            status=CheckTaskStatus.error.value,
+            value=f"Access denied (HTTP {access_error.status}) reading '{target_api}'",
+        )
+        check_manager.add_display(target_name=target_api, display=Padding(denied_text, (0, 0, 0, 8)))
+        result = check_manager.as_dict(as_list)
+        result["accessDenied"] = access_error.status
+        return result, resource_kind_map
 
     if not api_resources:
         check_manager.add_target_eval(target_name=target_api, status=CheckTaskStatus.error.value)
@@ -481,14 +499,21 @@ def process_custom_resource_status(
                 )
 
 
-def validate_runtime_resource_ref(name: str, namespace: str, ref_type: ValidationResourceType) -> bool:
+def validate_runtime_resource_ref(
+    name: str, namespace: str, ref_type: ValidationResourceType
+) -> Union[bool, ClusterAccessDeniedError]:
     ref_obj = None
-    if ref_type == ValidationResourceType.secret:
-        ref_obj = get_namespaced_secret(secret_name=name, namespace=namespace)
-    elif ref_type == ValidationResourceType.configmap:
-        ref_obj = get_config_map(name=name, namespace=namespace)
-    else:
-        raise ValueError(f"Unsupported ref type: {ref_type}")
+    try:
+        if ref_type == ValidationResourceType.secret:
+            ref_obj = get_namespaced_secret(secret_name=name, namespace=namespace)
+        elif ref_type == ValidationResourceType.configmap:
+            ref_obj = get_config_map(name=name, namespace=namespace)
+        else:
+            raise ValueError(f"Unsupported ref type: {ref_type}")
+    except ClusterAccessDeniedError as access_error:
+        # Preserve the caller's other findings: report the denied reference inline (via the
+        # returned error) instead of unwinding the whole evaluator.
+        return access_error
 
     return bool(ref_obj)
 
