@@ -94,6 +94,7 @@ def check_summary(
         # create grid for service check results
         grid = Table.grid(padding=(0, 0, 0, 2))
         add_footer = False
+        access_denied = False
 
         # parse check results
         for obj in result:
@@ -104,6 +105,12 @@ def check_summary(
             emoji = status_obj.emoji
             color = status_obj.color
             description = obj.get("description")
+            denied_status = obj.get("accessDenied")
+            if denied_status:
+                access_denied = True
+                description = f"{description} " + colorize_string(
+                    color="red", value=f"(access denied - HTTP {denied_status})"
+                )
             check_manager.add_target_eval(
                 target_name=target,
                 status=status,
@@ -117,9 +124,18 @@ def check_summary(
 
         # service check suggestion footer
         if add_footer:
-            footer = ":magnifying_glass_tilted_left:" + colorize_string(
-                f" See details by running: az iot ops check --svc {check.svc}"
-            )
+            if access_denied:
+                footer = ":locked:" + colorize_string(
+                    color="red",
+                    value=(
+                        " Some resources could not be evaluated - cluster access denied. "
+                        f"See details: az iot ops check --svc {check.svc}"
+                    ),
+                )
+            else:
+                footer = ":magnifying_glass_tilted_left:" + colorize_string(
+                    f" See details by running: az iot ops check --svc {check.svc}"
+                )
             check_manager.add_display(target_name=target, display=NewLine())
             check_manager.add_display(target_name=target, display=Padding(footer, (0, 0, 0, PADDING)))
 

@@ -10,6 +10,7 @@ from azure.cli.core.azclierror import ArgumentUsageError
 from rich.console import Console
 
 from ..common import OPCUA_SERVICE, ListableEnum, OpsServiceType
+from .base import reraise_cluster_access_errors
 from .check.akri import check_akri_deployment
 from .check.base import check_pre_deployment, display_as_list
 from .check.common import COLOR_STR_FORMAT, ResourceOutputDetailLevel
@@ -54,7 +55,10 @@ def run_checks(
         result["title"] = f"Evaluation for {title_subject}" if ops_service else "IoT Operations Summary"
 
         if pre_deployment:
-            result["preDeployment"] = check_pre_deployment(as_list)
+            # Same access-denied gate as post-deployment so precheck reads (nodes, k8s version)
+            # surface a precise 401/403 result instead of a generic connectivity error.
+            with reraise_cluster_access_errors():
+                result["preDeployment"] = check_pre_deployment(as_list)
         if post_deployment:
             result["postDeployment"] = []
             service_check_dict = {
@@ -65,9 +69,15 @@ def run_checks(
                 OpsServiceType.dataflow.value: check_dataflows_deployment,
                 None: check_summary,
             }
-            service_result = service_check_dict[ops_service](
-                detail_level=detail_level, resource_name=resource_name, as_list=as_list, resource_kinds=resource_kinds
-            )
+            # Within this context, cluster reads raise ClusterAccessDeniedError on HTTP 401/403 so the
+            # checks surface a precise per-resource 'access denied' instead of a misleading false negative.
+            with reraise_cluster_access_errors():
+                service_result = service_check_dict[ops_service](
+                    detail_level=detail_level,
+                    resource_name=resource_name,
+                    as_list=as_list,
+                    resource_kinds=resource_kinds,
+                )
             if isinstance(service_result, list):
                 for obj in service_result:
                     result["postDeployment"].append(obj)
