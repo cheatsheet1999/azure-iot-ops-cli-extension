@@ -1175,7 +1175,7 @@ class ExtensionUpgradeState:
                         has_mqtt_migration = True
                         break
 
-        return bool(self.override.config or self.config_delta or has_mqtt_migration)
+        return self.override.config or self.config_delta or has_mqtt_migration
 
     def _has_non_success_state(self) -> bool:
         """
