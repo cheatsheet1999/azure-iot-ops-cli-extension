@@ -36,11 +36,7 @@ from azext_edge.edge.providers.orchestration.resources.instances import (
     SECRET_SYNC_RESOURCE_TYPE,
     SPC_RESOURCE_TYPE,
 )
-from azext_edge.edge.providers.orchestration.targets import (
-    CM_AUTHORIZED_SECRETS_ALL_CONFIG,
-    CM_SECRET_TARGETS_ENABLED_CONFIG,
-    InitTargets,
-)
+from azext_edge.edge.providers.orchestration.targets import InitTargets
 from azext_edge.edge.util import parse_kvp_nargs
 from azext_edge.edge.util.machinery import scoped_semver_import
 
@@ -2359,49 +2355,6 @@ def assert_displays(
     if not no_progress and not error_context and patched_ext_types:
         print_calls = spy_upgrade_displays["print"].mock_calls
         assert len(print_calls) > 0, "Expected Console.print for table display"
-
-
-@pytest.mark.parametrize(
-    "override_config,expected_secret_targets_enabled,expected_authorized_secrets_all",
-    [
-        pytest.param(None, "false", "false", id="default"),
-        pytest.param(
-            [
-                f"{CM_SECRET_TARGETS_ENABLED_CONFIG}=true",
-                f"{CM_AUTHORIZED_SECRETS_ALL_CONFIG}=true",
-            ],
-            "true",
-            "true",
-            id="both",
-        ),
-    ],
-)
-def test_cert_manager_creation_uses_default_config(
-    override_config, expected_secret_targets_enabled, expected_authorized_secrets_all
-):
-    from azext_edge.edge.providers.orchestration.upgrade2 import (
-        ConfigOverride,
-        ExtensionOperation,
-        ExtensionUpgradeState,
-        UpgradeManager,
-    )
-
-    state = ExtensionUpgradeState(
-        extension=None,
-        extension_type=EXTENSION_TYPE_CM,
-        desired_version_map={"version": "0.14.0", "train": "stable"},
-        operation_type=ExtensionOperation.CREATE,
-        override=ConfigOverride(config=override_config),
-    )
-    manager = UpgradeManager.__new__(UpgradeManager)
-
-    config = manager._build_creation_payload(state)["properties"]["configurationSettings"]
-    assert config == {
-        "AgentOperationTimeoutInMinutes": "20",
-        "global.telemetry.enabled": "true",
-        CM_SECRET_TARGETS_ENABLED_CONFIG: expected_secret_targets_enabled,
-        CM_AUTHORIZED_SECRETS_ALL_CONFIG: expected_authorized_secrets_all,
-    }
 
 
 @pytest.mark.parametrize(

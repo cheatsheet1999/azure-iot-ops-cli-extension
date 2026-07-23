@@ -42,7 +42,7 @@ from .common import (
 from .migration import SecretSyncMigrationManager
 from .resources import RegistryEndpoints
 from .resources.instances import SECRET_SYNC_RESOURCE_TYPE, SPC_RESOURCE_TYPE, Instances
-from .targets import InitTargets, get_default_cm_config
+from .targets import InitTargets
 
 logger = get_logger(__name__)
 
@@ -361,9 +361,6 @@ class UpgradeManager:
             cm_versions = self.targets.get_extension_versions(True).get(EXTENSION_MONIKER_CM, {})
             version = cm_versions.get("version", "0.6.2")
 
-        config_settings = dict(ext.desired_config or get_default_cm_config())
-        config_settings.update(ext.override.config)
-
         return {
             "properties": {
                 "extensionType": ext.extension_type or EXTENSION_TYPE_CM,
@@ -371,7 +368,7 @@ class UpgradeManager:
                 "releaseTrain": ext.desired_version[1] or "stable",
                 "autoUpgradeMinorVersion": False,
                 "scope": {"cluster": {"releaseNamespace": "cert-manager"}},
-                "configurationSettings": config_settings,
+                "configurationSettings": ext.desired_config or {"AgentOperationTimeoutInMinutes": "20"},
             },
             "identity": {"type": "SystemAssigned"},
         }
