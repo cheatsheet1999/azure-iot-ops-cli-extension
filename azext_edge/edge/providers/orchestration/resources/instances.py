@@ -75,6 +75,7 @@ COMPAT_FEAT_KEY_SET = {"opcua.mode"}
 OIDC_DISCOVERY_PATH = "/.well-known/openid-configuration"
 OIDC_DISCOVERY_TIMEOUT_SECONDS = 5
 OIDC_DISCOVERY_MAX_RESPONSE_BYTES = 64 * 1024  # cap the response size to 64KB
+OIDC_DISCOVERY_CHUNK_SIZE_BYTES = 8 * 1024
 
 
 def get_user_msg_warn_ra(prefix: str, principal_id: str, scope: str) -> str:
@@ -129,7 +130,7 @@ def _read_public_discovery_issuer(discovery_url: str, deadline: float) -> Option
                 return None
             # Bound the decoded body since the URL comes from ARM data.
             content = bytearray()
-            for chunk in response.iter_content(chunk_size=OIDC_DISCOVERY_MAX_RESPONSE_BYTES):
+            for chunk in response.iter_content(chunk_size=OIDC_DISCOVERY_CHUNK_SIZE_BYTES):
                 if time.monotonic() > deadline:
                     return None
                 content.extend(chunk)
