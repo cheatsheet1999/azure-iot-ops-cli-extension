@@ -47,6 +47,9 @@ def check_nodes(
         nodes: V1NodeList = core_client.list_node()
     except ApiException as ae:
         logger.debug(str(ae))
+        from ...base import reraise_if_access_denied
+
+        reraise_if_access_denied(ae, resource="nodes")
         api_error_text = UNABLE_TO_FETCH_NODES_MSG
         check_manager.add_target_eval(
             target_name=target,

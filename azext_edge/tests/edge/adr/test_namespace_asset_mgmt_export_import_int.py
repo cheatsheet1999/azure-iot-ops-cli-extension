@@ -16,6 +16,7 @@ from .export_import_helpers import (
     ensure_device_and_endpoint, ensure_asset_for_format_tests,
     validate_export_result, verify_items_by_name, do_replace_import_test,
 )
+from .namespace_helpers import _try_show_template
 
 pytestmark = [pytest.mark.rpsaas, pytest.mark.long_running]
 
@@ -250,6 +251,13 @@ def test_namespace_asset_mgmt_group_export_import_generalized(
         cmd_args = f"--asset {asset_name} --instance {instance_name} -g {resource_group}"
 
         with log.step(3, "Add Management Groups"):
+            # Generalized commands require connector metadata; skip when the connector has no
+            # template supporting management groups (a bare add can no longer run metadata-free).
+            if not _try_show_template(f"{cmd_prefix} add {cmd_args} --name probe --show-template config"):
+                pytest.skip(
+                    "Generalized management commands require connector metadata; no connector "
+                    "template supporting management groups is installed for this connector."
+                )
             for name in mg_names:
                 log.run_command(
                     f"{cmd_prefix} add {cmd_args} --name {name} --data-source mgmt/{name}"
@@ -320,6 +328,16 @@ def test_namespace_asset_mgmt_action_export_import_generalized(
                 log, instance_name, resource_group, asset_type, device_name,
                 endpoint_name, tracked_resources, "mgmt", format_test_asset_cache,
             )
+            # Generalized commands require connector metadata; skip when the connector has no
+            # template supporting management actions (a bare add can no longer run metadata-free).
+            _probe_args = f"--asset {asset_name} --instance {instance_name} -g {resource_group}"
+            if not _try_show_template(
+                f"az iot ops ns asset mgmt-group add {_probe_args} --name probe --show-template config"
+            ):
+                pytest.skip(
+                    "Generalized management commands require connector metadata; no connector "
+                    "template supporting management actions is installed for this connector."
+                )
             # Create the parent management group via the generalized command group.
             log.run_command(
                 f"az iot ops ns asset mgmt-group add --asset {asset_name} "

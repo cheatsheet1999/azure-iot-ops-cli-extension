@@ -47,6 +47,13 @@ PHASE_KEY_MAP: Dict[str, Set[str]] = {
     InstancePhase.INSTANCE: {"aioInstance"},
 }
 
+CM_SECRET_TARGETS_ENABLED_CONFIG = "trust-manager.secretTargets.enabled"
+CM_AUTHORIZED_SECRETS_ALL_CONFIG = "trust-manager.secretTargets.authorizedSecretsAll"
+DEFAULT_CM_SECRET_TARGET_CONFIG = {
+    CM_SECRET_TARGETS_ENABLED_CONFIG: "false",
+    CM_AUTHORIZED_SECRETS_ALL_CONFIG: "false",
+}
+
 
 class VarAttr(NamedTuple):
     value: str
@@ -556,7 +563,9 @@ def get_default_ssc_config() -> Dict[str, str]:
 
 
 def get_default_cm_config() -> Dict[str, str]:
-    return {
+    config = {
         "AgentOperationTimeoutInMinutes": "20",
         "global.telemetry.enabled": "true",
     }
+    config.update(DEFAULT_CM_SECRET_TARGET_CONFIG)
+    return config

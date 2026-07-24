@@ -15,14 +15,48 @@ from rich.padding import Padding
 
 from ....common import CheckTaskStatus, ListableEnum
 from ....providers.edge_api import EdgeResourceApi
-from ...base import client, load_config_context
-from ..common import NON_ERROR_STATUSES, CoreServiceResourceKinds, ResourceOutputDetailLevel
+from ...base import ClusterAccessDeniedError, client, load_config_context, reraise_if_access_denied
+from ..common import (
+    NON_ERROR_STATUSES,
+    CoreServiceResourceKinds,
+    ResourceOutputDetailLevel,
+    build_access_denied_remediation,
+    build_access_denied_text,
+)
 from .check_manager import CheckManager
 from .node import check_nodes
 from .resource import enumerate_ops_service_resources
 from .user_strings import UNABLE_TO_DETERMINE_VERSION_MSG
 
 logger = get_logger(__name__)
+
+
+def _build_access_denied_result(resource: ListableEnum, error: ClusterAccessDeniedError, as_list: bool = False) -> dict:
+    """Build a precise per-resource 'access denied' check result for a 401/403 on a single kind."""
+    kind = getattr(resource, "value", str(resource))
+    # Prefer the actual denied read (error.resource) since an evaluator may read more than one kind;
+    # fall back to the evaluator kind when the denied read is unlabeled.
+    denied_name = str(error.resource or kind)
+    check_manager = CheckManager(check_name=f"eval{kind}Access", check_desc=f"Evaluate {kind}")
+    target = denied_name
+    check_manager.add_target(target_name=target)
+    denied_text = build_access_denied_text(error.status, denied_name)
+    remediation_text = build_access_denied_remediation(error.status)
+    check_manager.add_target_eval(
+        target_name=target,
+        status=CheckTaskStatus.error.value,
+        value=f"Access denied (HTTP {error.status}) reading '{target}'",
+    )
+    check_manager.add_display(target_name=target, display=Padding(denied_text, (0, 0, 0, 8)))
+    check_manager.add_display(
+        target_name=target,
+        display=Padding(remediation_text, (0, 0, 0, 10)),
+    )
+    result = check_manager.as_dict(as_list)
+    # Marker so rolled-up views (e.g. the summary) can surface the permission reason inline
+    # instead of showing an ambiguous error icon.
+    result["accessDenied"] = error.status
+    return result
 
 
 def validate_cluster_prechecks(**kwargs) -> None:
@@ -81,7 +115,12 @@ def check_pre_deployment(
             }
         )
     for c in desired_checks:
-        output = desired_checks[c]()
+        try:
+            output = desired_checks[c]()
+        except ClusterAccessDeniedError as access_error:
+            # Principal lacks access to a precheck resource (nodes / k8s version / storage classes):
+            # report a precise access-denied result instead of a generic connectivity error.
+            output = _build_access_denied_result(access_error.resource or c, access_error, as_list)
         result.append(output)
     return result
 
@@ -119,7 +158,14 @@ def check_post_deployment(
             append_resource = True
 
         if append_resource:
-            results.append(evaluate_func(detail_level=detail_level, as_list=as_list, resource_name=resource_name))
+            try:
+                results.append(
+                    evaluate_func(detail_level=detail_level, as_list=as_list, resource_name=resource_name)
+                )
+            except ClusterAccessDeniedError as access_error:
+                # Principal lacks permission to read this specific resource kind: report a precise
+                # per-resource 'access denied' result instead of a misleading 'unable to fetch'.
+                results.append(_build_access_denied_result(resource, access_error, as_list))
     return results
 
 
@@ -143,6 +189,7 @@ def _check_k8s_version(as_list: bool = False) -> Dict[str, Any]:
         version_details: VersionInfo = version_client.get_code()
     except (ApiException, ImportError) as ae:
         logger.debug(str(ae))
+        reraise_if_access_denied(ae, resource="kubernetes version")
         api_error_text = UNABLE_TO_DETERMINE_VERSION_MSG
         check_manager.add_target_eval(
             target_name=target_k8s_version,
@@ -196,6 +243,7 @@ def _check_storage_classes(acs_config: dict, as_list: bool = False) -> Dict[str,
         storage_classes: V1StorageClassList = storage_client.list_storage_class()
     except ApiException as ae:
         logger.debug(str(ae))
+        reraise_if_access_denied(ae, resource="storage classes")
         api_error_text = "Unable to fetch storage classes"
         check_manager.add_target_eval(
             target_name=target,

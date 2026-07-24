@@ -42,12 +42,36 @@ from .common import (
     CheckResult,
     ResourceOutputDetailLevel,
     ValidationResourceType,
+    build_access_denied_text,
 )
 
 from ...providers.edge_api import MQ_ACTIVE_API, MqResourceKinds
 from ..support.mq import MQ_NAME_LABEL
 
-from ..base import get_namespaced_pods_by_prefix, get_namespaced_service
+from ..base import ClusterAccessDeniedError, get_namespaced_pods_by_prefix, get_namespaced_service
+
+
+def _render_ref_validation(ref_result, ref_type: ValidationResourceType, name: str):
+    """
+    Map a validate_runtime_resource_ref result to (display_text, eval_status).
+
+    A ClusterAccessDeniedError result renders a precise inline 'access denied' row so the
+    evaluator keeps its other findings instead of unwinding on a denied reference read.
+    """
+    if isinstance(ref_result, ClusterAccessDeniedError):
+        return (
+            build_access_denied_text(ref_result.status, f"{ref_type.value} reference {name}"),
+            CheckTaskStatus.error.value,
+        )
+    if ref_result:
+        return (
+            f"[green]Valid[/green] {ref_type.value} reference {{[green]{name}[/green]}}.",
+            CheckTaskStatus.success.value,
+        )
+    return (
+        f"[red]Invalid[/red] {ref_type.value} reference {{[red]{name}[/red]}}.",
+        CheckTaskStatus.error.value,
+    )
 
 
 def check_mq_deployment(
@@ -584,53 +608,72 @@ def evaluate_brokers(
 
             pods: List[dict] = []
 
-            for prefix in [
-                AIO_BROKER_DIAGNOSTICS_PROBE_PREFIX,
-                AIO_BROKER_FRONTEND_PREFIX,
-                AIO_BROKER_BACKEND_PREFIX,
-                AIO_BROKER_AUTH_PREFIX,
-                AIO_BROKER_HEALTH_MANAGER,
-                AIO_BROKER_DIAGNOSTICS_SERVICE,
-                AIO_BROKER_OPERATOR,
-                # AIO_BROKER_FLUENT_BIT,
-                # TODO: Fluent Bit is deployed to all nodes and stays in a pending state until an
-                # AIO workload is running on the node. For clusters with many nodes, usually
-                # some instances of Fluent Bit will be in a pending state. This is expected.
-            ]:
-                prefixed_pods = get_namespaced_pods_by_prefix(
-                    prefix=prefix,
-                    namespace=namespace,
-                    label_selector=MQ_NAME_LABEL,
-                )
-
-                if not prefixed_pods:
-                    add_display_and_eval(
-                        check_manager=check_manager,
-                        target_name=target_brokers,
-                        display_text=f"{prefix}* {colorize_string(color='yellow', value='not detected')}.",
-                        eval_status=CheckTaskStatus.warning.value,
-                        eval_value=None,
-                        resource_name=prefix,
+            try:
+                for prefix in [
+                    AIO_BROKER_DIAGNOSTICS_PROBE_PREFIX,
+                    AIO_BROKER_FRONTEND_PREFIX,
+                    AIO_BROKER_BACKEND_PREFIX,
+                    AIO_BROKER_AUTH_PREFIX,
+                    AIO_BROKER_HEALTH_MANAGER,
+                    AIO_BROKER_DIAGNOSTICS_SERVICE,
+                    AIO_BROKER_OPERATOR,
+                    # AIO_BROKER_FLUENT_BIT,
+                    # TODO: Fluent Bit is deployed to all nodes and stays in a pending state until an
+                    # AIO workload is running on the node. For clusters with many nodes, usually
+                    # some instances of Fluent Bit will be in a pending state. This is expected.
+                ]:
+                    prefixed_pods = get_namespaced_pods_by_prefix(
+                        prefix=prefix,
                         namespace=namespace,
-                        padding=(0, 0, 0, broker_properties_padding),
-                    )
-                else:
-                    pods.extend(
-                        get_namespaced_pods_by_prefix(
-                            prefix=prefix,
-                            namespace="",
-                            label_selector=MQ_NAME_LABEL,
-                        )
+                        label_selector=MQ_NAME_LABEL,
                     )
 
-            evaluate_pod_health(
-                check_manager=check_manager,
-                target=target_brokers,
-                namespace=namespace,
-                padding=broker_properties_padding,
-                pods=pods,
-                detail_level=detail_level,
-            )
+                    if not prefixed_pods:
+                        add_display_and_eval(
+                            check_manager=check_manager,
+                            target_name=target_brokers,
+                            display_text=f"{prefix}* {colorize_string(color='yellow', value='not detected')}.",
+                            eval_status=CheckTaskStatus.warning.value,
+                            eval_value=None,
+                            resource_name=prefix,
+                            namespace=namespace,
+                            padding=(0, 0, 0, broker_properties_padding),
+                        )
+                    else:
+                        pods.extend(
+                            get_namespaced_pods_by_prefix(
+                                prefix=prefix,
+                                namespace="",
+                                label_selector=MQ_NAME_LABEL,
+                            )
+                        )
+
+                evaluate_pod_health(
+                    check_manager=check_manager,
+                    target=target_brokers,
+                    namespace=namespace,
+                    padding=broker_properties_padding,
+                    pods=pods,
+                    detail_level=detail_level,
+                )
+            except ClusterAccessDeniedError as access_error:
+                # Denied on the secondary pod reads: keep the broker findings and report inline.
+                denied_resource = str(access_error.resource or "pods")
+                check_manager.add_target_eval(
+                    target_name=target_brokers,
+                    namespace=namespace,
+                    status=CheckTaskStatus.error.value,
+                    value=f"Access denied (HTTP {access_error.status}) reading {denied_resource}",
+                    resource_name=denied_resource,
+                )
+                check_manager.add_display(
+                    target_name=target_brokers,
+                    namespace=namespace,
+                    display=Padding(
+                        "\n" + build_access_denied_text(access_error.status, denied_resource),
+                        (0, 0, 0, broker_properties_padding),
+                    ),
+                )
 
     return check_manager.as_dict(as_list)
 
@@ -1008,9 +1051,30 @@ def _evaluate_listener_service(
         conditions=["listener_service"],
     )
 
-    associated_service: dict = get_namespaced_service(
-        name=listener_spec_service_name, namespace=namespace, as_dict=True
-    )
+    associated_service: dict = None
+    try:
+        associated_service = get_namespaced_service(
+            name=listener_spec_service_name, namespace=namespace, as_dict=True
+        )
+    except ClusterAccessDeniedError as access_error:
+        # Denied on the secondary service read: keep the listener findings and report inline.
+        processed_services[listener_spec_service_name] = True
+        check_manager.add_display(
+            target_name=target_listeners,
+            namespace=namespace,
+            display=Padding(
+                "\n" + build_access_denied_text(access_error.status, f"service {listener_spec_service_name}"),
+                (0, 0, 0, 12),
+            ),
+        )
+        check_manager.add_target_eval(
+            target_name=target_listener_service,
+            namespace=namespace,
+            status=CheckTaskStatus.error.value,
+            value={"listener_service": f"Access denied (HTTP {access_error.status})"},
+            resource_name=f"service/{listener_spec_service_name}",
+        )
+        return
     processed_services[listener_spec_service_name] = True
     if not associated_service:
         listener_service_eval_status = CheckTaskStatus.warning.value
@@ -1143,9 +1207,28 @@ def _evaluate_broker_diagnostics_service(
     namespace: str,
     detail_level: int = ResourceOutputDetailLevel.summary.value,
 ) -> None:
-    diagnostics_service = get_namespaced_service(
-        name=AIO_BROKER_DIAGNOSTICS_SERVICE, namespace=namespace, as_dict=True
-    )
+    try:
+        diagnostics_service = get_namespaced_service(
+            name=AIO_BROKER_DIAGNOSTICS_SERVICE, namespace=namespace, as_dict=True
+        )
+    except ClusterAccessDeniedError as access_error:
+        # Denied on the secondary diagnostics service read: keep the broker findings and report inline.
+        check_manager.add_target_eval(
+            target_name=target_brokers,
+            namespace=namespace,
+            status=CheckTaskStatus.error.value,
+            value=f"Access denied (HTTP {access_error.status}) reading service/{AIO_BROKER_DIAGNOSTICS_SERVICE}",
+            resource_name=f"service/{AIO_BROKER_DIAGNOSTICS_SERVICE}",
+        )
+        check_manager.add_display(
+            target_name=target_brokers,
+            namespace=namespace,
+            display=Padding(
+                "\n" + build_access_denied_text(access_error.status, f"service {AIO_BROKER_DIAGNOSTICS_SERVICE}"),
+                (0, 0, 0, 12),
+            ),
+        )
+        return
     if not diagnostics_service:
         check_manager.add_target_eval(
             target_name=target_brokers,
@@ -1332,19 +1415,17 @@ def _check_authentication_method(
             trusted_client_ca_cert_value = {
                 "spec.authenticationMethods[*].x509Settings.trustedClientCaCert": trusted_client_ca_cert
             }
-            is_valid = validate_runtime_resource_ref(
+            ref_result = validate_runtime_resource_ref(
                 namespace=namespace,
                 name=trusted_client_ca_cert,
                 ref_type=ValidationResourceType.configmap,
             )
 
-            if is_valid:
-                configmap_validate_text = f"[green]Valid[/green] {ValidationResourceType.configmap.value} reference {{[green]{trusted_client_ca_cert}[/green]}}."
-            else:
-                configmap_validate_text = f"[red]Invalid[/red] {ValidationResourceType.configmap.value} reference {{[red]{trusted_client_ca_cert}[/red]}}."
+            configmap_validate_text, trusted_client_ca_cert_status = _render_ref_validation(
+                ref_result, ValidationResourceType.configmap, trusted_client_ca_cert
+            )
 
             trusted_client_ca_cert_display = "Trusted Client CA Cert: {}"
-            trusted_client_ca_cert_status = CheckTaskStatus.success.value if is_valid else CheckTaskStatus.error.value
 
             sub_check_results.append(
                 CheckResult(
@@ -1491,21 +1572,17 @@ def _evaluate_custom_authentication_method(
         # check x509
         secret_ref = auth.get("x509", {}).get("secretRef")
         secret_ref_value = {"spec.authenticationMethods[*].customSettings.auth.x509.secretRef": secret_ref}
-        is_valid = validate_runtime_resource_ref(
+        ref_result = validate_runtime_resource_ref(
             namespace=namespace,
             name=secret_ref,
             ref_type=ValidationResourceType.secret,
         )
 
-        if is_valid:
-            secret_validate_text = f"[green]Valid[/green] {ValidationResourceType.secret.value} reference {{[green]{secret_ref}[/green]}}."
-        else:
-            secret_validate_text = (
-                f"[red]Invalid[/red] {ValidationResourceType.secret.value} reference {{[red]{secret_ref}[/red]}}."
-            )
+        secret_validate_text, secret_ref_status = _render_ref_validation(
+            ref_result, ValidationResourceType.secret, secret_ref
+        )
 
         secret_ref_display = "X.509 Client Certificate Secret reference: {}"
-        secret_ref_status = CheckTaskStatus.success.value if is_valid else CheckTaskStatus.error.value
 
         sub_check_results.append(
             CheckResult(
@@ -1530,19 +1607,17 @@ def _evaluate_custom_authentication_method(
 
     if ca_cert_config_map:
         ca_cert_config_map_value = {"spec.authenticationMethods[*].customSettings.caCertConfigMap": ca_cert_config_map}
-        is_valid = validate_runtime_resource_ref(
+        ref_result = validate_runtime_resource_ref(
             namespace=namespace,
             name=ca_cert_config_map,
             ref_type=ValidationResourceType.configmap,
         )
 
-        if is_valid:
-            configmap_validate_text = f"[green]Valid[/green] {ValidationResourceType.configmap.value} reference {{[green]{ca_cert_config_map}[/green]}}."
-        else:
-            configmap_validate_text = f"[red]Invalid[/red] {ValidationResourceType.configmap.value} reference {{[red]{ca_cert_config_map}[/red]}}."
+        configmap_validate_text, ca_cert_config_map_status = _render_ref_validation(
+            ref_result, ValidationResourceType.configmap, ca_cert_config_map
+        )
 
         ca_cert_config_map_display = "CA Certificate Config Map: {}"
-        ca_cert_config_map_status = CheckTaskStatus.success.value if is_valid else CheckTaskStatus.error.value
 
         sub_check_results.append(
             CheckResult(

@@ -213,3 +213,26 @@ PADDING_SIZE = 4
 DEFAULT_PROPERTY_DISPLAY_COLOR = "cyan"
 
 COLOR_STR_FORMAT = "[{color}]{value}[/{color}]"
+
+
+def build_access_denied_text(status: int, resource: str) -> str:
+    """
+    Colorized access-denied message that distinguishes authentication (401) from
+    authorization (403), so callers don't duplicate the wording.
+    """
+    if int(status) == 401:
+        return (
+            f"[red]Access denied[/red] (HTTP {status}). Could not authenticate to the cluster "
+            f"while reading [bright_blue]{resource}[/bright_blue]."
+        )
+    return (
+        f"[red]Access denied[/red] (HTTP {status}). "
+        f"Principal lacks permission to read [bright_blue]{resource}[/bright_blue]."
+    )
+
+
+def build_access_denied_remediation(status: int) -> str:
+    """Remediation hint matching the access-denied cause (401 authn vs 403 authz)."""
+    if int(status) == 401:
+        return "Verify your cluster credentials (kubeconfig token may be expired or invalid)."
+    return "Grant read access to this resource to evaluate it."

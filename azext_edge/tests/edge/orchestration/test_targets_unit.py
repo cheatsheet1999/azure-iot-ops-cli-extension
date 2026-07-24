@@ -17,6 +17,8 @@ from azext_edge.edge.providers.orchestration.common import (
     EXTENSION_MONIKER_SSC,
 )
 from azext_edge.edge.providers.orchestration.targets import (
+    CM_AUTHORIZED_SECRETS_ALL_CONFIG,
+    CM_SECRET_TARGETS_ENABLED_CONFIG,
     TRUST_ISSUER_KIND_KEY,
     TRUST_SETTING_KEYS,
     ExtensionConfig,
@@ -490,6 +492,44 @@ def test_init_targets_opcua_mode(target_scenario: dict):
 
     aio_instance = instance_template["resources"]["aioInstance"]
     assert aio_instance["properties"]["features"] == expected_features
+
+
+@pytest.mark.parametrize(
+    "cm_config, expected_config",
+    [
+        (None, get_default_cm_config()),
+        (
+            [f"{CM_SECRET_TARGETS_ENABLED_CONFIG}=true"],
+            {**get_default_cm_config(), CM_SECRET_TARGETS_ENABLED_CONFIG: "true"},
+        ),
+        (
+            [f"{CM_AUTHORIZED_SECRETS_ALL_CONFIG}=true"],
+            {**get_default_cm_config(), CM_AUTHORIZED_SECRETS_ALL_CONFIG: "true"},
+        ),
+        (
+            [
+                f"{CM_SECRET_TARGETS_ENABLED_CONFIG}=true",
+                f"{CM_AUTHORIZED_SECRETS_ALL_CONFIG}=true",
+            ],
+            {
+                **get_default_cm_config(),
+                CM_SECRET_TARGETS_ENABLED_CONFIG: "true",
+                CM_AUTHORIZED_SECRETS_ALL_CONFIG: "true",
+            },
+        ),
+    ],
+)
+def test_cert_manager_secret_target_config(cm_config, expected_config):
+    targets = InitTargets(
+        cluster_name=generate_random_string(),
+        resource_group_name=generate_random_string(),
+        cm_config=cm_config,
+    )
+
+    enablement_template, _ = targets.get_ops_enablement_template()
+    settings = enablement_template["resources"]["certManagerExtension"]["properties"]["configurationSettings"]
+
+    assert settings == expected_config
 
 
 def test_extension_config_manager():

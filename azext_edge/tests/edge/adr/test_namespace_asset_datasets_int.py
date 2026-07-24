@@ -1055,16 +1055,20 @@ def test_generalized_dataset_lifecycle_mqtt(asset_factory, tracked_files: List[s
 
     base_cmd = f"--asset {asset_name} --instance {instance_name} -g {resource_group}"
 
-    # 1. SHOW-TEMPLATE – dataset (best-effort)
-    dataset_config_file = None
+    # 1. SHOW-TEMPLATE – dataset. Generalized commands require connector metadata; skip if the
+    # connector has no template supporting datasets (bare add can no longer run metadata-free).
     dataset_template = _try_show_template(
         f"az iot ops ns asset dataset add {base_cmd} "
         f"--name {dataset_name} --show-template config"
     )
-    if dataset_template:
-        assert "connectorType" in dataset_template
-        assert "datasetConfig" in dataset_template
-        dataset_config_file = _save_json_to_file(dataset_template, tracked_files)
+    if not dataset_template:
+        pytest.skip(
+            "Generalized dataset commands require connector metadata; no connector template "
+            "supporting datasets is installed for this connector."
+        )
+    assert "connectorType" in dataset_template
+    assert "datasetConfig" in dataset_template
+    dataset_config_file = _save_json_to_file(dataset_template, tracked_files)
 
     # 2. ADD dataset
     add_cmd = (
@@ -1092,17 +1096,20 @@ def test_generalized_dataset_lifecycle_mqtt(asset_factory, tracked_files: List[s
     )
     assert_dataset_properties(updated_dataset, name=dataset_name, data_source=updated_source)
 
-    # 6. SHOW-TEMPLATE – datapoint (best-effort)
-    datapoint_config_file = None
+    # 6. SHOW-TEMPLATE – datapoint. Skip if the connector has no template supporting datapoints.
     datapoint_template = _try_show_template(
         f"az iot ops ns asset datapoint add {base_cmd} "
         f"--dataset {dataset_name} --name {datapoint_name} "
         f"--data-source '{dp_data_source}' --show-template config"
     )
-    if datapoint_template:
-        assert "connectorType" in datapoint_template
-        assert "datapointConfig" in datapoint_template
-        datapoint_config_file = _save_json_to_file(datapoint_template, tracked_files)
+    if not datapoint_template:
+        pytest.skip(
+            "Generalized datapoint commands require connector metadata; no connector template "
+            "supporting datapoints is installed for this connector."
+        )
+    assert "connectorType" in datapoint_template
+    assert "datapointConfig" in datapoint_template
+    datapoint_config_file = _save_json_to_file(datapoint_template, tracked_files)
 
     # 7. ADD datapoint
     dp_add_cmd = (

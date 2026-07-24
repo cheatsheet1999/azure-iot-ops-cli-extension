@@ -39,7 +39,12 @@ from azext_edge.edge.commands_namespaces import (
 from .test_namespace_assets_unit import (
     get_namespace_asset_mgmt_uri, get_namespace_asset_record, add_device_get_call
 )
-from .namespace_helpers import check_event_configuration, check_destinations
+from .namespace_helpers import (
+    CONFIG_INPUT_FORMS,
+    check_destinations,
+    check_event_configuration,
+    materialize_config,
+)
 from ...generators import generate_random_string
 
 
@@ -2248,5 +2253,267 @@ def test_add_event_group_generalized_connector_type_mismatch_raises(
             instance_resource_group="rg",
             group_name="new-eg",
             event_group_config=mismatched_config,
+            wait_sec=0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# unsupported-capability guard tests (event groups + events)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", [add_namespace_asset_event_group, update_namespace_asset_event_group])
+@pytest.mark.parametrize("config_form", CONFIG_INPUT_FORMS)
+def test_event_group_generalized_config_unsupported_capability_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    tmp_path,
+    config_form: str,
+    command,
+):
+    """--event-group-config for a connector whose metadata omits 'eventGroups' must raise a
+    clear 'does not support event groups' error. Covers both add and update commands, for every
+    accepted input form (inline JSON, JSON file, YAML file)."""
+    asset_name = "gen-asset"
+    group_name = "target-eg"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    # update must find an existing event group so the capability guard (not "not found") is reached.
+    is_update = command is update_namespace_asset_event_group
+    event_groups = [generate_event_group(group_name=group_name)] if is_update else []
+    asset = _build_asset_with_connector_events(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        event_groups=event_groups,
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    metadata = _event_metadata(connector_type)
+    metadata["inboundEndpoints"][0].pop("eventGroups")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    config = materialize_config(
+        {"eventGroupConfiguration": {"anything": "goes"}}, config_form, tmp_path
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support event groups"):
+        command(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            group_name=group_name,
+            event_group_config=config,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize("command", [add_namespace_asset_event_group, update_namespace_asset_event_group])
+def test_event_group_generalized_no_config_unsupported_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    command,
+):
+    """Even with no --event-group-config and no --show-template, adding/updating an event group on
+    a connector that doesn't support event groups must be blocked (DOE parity)."""
+    asset_name = "gen-asset"
+    group_name = "target-eg"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    is_update = command is update_namespace_asset_event_group
+    event_groups = [generate_event_group(group_name=group_name)] if is_update else []
+    asset = _build_asset_with_connector_events(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        event_groups=event_groups,
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    metadata = _event_metadata(connector_type)
+    metadata["inboundEndpoints"][0].pop("eventGroups")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support event groups"):
+        command(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            group_name=group_name,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize("command", [add_namespace_asset_event_group, update_namespace_asset_event_group])
+@pytest.mark.parametrize("template_mode", ["config", "schema"])
+def test_event_group_generalized_show_template_unsupported_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    template_mode: str,
+    command,
+):
+    """--show-template (config or schema) for a connector without an 'eventGroups' section must
+    raise rather than returning an empty template. Covers both add and update commands."""
+    asset_name = "gen-asset"
+    group_name = "target-eg"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    is_update = command is update_namespace_asset_event_group
+    event_groups = [generate_event_group(group_name=group_name)] if is_update else []
+    asset = _build_asset_with_connector_events(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        event_groups=event_groups,
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    metadata = _event_metadata(connector_type)
+    metadata["inboundEndpoints"][0].pop("eventGroups")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support event groups"):
+        command(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            group_name=group_name,
+            show_template=template_mode,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize("config_form", CONFIG_INPUT_FORMS)
+def test_add_event_generalized_config_unsupported_capability_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    tmp_path,
+    config_form: str,
+):
+    """--event-config for a connector whose metadata omits 'eventGroups.events' must raise a
+    clear 'does not support events' error, for every accepted input form."""
+    asset_name = "gen-asset"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector_events(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        event_groups=[{"name": "sensor-eg", "dataSource": "s/src", "events": []}],
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    # eventGroups exists (groups supported) but the nested 'events' capability is absent.
+    metadata = _event_metadata(connector_type)
+    metadata["inboundEndpoints"][0]["eventGroups"].pop("events")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    config = materialize_config(
+        {"eventConfiguration": {"anything": "goes"}}, config_form, tmp_path
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support events"):
+        add_namespace_asset_event_group_event(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            group_name="sensor-eg",
+            event_name="temp-ev",
+            event_config=config,
+            wait_sec=0,
+        )
+
+
+@pytest.mark.parametrize("template_mode", ["config", "schema"])
+def test_add_event_generalized_show_template_unsupported_raises(
+    mocked_cmd,
+    mocked_responses: responses,
+    mocked_check_cluster_connectivity,
+    mocked_get_namespace_for_instance,
+    mocker,
+    template_mode: str,
+):
+    """--show-template (config or schema) on the add-event path for a connector without
+    'eventGroups.events' must raise rather than returning an empty template."""
+    asset_name = "gen-asset"
+    connector_type = "Custom.Test"
+    ns_resource = mocked_get_namespace_for_instance.return_value
+    namespace_name = ns_resource["name"]
+    resource_group_name = ns_resource["resource_group"]
+
+    asset = _build_asset_with_connector_events(
+        asset_name=asset_name,
+        namespace_name=namespace_name,
+        resource_group_name=resource_group_name,
+        event_groups=[{"name": "sensor-eg", "dataSource": "s/src", "events": []}],
+    )
+    _register_asset_and_device_get(
+        mocked_responses, asset, namespace_name, resource_group_name, asset_name, connector_type
+    )
+
+    metadata = _event_metadata(connector_type)
+    metadata["inboundEndpoints"][0]["eventGroups"].pop("events")
+    mocker.patch(
+        "azext_edge.edge.providers.adr.namespace_assets.NamespaceAssets._get_connector_metadata",
+        return_value=metadata,
+    )
+
+    with pytest.raises(InvalidArgumentValueError, match="does not support events"):
+        add_namespace_asset_event_group_event(
+            cmd=mocked_cmd,
+            asset_name=asset_name,
+            instance_name="inst",
+            instance_resource_group="rg",
+            group_name="sensor-eg",
+            event_name="temp-ev",
+            show_template=template_mode,
             wait_sec=0,
         )
