@@ -6,6 +6,7 @@
 
 import json
 import re
+import time
 from contextlib import nullcontext
 from typing import Dict, Iterable, List, Optional
 from urllib.parse import urlsplit
@@ -112,13 +113,16 @@ def _is_https_url(url: str) -> bool:
     return parsed.scheme.lower() == "https" and parsed.hostname is not None
 
 
-def _read_public_discovery_issuer(discovery_url: str) -> Optional[str]:
+def _read_public_discovery_issuer(discovery_url: str, deadline: float) -> Optional[str]:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
     try:
         with requests.get(
             discovery_url,
             allow_redirects=False,
             stream=True,
-            timeout=OIDC_DISCOVERY_TIMEOUT_SECONDS,
+            timeout=remaining,
             verify=True,
         ) as response:
             if response.status_code != 200:
@@ -126,11 +130,14 @@ def _read_public_discovery_issuer(discovery_url: str) -> Optional[str]:
             # Bound the decoded body since the URL comes from ARM data.
             content = bytearray()
             for chunk in response.iter_content(chunk_size=OIDC_DISCOVERY_MAX_RESPONSE_BYTES):
+                if time.monotonic() > deadline:
+                    return None
                 content.extend(chunk)
                 if len(content) > OIDC_DISCOVERY_MAX_RESPONSE_BYTES:
                     return None
             issuer = json.loads(content).get("issuer")
-    except (requests.RequestException, ValueError, AttributeError, TypeError):
+    except Exception:
+        logger.debug("Failed to read the OIDC discovery document from '%s'.", discovery_url, exc_info=True)
         return None
     return issuer if isinstance(issuer, str) and issuer else None
 
@@ -138,12 +145,19 @@ def _read_public_discovery_issuer(discovery_url: str) -> Optional[str]:
 def _get_public_discovery_issuer(arm_issuer: str) -> Optional[str]:
     if not _is_https_url(arm_issuer):
         return None
-    discovery_urls = [f"{arm_issuer}{OIDC_DISCOVERY_PATH}"]
+    # Probe the normalized "/.well-known" URL first so a trailing-slash issuer does not spend the
+    # shared time budget on the "//.well-known" URL.
     if arm_issuer.endswith("/"):
-        discovery_urls.append(f"{arm_issuer[:-1]}{OIDC_DISCOVERY_PATH}")
+        discovery_urls = [
+            f"{arm_issuer[:-1]}{OIDC_DISCOVERY_PATH}",
+            f"{arm_issuer}{OIDC_DISCOVERY_PATH}",
+        ]
+    else:
+        discovery_urls = [f"{arm_issuer}{OIDC_DISCOVERY_PATH}"]
 
+    deadline = time.monotonic() + OIDC_DISCOVERY_TIMEOUT_SECONDS
     for discovery_url in discovery_urls:
-        issuer = _read_public_discovery_issuer(discovery_url)
+        issuer = _read_public_discovery_issuer(discovery_url, deadline)
         if issuer and oidc_issuers_match(arm_issuer, issuer):
             return issuer
     return None
@@ -163,8 +177,8 @@ def resolve_oidc_issuer(arm_issuer: str) -> str:
         return discovery_issuer
 
     logger.warning(
-        "Could not verify the OIDC issuer reported by ARM '%s'. The ARM value will be used for the federated "
-        "identity credential, but workload identity token exchange may fail if it differs from the cluster issuer.",
+        "Could not verify the OIDC issuer '%s' from this host. The ARM-reported value will be used "
+        "for the federated identity credential. This may still work if Microsoft Entra can reach the issuer.",
         arm_issuer,
     )
     return arm_issuer
