@@ -33,6 +33,7 @@ from azext_edge.edge.providers.orchestration.resources.instances import (
     SERVICE_ACCOUNT_SCHEMA,
     SERVICE_ACCOUNT_SECRETSYNC,
     SERVICE_ACCOUNT_WASM,
+    SPC_RESOURCE_TYPE,
     get_fc_name,
     get_spc_name,
     parse_feature_kvp_nargs,
@@ -909,6 +910,132 @@ def test_secretsync_enable(
             assert ra_put_request["properties"]["roleDefinitionId"] == role_ids[i]
             assert ra_put_request["properties"]["principalId"] == principal_id
             assert ra_put_request["properties"]["principalType"] == "ServicePrincipal"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "repair",
+        "exact",
+        "unrelated",
+        "fallback",
+        "exact_preferred",
+    ],
+)
+def test_secretsync_enable_repairs_existing_fic(
+    mocker,
+    mocked_resolve_oidc_issuer: Mock,
+    scenario: str,
+):
+    instances = Instances.__new__(Instances)
+    instances.resource_client = mocker.Mock()
+    instances.msi_mgmt_client = mocker.Mock()
+    instances.ssc_mgmt_client = mocker.Mock()
+    instances.show = mocker.Mock()
+    instances.get_resource_map = mocker.Mock()
+    instances.get_associated_cl = mocker.Mock()
+    instances._ensure_oidc_issuer = mocker.Mock()
+    instances.federate_msi = mocker.Mock()
+    instances.update = mocker.Mock()
+
+    resource_group_name = generate_random_string()
+    instance_name = generate_random_string()
+    namespace = generate_random_string()
+    uami_name = generate_random_string()
+    uami_resource_id = generate_resource_id(
+        resource_group_name=resource_group_name,
+        resource_provider="Microsoft.ManagedIdentity",
+        resource_path=f"/userAssignedIdentities/{uami_name}",
+    )
+    keyvault_resource_id = generate_resource_id(
+        resource_group_name=resource_group_name,
+        resource_provider="Microsoft.KeyVault",
+        resource_path=f"/keyvaults/{generate_random_string()}",
+    )
+    instance = {
+        "name": instance_name,
+        "extendedLocation": {"name": generate_resource_id(resource_group_name=resource_group_name)},
+    }
+    instances.show.return_value = instance
+    instances.get_associated_cl.return_value = {"properties": {"namespace": namespace}}
+    resource_map = instances.get_resource_map.return_value
+    resource_map.connected_cluster.resource = {"name": generate_random_string()}
+    resource_map.connected_cluster.get_cl_resources_by_type.return_value = {SPC_RESOURCE_TYPE: [{}]}
+
+    arm_issuer = "https://issuer.example/cluster/"
+    discovery_issuer = arm_issuer[:-1]
+    instances._ensure_oidc_issuer.return_value = arm_issuer
+    mocked_resolve_oidc_issuer.side_effect = None
+    mocked_resolve_oidc_issuer.return_value = arm_issuer if scenario == "fallback" else discovery_issuer
+
+    subject = f"system:serviceaccount:{namespace}:{SERVICE_ACCOUNT_SECRETSYNC}"
+    audiences = ["api://AzureADTokenExchange"]
+    slash_cred = {
+        "name": "slash-cred",
+        "properties": {
+            "issuer": arm_issuer,
+            "subject": subject,
+            "audiences": audiences,
+        },
+    }
+    exact_cred = {
+        "name": "exact-cred",
+        "properties": {
+            "issuer": discovery_issuer,
+            "subject": subject,
+            "audiences": audiences,
+        },
+    }
+    if scenario == "exact":
+        existing_creds = [exact_cred]
+    elif scenario == "unrelated":
+        slash_cred["properties"]["subject"] = f"{subject}-other"
+        existing_creds = [slash_cred]
+    elif scenario == "exact_preferred":
+        existing_creds = [slash_cred, exact_cred]
+    else:
+        existing_creds = [slash_cred]
+    instances.msi_mgmt_client.federated_identity_credentials.list.return_value = existing_creds
+
+    status = mocker.patch(
+        "azext_edge.edge.providers.orchestration.resources.instances.console.status"
+    ).return_value.__enter__.return_value
+
+    result = instances.enable_secretsync(
+        name=instance_name,
+        resource_group_name=resource_group_name,
+        mi_user_assigned=uami_resource_id,
+        keyvault_resource_id=keyvault_resource_id,
+        skip_role_assignments=True,
+    )
+
+    assert result is None
+    mocked_resolve_oidc_issuer.assert_called_once_with(arm_issuer=arm_issuer)
+    status.stop.assert_called_once()
+    instances.federate_msi.assert_not_called()
+    instances.ssc_mgmt_client.azure_key_vault_secret_provider_classes.begin_create_or_update.assert_not_called()
+    instances.update.assert_not_called()
+
+    fic_ops = instances.msi_mgmt_client.federated_identity_credentials
+    if scenario == "fallback":
+        fic_ops.list.assert_not_called()
+        fic_ops.create_or_update.assert_not_called()
+    elif scenario == "repair":
+        fic_ops.create_or_update.assert_called_once_with(
+            resource_group_name=resource_group_name,
+            resource_name=uami_name,
+            federated_identity_credential_resource_name=slash_cred["name"],
+            parameters={
+                "properties": {
+                    "subject": subject,
+                    "audiences": audiences,
+                    "issuer": discovery_issuer,
+                }
+            },
+        )
+    else:
+        fic_ops.list.assert_called_once()
+        fic_ops.create_or_update.assert_not_called()
 
 
 @pytest.mark.parametrize(
