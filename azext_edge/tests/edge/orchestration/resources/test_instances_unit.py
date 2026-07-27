@@ -77,6 +77,15 @@ def mocked_get_tenant_id(mocker):
     )
 
 
+@pytest.fixture(autouse=True)
+def mocked_resolve_oidc_issuer(mocker):
+    yield mocker.patch(
+        "azext_edge.edge.providers.orchestration.resources.instances.resolve_oidc_issuer",
+        autospec=True,
+        side_effect=lambda arm_issuer, **_: arm_issuer,
+    )
+
+
 def get_instance_endpoint(
     resource_group_name: Optional[str] = None, instance_name: Optional[str] = None, **kwargs: dict
 ) -> str:
@@ -666,6 +675,7 @@ def test_secretsync_enable(
     custom_role_id: Optional[str],
     tags: Optional[dict],
     mocked_get_tenant_id: Mock,
+    mocked_resolve_oidc_issuer: Mock,
 ):
     oidc_issuer_def = {
         "oidcIssuerProfile": {
@@ -864,6 +874,7 @@ def test_secretsync_enable(
         wait_sec=0.1,
     )
     assert result == spc_payload
+    mocked_resolve_oidc_issuer.assert_called_once_with(arm_issuer=oidc_issuer)
     spc_create_request = json.loads(spc_create.calls[0].request.body)
     assert spc_create_request["extendedLocation"] == instance_record["extendedLocation"]
     assert spc_create_request["location"] == cluster_location

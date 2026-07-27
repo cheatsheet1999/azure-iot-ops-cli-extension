@@ -4,10 +4,14 @@
 # Licensed under the MIT License. See License file in the project root for license information.
 # ----------------------------------------------------------------------------------------------
 
+import json
 import re
+import time
 from contextlib import nullcontext
 from typing import Dict, Iterable, List, Optional
+from urllib.parse import urlsplit
 
+import requests
 import yaml
 from azure.cli.core.azclierror import (
     AzureResponseError,
@@ -68,6 +72,10 @@ KEYVAULT_ROLE_ID_SECRETS_USER = "4633458b-17de-408a-b874-0445c86b69e6"
 KEYVAULT_ROLE_ID_READER = "21090545-7ca7-4776-b22c-e363652d74d2"
 
 COMPAT_FEAT_KEY_SET = {"opcua.mode"}
+OIDC_DISCOVERY_PATH = "/.well-known/openid-configuration"
+OIDC_DISCOVERY_TIMEOUT_SECONDS = 5
+OIDC_DISCOVERY_MAX_RESPONSE_BYTES = 64 * 1024  # cap the response size to 64KB
+OIDC_DISCOVERY_CHUNK_SIZE_BYTES = 8 * 1024
 
 
 def get_user_msg_warn_ra(prefix: str, principal_id: str, scope: str) -> str:
@@ -90,6 +98,91 @@ def get_fc_name(cluster_name: str, oidc_issuer: str, subject: str) -> str:
 
 def get_cred_subject(namespace: str, service_account_name: str):
     return f"system:serviceaccount:{namespace}:{service_account_name}"
+
+
+def oidc_issuers_match(first: str, second: str) -> bool:
+    if first == second:
+        return True
+    return first == f"{second}/" or second == f"{first}/"
+
+
+def _is_https_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+    except (AttributeError, ValueError):
+        return False
+    return parsed.scheme.lower() == "https" and parsed.hostname is not None
+
+
+def _read_public_discovery_issuer(discovery_url: str, deadline: float) -> Optional[str]:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    try:
+        with requests.get(
+            discovery_url,
+            allow_redirects=False,
+            stream=True,
+            timeout=remaining,
+            verify=True,
+        ) as response:
+            if response.status_code != 200:
+                return None
+            # Bound the decoded body since the URL comes from ARM data.
+            content = bytearray()
+            for chunk in response.iter_content(chunk_size=OIDC_DISCOVERY_CHUNK_SIZE_BYTES):
+                if time.monotonic() > deadline:
+                    return None
+                content.extend(chunk)
+                if len(content) > OIDC_DISCOVERY_MAX_RESPONSE_BYTES:
+                    return None
+            issuer = json.loads(content).get("issuer")
+    except Exception:
+        logger.debug("Failed to read the OIDC discovery document from '%s'.", discovery_url, exc_info=True)
+        return None
+    return issuer if isinstance(issuer, str) and issuer else None
+
+
+def _get_public_discovery_issuer(arm_issuer: str) -> Optional[str]:
+    if not _is_https_url(arm_issuer):
+        return None
+    # Probe the normalized "/.well-known" URL first so a trailing-slash issuer does not spend the
+    # shared time budget on the "//.well-known" URL.
+    if arm_issuer.endswith("/"):
+        discovery_urls = [
+            f"{arm_issuer[:-1]}{OIDC_DISCOVERY_PATH}",
+            f"{arm_issuer}{OIDC_DISCOVERY_PATH}",
+        ]
+    else:
+        discovery_urls = [f"{arm_issuer}{OIDC_DISCOVERY_PATH}"]
+
+    deadline = time.monotonic() + OIDC_DISCOVERY_TIMEOUT_SECONDS
+    for discovery_url in discovery_urls:
+        issuer = _read_public_discovery_issuer(discovery_url, deadline)
+        if issuer and oidc_issuers_match(arm_issuer, issuer):
+            return issuer
+    return None
+
+
+def resolve_oidc_issuer(arm_issuer: str) -> str:
+    discovery_issuer = _get_public_discovery_issuer(arm_issuer)
+
+    if discovery_issuer:
+        if discovery_issuer != arm_issuer:
+            logger.warning(
+                "The OIDC issuer reported by ARM '%s' differs from the cluster issuer '%s' by a trailing slash. "
+                "The federated identity credential will use the cluster issuer.",
+                arm_issuer,
+                discovery_issuer,
+            )
+        return discovery_issuer
+
+    logger.warning(
+        "Could not verify the OIDC issuer '%s' from this host. The ARM-reported value will be used "
+        "for the federated identity credential. This may still work if Microsoft Entra can reach the issuer.",
+        arm_issuer,
+    )
+    return arm_issuer
 
 
 def get_enable_syntax(instance_name: str, resource_group_name: str) -> str:
@@ -393,6 +486,7 @@ class Instances(Queryable):
                 )
                 return
 
+            oidc_issuer = resolve_oidc_issuer(arm_issuer=oidc_issuer)
             if not federated_credential_name:
                 federated_credential_name = get_fc_name(
                     cluster_name=cluster_resource["name"],

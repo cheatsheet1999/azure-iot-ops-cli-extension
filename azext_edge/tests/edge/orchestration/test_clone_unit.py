@@ -191,6 +191,15 @@ def mock_pathlib_path(mocker):
     yield patched
 
 
+@pytest.fixture(autouse=True)
+def mocked_clone_resolve_oidc_issuer(mocker):
+    yield mocker.patch(
+        "azext_edge.edge.providers.orchestration.clone.resolve_oidc_issuer",
+        autospec=True,
+        side_effect=lambda arm_issuer, **_: arm_issuer,
+    )
+
+
 def get_deploy_url(cluster_sub_id: str, cluster_rg: str, deployment_name: str, page_num: Optional[int] = 1) -> str:
     page_num = "" if not page_num else f"_{page_num}"
     return (
@@ -1293,6 +1302,32 @@ def test_clone_deploy_subjects(
 
     assert deploy_body_payload["properties"]["parameters"] == expected_deploy_params
     assert deploy_body_payload["properties"]["template"]
+
+
+def test_clone_resolves_oidc_issuer(
+    mocker,
+    mocked_clone_resolve_oidc_issuer,
+):
+    arm_issuer = "https://localhost/issuer/"
+    restore = mocker.Mock()
+    restore.user_assigned_mis = [
+        "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/identity"
+    ]
+    restore.connected_cluster.resource = {}
+    restore.instances._ensure_oidc_issuer.return_value = arm_issuer
+    restore.namespace = "namespace"
+
+    msi_client = mocker.patch(
+        "azext_edge.edge.providers.orchestration.clone.get_msi_mgmt_client",
+        autospec=True,
+    ).return_value
+    msi_client.federated_identity_credentials.list.return_value = []
+
+    InstanceRestore._handle_federation(restore)
+
+    mocked_clone_resolve_oidc_issuer.assert_called_once_with(
+        arm_issuer=arm_issuer,
+    )
 
 
 @pytest.mark.parametrize(
