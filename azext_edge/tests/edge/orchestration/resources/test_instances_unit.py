@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import pytest
 import responses
 from azure.cli.core.azclierror import InvalidArgumentValueError, ValidationError
+from azure.core.exceptions import HttpResponseError
 
 from azext_edge.edge.commands_edge import (
     instance_identity_assign,
@@ -83,7 +84,7 @@ def mocked_resolve_oidc_issuer(mocker):
     yield mocker.patch(
         "azext_edge.edge.providers.orchestration.resources.instances.resolve_oidc_issuer",
         autospec=True,
-        side_effect=lambda arm_issuer, **_: arm_issuer,
+        side_effect=lambda arm_issuer, **_: (arm_issuer, False),
     )
 
 
@@ -916,6 +917,7 @@ def test_secretsync_enable(
     "scenario",
     [
         "repair",
+        "verified_exact_arm",
         "exact",
         "unrelated",
         "fallback",
@@ -962,18 +964,21 @@ def test_secretsync_enable_repairs_existing_fic(
     resource_map.connected_cluster.resource = {"name": generate_random_string()}
     resource_map.connected_cluster.get_cl_resources_by_type.return_value = {SPC_RESOURCE_TYPE: [{}]}
 
-    arm_issuer = "https://issuer.example/cluster/"
-    discovery_issuer = arm_issuer[:-1]
+    discovery_issuer = "https://issuer.example/cluster"
+    slash_issuer = f"{discovery_issuer}/"
+    arm_issuer = discovery_issuer if scenario in {"fallback", "verified_exact_arm"} else slash_issuer
     instances._ensure_oidc_issuer.return_value = arm_issuer
     mocked_resolve_oidc_issuer.side_effect = None
-    mocked_resolve_oidc_issuer.return_value = arm_issuer if scenario == "fallback" else discovery_issuer
+    resolved_issuer = arm_issuer if scenario in {"fallback", "verified_exact_arm"} else discovery_issuer
+    issuer_verified = scenario != "fallback"
+    mocked_resolve_oidc_issuer.return_value = resolved_issuer, issuer_verified
 
     subject = f"system:serviceaccount:{namespace}:{SERVICE_ACCOUNT_SECRETSYNC}"
     audiences = ["api://AzureADTokenExchange"]
-    slash_cred = {
-        "name": "slash-cred",
+    mismatched_cred = {
+        "name": "mismatched-cred",
         "properties": {
-            "issuer": arm_issuer,
+            "issuer": slash_issuer,
             "subject": subject,
             "audiences": audiences,
         },
@@ -981,7 +986,7 @@ def test_secretsync_enable_repairs_existing_fic(
     exact_cred = {
         "name": "exact-cred",
         "properties": {
-            "issuer": discovery_issuer,
+            "issuer": resolved_issuer,
             "subject": subject,
             "audiences": audiences,
         },
@@ -989,12 +994,12 @@ def test_secretsync_enable_repairs_existing_fic(
     if scenario == "exact":
         existing_creds = [exact_cred]
     elif scenario == "unrelated":
-        slash_cred["properties"]["subject"] = f"{subject}-other"
-        existing_creds = [slash_cred]
+        mismatched_cred["properties"]["subject"] = f"{subject}-other"
+        existing_creds = [mismatched_cred]
     elif scenario == "exact_preferred":
-        existing_creds = [slash_cred, exact_cred]
+        existing_creds = [mismatched_cred, exact_cred]
     else:
-        existing_creds = [slash_cred]
+        existing_creds = [mismatched_cred]
     instances.msi_mgmt_client.federated_identity_credentials.list.return_value = existing_creds
 
     status = mocker.patch(
@@ -1020,22 +1025,78 @@ def test_secretsync_enable_repairs_existing_fic(
     if scenario == "fallback":
         fic_ops.list.assert_not_called()
         fic_ops.create_or_update.assert_not_called()
-    elif scenario == "repair":
+    elif scenario in {"repair", "verified_exact_arm"}:
         fic_ops.create_or_update.assert_called_once_with(
             resource_group_name=resource_group_name,
             resource_name=uami_name,
-            federated_identity_credential_resource_name=slash_cred["name"],
+            federated_identity_credential_resource_name=mismatched_cred["name"],
             parameters={
                 "properties": {
                     "subject": subject,
                     "audiences": audiences,
-                    "issuer": discovery_issuer,
+                    "issuer": resolved_issuer,
                 }
             },
         )
     else:
         fic_ops.list.assert_called_once()
         fic_ops.create_or_update.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["list", "update"])
+def test_repair_federated_cred_issuer_surfaces_actionable_error(mocker, operation: str):
+    instances = Instances.__new__(Instances)
+    instances.msi_mgmt_client = mocker.Mock()
+
+    subscription_id = generate_uuid()
+    resource_group_name = "rg(prod)"
+    uami_name = generate_random_string()
+    mi_resource_id_container = mocker.Mock(
+        subscription_id=subscription_id,
+        resource_group_name=resource_group_name,
+        resource_name=uami_name,
+    )
+    issuer_url = "https://issuer.example/cluster"
+    subject = f"system:serviceaccount:{generate_random_string()}:{SERVICE_ACCOUNT_SECRETSYNC}"
+    credential_name = generate_random_string()
+    fic_ops = instances.msi_mgmt_client.federated_identity_credentials
+
+    if operation == "list":
+        fic_ops.list.side_effect = HttpResponseError(message="Permission denied")
+    else:
+        fic_ops.list.return_value = [
+            {
+                "name": credential_name,
+                "properties": {
+                    "issuer": f"{issuer_url}/",
+                    "subject": subject,
+                    "audiences": ["api://AzureADTokenExchange"],
+                },
+            }
+        ]
+        fic_ops.create_or_update.side_effect = HttpResponseError(message="Request failed")
+
+    with pytest.raises(ValidationError) as exc:
+        instances._repair_federated_cred_issuer(
+            mi_resource_id_container=mi_resource_id_container,
+            issuer_url=issuer_url,
+            subject=subject,
+        )
+
+    message = str(exc.value)
+    assert uami_name in message
+    assert resource_group_name in message
+    assert subscription_id in message
+    assert "--resource-group 'rg(prod)'" in message
+    if operation == "list":
+        assert "Permission denied" in message
+        assert "az identity federated-credential list" in message
+        fic_ops.create_or_update.assert_not_called()
+    else:
+        assert "Request failed" in message
+        assert credential_name in message
+        assert "az identity federated-credential update" in message
+        assert f"--issuer '{issuer_url}'" in message
 
 
 @pytest.mark.parametrize(

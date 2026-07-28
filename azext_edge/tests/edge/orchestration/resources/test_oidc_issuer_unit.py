@@ -28,7 +28,7 @@ def test_resolve_oidc_issuer_uses_exact_public_discovery(mocked_responses: respo
     )
     warning = mocker.patch("azext_edge.edge.providers.orchestration.resources.instances.logger.warning")
 
-    assert resolve_oidc_issuer(arm_issuer) == arm_issuer
+    assert resolve_oidc_issuer(arm_issuer) == (arm_issuer, True)
     warning.assert_not_called()
 
 
@@ -43,7 +43,7 @@ def test_resolve_oidc_issuer_corrects_one_trailing_slash(mocked_responses: respo
     )
     warning = mocker.patch("azext_edge.edge.providers.orchestration.resources.instances.logger.warning")
 
-    assert resolve_oidc_issuer(arm_issuer) == discovery_issuer
+    assert resolve_oidc_issuer(arm_issuer) == (discovery_issuer, True)
     assert [call.request.url for call in mocked_responses.calls] == [
         f"{discovery_issuer}{OIDC_DISCOVERY_PATH}",
     ]
@@ -60,7 +60,7 @@ def test_resolve_oidc_issuer_keeps_arm_issuer_for_malformed_discovery(mocked_res
     )
     warning = mocker.patch("azext_edge.edge.providers.orchestration.resources.instances.logger.warning")
 
-    assert resolve_oidc_issuer(arm_issuer) == arm_issuer
+    assert resolve_oidc_issuer(arm_issuer) == (arm_issuer, False)
     warning.assert_called_once()
 
 
@@ -78,7 +78,7 @@ def test_resolve_oidc_issuer_keeps_arm_issuer_for_deeply_nested_discovery(mocked
     )
     warning = mocker.patch("azext_edge.edge.providers.orchestration.resources.instances.logger.warning")
 
-    assert resolve_oidc_issuer(arm_issuer) == arm_issuer
+    assert resolve_oidc_issuer(arm_issuer) == (arm_issuer, False)
     warning.assert_called_once()
 
 
@@ -97,7 +97,7 @@ def test_resolve_oidc_issuer_rejects_more_than_one_trailing_slash(mocked_respons
         )
     warning = mocker.patch("azext_edge.edge.providers.orchestration.resources.instances.logger.warning")
 
-    assert resolve_oidc_issuer(arm_issuer) == arm_issuer
+    assert resolve_oidc_issuer(arm_issuer) == (arm_issuer, False)
     warning.assert_called_once()
 
 
@@ -109,7 +109,7 @@ def test_resolve_oidc_issuer_rejects_non_https_issuer(mocker):
     )
     warning = mocker.patch("azext_edge.edge.providers.orchestration.resources.instances.logger.warning")
 
-    assert resolve_oidc_issuer(arm_issuer) == arm_issuer
+    assert resolve_oidc_issuer(arm_issuer) == (arm_issuer, False)
     request_get.assert_not_called()
     warning.assert_called_once()
 
@@ -122,7 +122,7 @@ def test_resolve_oidc_issuer_keeps_arm_issuer_for_malformed_issuer_url(mocker):
     )
     warning = mocker.patch("azext_edge.edge.providers.orchestration.resources.instances.logger.warning")
 
-    assert resolve_oidc_issuer(arm_issuer) == arm_issuer
+    assert resolve_oidc_issuer(arm_issuer) == (arm_issuer, False)
     request_get.assert_not_called()
     warning.assert_called_once()
 
@@ -136,7 +136,7 @@ def test_resolve_oidc_issuer_keeps_arm_issuer_when_discovery_is_unreachable(mock
     )
     warning = mocker.patch("azext_edge.edge.providers.orchestration.resources.instances.logger.warning")
 
-    assert resolve_oidc_issuer(arm_issuer) == arm_issuer
+    assert resolve_oidc_issuer(arm_issuer) == (arm_issuer, False)
     warning.assert_called_once()
 
 
@@ -153,7 +153,7 @@ def test_resolve_oidc_issuer_rejects_oversized_discovery(mocked_responses: respo
     )
     warning = mocker.patch("azext_edge.edge.providers.orchestration.resources.instances.logger.warning")
 
-    assert resolve_oidc_issuer(arm_issuer) == arm_issuer
+    assert resolve_oidc_issuer(arm_issuer) == (arm_issuer, False)
     warning.assert_called_once()
 
 
@@ -175,6 +175,6 @@ def test_resolve_oidc_issuer_ignores_redirects(mocked_responses: responses, mock
     )
     warning = mocker.patch("azext_edge.edge.providers.orchestration.resources.instances.logger.warning")
 
-    assert resolve_oidc_issuer(arm_issuer) == arm_issuer
+    assert resolve_oidc_issuer(arm_issuer) == (arm_issuer, False)
     assert len(mocked_responses.calls) == 1
     warning.assert_called_once()
