@@ -1072,13 +1072,14 @@ class Instances(Queryable):
             raise ValidationError(
                 "Failed to inspect federated identity credentials for identity "
                 f"'{mi_resource_id_container.resource_name}' while checking the SecretSync issuer.\n"
-                "Ensure you have permission to read federated identity credentials, then rerun the command.\n"
-                "Inspect the credentials manually with:\n"
+                f"Error: {http_exc}\n\n"
+                "Ensure you have permission to read federated identity credentials. "
+                "You can inspect them manually with:\n"
                 f"az identity federated-credential list "
                 f"--identity-name '{mi_resource_id_container.resource_name}' "
                 f"--resource-group '{mi_resource_id_container.resource_group_name}' "
-                f"--subscription '{mi_resource_id_container.subscription_id}'\n"
-                f"Error: {http_exc}"
+                f"--subscription '{mi_resource_id_container.subscription_id}'\n\n"
+                "Please resolve the error, then rerun the command to apply the repair."
             )
         if not federated_cred:
             return
@@ -1105,14 +1106,14 @@ class Instances(Queryable):
             raise ValidationError(
                 f"Failed to repair federated identity credential '{federated_cred['name']}' "
                 f"for identity '{mi_resource_id_container.resource_name}'.\n"
-                "Update its issuer manually, then rerun the command:\n"
+                f"Error: {http_exc}\n\n"
+                "Update its issuer manually with:\n"
                 f"az identity federated-credential update "
                 f"--name '{federated_cred['name']}' "
                 f"--identity-name '{mi_resource_id_container.resource_name}' "
                 f"--resource-group '{mi_resource_id_container.resource_group_name}' "
                 f"--issuer '{issuer_url}' "
-                f"--subscription '{mi_resource_id_container.subscription_id}'\n"
-                f"Error: {http_exc}"
+                f"--subscription '{mi_resource_id_container.subscription_id}'"
             )
 
     def unfederate_msi(
