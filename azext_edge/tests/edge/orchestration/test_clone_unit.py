@@ -196,7 +196,7 @@ def mocked_clone_resolve_oidc_issuer(mocker):
     yield mocker.patch(
         "azext_edge.edge.providers.orchestration.clone.resolve_oidc_issuer",
         autospec=True,
-        side_effect=lambda arm_issuer, **_: arm_issuer,
+        side_effect=lambda arm_issuer, **_: (arm_issuer, False),
     )
 
 
@@ -1309,6 +1309,8 @@ def test_clone_resolves_oidc_issuer(
     mocked_clone_resolve_oidc_issuer,
 ):
     arm_issuer = "https://localhost/issuer/"
+    resolved_issuer = arm_issuer[:-1]
+    subject = "system:serviceaccount:namespace:aio-ssc-sa"
     restore = mocker.Mock()
     restore.user_assigned_mis = [
         "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/identity"
@@ -1316,18 +1318,31 @@ def test_clone_resolves_oidc_issuer(
     restore.connected_cluster.resource = {}
     restore.instances._ensure_oidc_issuer.return_value = arm_issuer
     restore.namespace = "namespace"
+    restore.cluster_name = "cluster"
+    mocked_clone_resolve_oidc_issuer.side_effect = None
+    mocked_clone_resolve_oidc_issuer.return_value = resolved_issuer, True
 
     msi_client = mocker.patch(
         "azext_edge.edge.providers.orchestration.clone.get_msi_mgmt_client",
         autospec=True,
     ).return_value
-    msi_client.federated_identity_credentials.list.return_value = []
+    msi_client.federated_identity_credentials.list.return_value = [
+        {
+            "properties": {
+                "issuer": arm_issuer,
+                "subject": subject,
+            }
+        }
+    ]
 
     InstanceRestore._handle_federation(restore)
 
     mocked_clone_resolve_oidc_issuer.assert_called_once_with(
         arm_issuer=arm_issuer,
     )
+    create_call = msi_client.federated_identity_credentials.create_or_update.call_args
+    assert create_call.kwargs["parameters"]["properties"]["issuer"] == resolved_issuer
+    assert create_call.kwargs["parameters"]["properties"]["subject"] == subject
 
 
 @pytest.mark.parametrize(
