@@ -483,7 +483,7 @@ class InstanceRestore:
         oidc_issuer = self.instances._ensure_oidc_issuer(
             cluster_resource, use_self_hosted_issuer=use_self_hosted_issuer
         )
-        oidc_issuer = resolve_oidc_issuer(arm_issuer=oidc_issuer)
+        oidc_issuer, _ = resolve_oidc_issuer(arm_issuer=oidc_issuer)
 
         for mid in self.user_assigned_mis:
             parsed_uami_id = parse_resource_id(mid)
