@@ -23,7 +23,7 @@ Safety rules:
 - Never invent API shapes, source provenance, release monikers, or CLI versions.
 - Preserve unrelated edits and refuse unsafe writes rather than attempting broad merges.
 - Treat generated files as deterministic outputs derived from reviewed source inputs.
-- Do not store credentials or assume that Agency, Azure, GitHub, or upstream repository access is available.
+- Do not store credentials or assume that Azure, GitHub, or upstream repository access is available.
 
 Use the `sync-aio-bicep-templates` skill when asked to refresh the embedded enablement or instance deployment
 templates from the Azure IoT Operations deployment repository.
