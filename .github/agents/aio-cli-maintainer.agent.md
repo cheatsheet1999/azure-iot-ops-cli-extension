@@ -26,5 +26,4 @@ Safety rules:
 - Do not store credentials or assume that Azure, GitHub, or upstream repository access is available.
 
 Use the `sync-aio-bicep-templates` skill when asked to refresh the embedded enablement or instance deployment
-templates from the Azure IoT Operations deployment repository.
-
+templates from the `azure-iot-operations-tests` deployment repository.

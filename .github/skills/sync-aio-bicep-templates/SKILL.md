@@ -1,6 +1,6 @@
 ---
 name: sync-aio-bicep-templates
-description: Generate and safely integrate updated template.py blueprints from an explicit Azure IoT Operations deployment repository and release branch.
+description: Generate and safely integrate updated template.py blueprints from the azure-iot-operations-tests deployment repository and an explicit release ref.
 ---
 
 # Synchronize AIO Bicep templates
@@ -9,7 +9,7 @@ Use this workflow when a teammate asks to generate `template.py` for a new AIO r
 
 ## Required inputs
 
-- Local path to `azure-iot-operations-tests`.
+- Local path to the `azure-iot-operations-tests` deployment repository.
 - Explicit release branch, tag, or commit, such as `releases/v1.4.x/2608`.
 - AIO release moniker, such as `2608`.
 - Explicit CLI version policy when it cannot be derived safely.
@@ -69,6 +69,9 @@ cd <temp>
 <python> -m black instance.py --line-length=120 --target-version=py39
 ```
 
+JSON mode still runs the optimizer's JSON serialization round-trip assertions. The conversion to Python is covered
+by section 5, which reparses the final assignments and requires exact dictionary equality with the optimized JSON.
+
 Always remove temporary files at the end.
 
 ## 3. Compare before editing
@@ -80,9 +83,18 @@ Parse the current blueprint assignments from `template.py` without importing tha
 
 Use Python AST and `ast.literal_eval`; do not import `template.py` and do not use broad regex replacement.
 
-Derive each `commit_id` using the latest commit at the selected ref that changed its top-level Bicep file. Show the
-selected source-ref commit as additional context. If imported Bicep changes make that provenance insufficient, ask
-for an explicit override rather than guessing.
+Determine provenance explicitly for each template:
+
+1. Enumerate all transitively referenced local source files, including Bicep imports, local modules, and files read
+   by `loadJsonContent`, `loadYamlContent`, or `loadTextContent`.
+2. Derive the latest commit at the selected ref that changed the top-level Bicep file.
+3. Compare every referenced file at that top-level commit with the same file at the selected ref. Treat a missing
+   file as a difference.
+4. If no referenced file differs, use the top-level Bicep commit as `commit_id`.
+5. If any referenced file differs, report the files and commits that changed and ask for an explicit `commit_id`
+   override rather than guessing.
+
+Show the selected source-ref commit as additional context.
 
 Separate the report into:
 
@@ -125,7 +137,8 @@ Apply this CLI `VERSION` policy:
 
 - `integration`: preserve the current version unless the user supplies one.
 - `stable` with a prerelease version: promote to its base version, for example `2.8.0a2` to `2.8.0`.
-- `stable` with an already stable version: ask for an explicit version.
+- `stable` with an already stable version: ask for an explicit version because the AIO release moniker does not
+  establish whether the CLI version should remain unchanged or advance.
 - Only perform a next-minor bump when explicitly requested, using semantic version components
   (`2.8.0` to `2.9.0`), never string or float arithmetic.
 
