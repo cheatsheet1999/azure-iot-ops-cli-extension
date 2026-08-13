@@ -8,7 +8,7 @@ import json
 import re
 import time
 from contextlib import nullcontext
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import requests
@@ -164,7 +164,7 @@ def _get_public_discovery_issuer(arm_issuer: str) -> Optional[str]:
     return None
 
 
-def resolve_oidc_issuer(arm_issuer: str) -> str:
+def resolve_oidc_issuer(arm_issuer: str) -> Tuple[str, bool]:
     discovery_issuer = _get_public_discovery_issuer(arm_issuer)
 
     if discovery_issuer:
@@ -175,14 +175,14 @@ def resolve_oidc_issuer(arm_issuer: str) -> str:
                 arm_issuer,
                 discovery_issuer,
             )
-        return discovery_issuer
+        return discovery_issuer, True
 
     logger.warning(
         "Could not verify the OIDC issuer '%s' from this host. The ARM-reported value will be used "
         "for the federated identity credential. This may still work if Microsoft Entra can reach the issuer.",
         arm_issuer,
     )
-    return arm_issuer
+    return arm_issuer, False
 
 
 def get_enable_syntax(instance_name: str, resource_group_name: str) -> str:
@@ -472,13 +472,20 @@ class Instances(Queryable):
             custom_location = self.get_associated_cl(instance)
             namespace = custom_location["properties"]["namespace"]
             cred_subject = get_cred_subject(namespace=namespace, service_account_name=SERVICE_ACCOUNT_SECRETSYNC)
-            oidc_issuer = self._ensure_oidc_issuer(cluster_resource, use_self_hosted_issuer)
+            arm_oidc_issuer = self._ensure_oidc_issuer(cluster_resource, use_self_hosted_issuer)
+            oidc_issuer, issuer_verified = resolve_oidc_issuer(arm_issuer=arm_oidc_issuer)
 
             secretsync_resources = resource_map.connected_cluster.get_cl_resources_by_type(
                 custom_location_id=instance["extendedLocation"]["name"],
                 resource_types={SPC_RESOURCE_TYPE, SECRET_SYNC_RESOURCE_TYPE},
             )
             if secretsync_resources:
+                if issuer_verified:
+                    self._repair_federated_cred_issuer(
+                        mi_resource_id_container=mi_resource_id_container,
+                        issuer_url=oidc_issuer,
+                        subject=cred_subject,
+                    )
                 status.stop()
                 logger.warning(
                     f"Instance '{instance['name']}' already has associated secret sync resources.\n"
@@ -486,7 +493,6 @@ class Instances(Queryable):
                 )
                 return
 
-            oidc_issuer = resolve_oidc_issuer(arm_issuer=oidc_issuer)
             if not federated_credential_name:
                 federated_credential_name = get_fc_name(
                     cluster_name=cluster_resource["name"],
@@ -1049,6 +1055,67 @@ class Instances(Queryable):
             },
         )
 
+    def _repair_federated_cred_issuer(
+        self,
+        mi_resource_id_container: ResourceIdContainer,
+        issuer_url: str,
+        subject: str,
+    ):
+        try:
+            federated_cred = self._find_federated_cred(
+                mi_resource_id_container=mi_resource_id_container,
+                issuer_url=issuer_url,
+                subject=subject,
+                match_trailing_slash=True,
+            )
+        except HttpResponseError as http_exc:
+            raise ValidationError(
+                "Failed to inspect federated identity credentials for identity "
+                f"'{mi_resource_id_container.resource_name}' while checking the SecretSync issuer.\n"
+                f"Error: {http_exc}\n\n"
+                "Ensure you have permission to read federated identity credentials. "
+                "You can inspect them manually with:\n"
+                f"az identity federated-credential list "
+                f"--identity-name '{mi_resource_id_container.resource_name}' "
+                f"--resource-group '{mi_resource_id_container.resource_group_name}' "
+                f"--subscription '{mi_resource_id_container.subscription_id}'\n\n"
+                "Please resolve the error, then rerun the command to apply the repair."
+            )
+        if not federated_cred:
+            return
+
+        cred_props: dict = federated_cred["properties"]
+        if cred_props.get("issuer") == issuer_url:
+            return
+
+        self.msi_mgmt_client._config.subscription_id = mi_resource_id_container.subscription_id
+        try:
+            self.msi_mgmt_client.federated_identity_credentials.create_or_update(
+                resource_group_name=mi_resource_id_container.resource_group_name,
+                resource_name=mi_resource_id_container.resource_name,
+                federated_identity_credential_resource_name=federated_cred["name"],
+                parameters={
+                    "properties": {
+                        "subject": cred_props["subject"],
+                        "audiences": cred_props["audiences"],
+                        "issuer": issuer_url,
+                    }
+                },
+            )
+        except HttpResponseError as http_exc:
+            raise ValidationError(
+                f"Failed to repair federated identity credential '{federated_cred['name']}' "
+                f"for identity '{mi_resource_id_container.resource_name}'.\n"
+                f"Error: {http_exc}\n\n"
+                "Update its issuer manually with:\n"
+                f"az identity federated-credential update "
+                f"--name '{federated_cred['name']}' "
+                f"--identity-name '{mi_resource_id_container.resource_name}' "
+                f"--resource-group '{mi_resource_id_container.resource_group_name}' "
+                f"--issuer '{issuer_url}' "
+                f"--subscription '{mi_resource_id_container.subscription_id}'"
+            )
+
     def unfederate_msi(
         self,
         mi_resource_id_container: ResourceIdContainer,
@@ -1063,7 +1130,11 @@ class Instances(Queryable):
         )
 
     def _find_federated_cred(
-        self, mi_resource_id_container: ResourceIdContainer, issuer_url: str, subject: str
+        self,
+        mi_resource_id_container: ResourceIdContainer,
+        issuer_url: str,
+        subject: str,
+        match_trailing_slash: bool = False,
     ) -> Optional[dict]:
         # TODO - @digimaun
         self.msi_mgmt_client._config.subscription_id = mi_resource_id_container.subscription_id
@@ -1071,10 +1142,22 @@ class Instances(Queryable):
             resource_group_name=mi_resource_id_container.resource_group_name,
             resource_name=mi_resource_id_container.resource_name,
         )
+        trailing_slash_match = None
         for cred in cred_iteratable:
             cred_props: dict = cred["properties"]
-            if cred_props.get("issuer") == issuer_url and cred_props.get("subject") == subject:
+            if cred_props.get("subject") != subject:
+                continue
+            cred_issuer = cred_props.get("issuer")
+            if cred_issuer == issuer_url:
                 return cred
+            if (
+                match_trailing_slash
+                and trailing_slash_match is None
+                and isinstance(cred_issuer, str)
+                and oidc_issuers_match(cred_issuer, issuer_url)
+            ):
+                trailing_slash_match = cred
+        return trailing_slash_match
 
 
 def ensure_feature_key_compat(features: Dict[str, str]):
