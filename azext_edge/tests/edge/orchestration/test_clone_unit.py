@@ -496,7 +496,7 @@ class CloneScenario:
             self.resource_configs["adrNamespaceId"] = mock_instance_record["properties"]["adrNamespaceRef"][
                 "resourceId"
             ]
-        instance_fetch_by_apis = [IoTOpsMgmtApiVersion.V20260301.value]
+        instance_fetch_by_apis = [IoTOpsMgmtApiVersion.V20260701.value]
         if not self.api_config.v2_enabled:
             instance_fetch_by_apis.append(self.api_config.iotops_mgmt_api)
         for api_version in instance_fetch_by_apis:
@@ -1041,7 +1041,7 @@ def test_clone_manager_instance_v2(
         instance_name=model_instance_name,
         cluster_name=model_cluster_name,
         add_resources_map=add_resources_map,
-        instance_version="1.3.0",
+        instance_version="1.4.0",
     )
 
     clone_manager = CloneManager(
@@ -1063,10 +1063,10 @@ def test_clone_manager_instance_v2(
         {"version": "1.1.50"},
         {"version": "1.1.19"},
         {"version": "1.0.34"},
-        {"version": "1.4.0", "error": ValidationError},
+        {"version": "1.5.0", "error": ValidationError},
         {"version": "2.0.0", "error": ValidationError},
         {"version": "1.0.9", "error": ValidationError},
-        {"version": "1.4.0", "force": True},
+        {"version": "1.5.0", "force": True},
         {"version": "1.0.9", "force": True},
     ],
 )
@@ -1925,6 +1925,9 @@ class CloneAssertor:
             target_adr_api = DeviceRegistryMgmtApiVersion.V20251001
         elif parsed_version < semver.parse("1.4.0"):
             target_iotops_api = IoTOpsMgmtApiVersion.V20260301
+            target_adr_api = DeviceRegistryMgmtApiVersion.V20260401
+        else:
+            target_iotops_api = IoTOpsMgmtApiVersion.V20260701
             target_adr_api = DeviceRegistryMgmtApiVersion.V20260401
 
         assert target_iotops_api.value == self.api_config.iotops_mgmt_api
