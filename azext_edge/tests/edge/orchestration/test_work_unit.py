@@ -55,6 +55,7 @@ from azext_edge.edge.providers.orchestration.rp_namespace import (
     RP_NAMESPACE_OPTIONAL_SET,
     RP_NAMESPACE_SET,
 )
+from azext_edge.edge.providers.orchestration.resources.connector_templates import ConnectorTemplates
 from azext_edge.edge.providers.orchestration.targets import (
     InstancePhase,
     get_default_cl_name,
@@ -72,7 +73,7 @@ from ...generators import (
     get_zeroed_subscription,
 )
 from .resources.conftest import RequestKPIs, get_request_kpis
-from .test_template_unit import EXPECTED_EXTENSION_RESOURCE_KEYS
+from .test_template_unit import EXPECTED_EXTENSION_RESOURCE_KEYS, EXPECTED_INSTANCE_RESOURCE_KEYS
 
 ZEROED_SUBSCRIPTION = get_zeroed_subscription()
 
@@ -1534,9 +1535,7 @@ def assert_create_displays(spy_work_displays: Dict[str, Mock], target_scenario: 
 def get_expected_keys_for(phase: InstancePhase) -> Tuple[set[str], set[str]]:
     ext_keys = {"cluster", "aioExtension"}
     instance_keys = ext_keys.union({"customLocation", "aioInstance"})
-    resource_keys = instance_keys.union(
-        {"broker", "brokerAuthn", "brokerListener", "dataflowProfile", "dataflowEndpoint", "artifactRegistryEndpoint"}
-    )
+    resource_keys = set(EXPECTED_INSTANCE_RESOURCE_KEYS)
     if phase == InstancePhase.EXT:
         return ext_keys, {}
     if phase == InstancePhase.INSTANCE:
@@ -1658,3 +1657,5 @@ def assert_instance_deployment_body(body_str: str, target_scenario: dict, phase:
         assert resources["dataflowProfile"]["name"] == f"{instance_name_lowered}/{DEFAULT_DATAFLOW_PROFILE}"
         assert resources["dataflowEndpoint"]["name"] == f"{instance_name_lowered}/{DEFAULT_DATAFLOW_ENDPOINT}"
         assert resources["artifactRegistryEndpoint"]["name"] == f"{instance_name_lowered}/{DEFAULT_ARTIFACT_REGISTRY}"
+        expected_opcua_template = ConnectorTemplates.default_opcua_template_name(instance_name_lowered)
+        assert resources["opcUaConnectorTemplate"]["name"] == f"{instance_name_lowered}/{expected_opcua_template}"
