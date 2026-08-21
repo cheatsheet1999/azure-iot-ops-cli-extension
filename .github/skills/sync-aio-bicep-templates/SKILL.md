@@ -55,7 +55,9 @@ Do not require the user to know repository implementation details after these in
    machine's Bicep installation as a side effect of this workflow — it is shared with everything else on the system.
 10. Parse `Deployment/release.json` from the selected ref and confirm its `release` value equals the supplied release
     moniker. Fail on a mismatch rather than combining metadata from different releases. The value is stored as an
-    integer, so compare it as a string against `AIO_RELEASE`.
+    integer and the moniker is a string, so coerce before comparing. Compare it against the **supplied moniker**,
+    never against `AIO_RELEASE`: that constant still holds the *previous* release until section 4 updates it, so
+    comparing against it here fails every genuinely new release and lets only a re-sync through.
 11. Note whether `AIO_RELEASE` in `azext_edge/constants.py` already equals the supplied moniker. If it does, this is
     a **re-sync** of a release that has already been generated at least once, not a new release. Say so explicitly
     and carry that fact into the `VERSION` policy in section 4, which treats the two cases differently.
@@ -507,7 +509,10 @@ After editing:
                node = vals
                for part in dotted.strip(".").split("."):
                    node = node.get(part) if isinstance(node, dict) else None
-               check(node is not None and any(str(node) in s for s in shipped),
+               lit = str(node)
+               # match as a quoted token inside an ARM expression, or as a whole string; a bare substring
+               # test passes against any short value and silently stops checking anything
+               check(node is not None and any(s == lit or f"'{lit}'" in s for s in shipped),
                      f"literal substituted for {alias}{dotted} is current ({node})")
        # the count is the point: it is how many reads this release actually had, not how many it had last time
        print(f"  INFO {reads} substituted literal(s) across {len(aliases)} loaded-file alias(es)")
@@ -536,7 +541,7 @@ After editing:
    - **`VERSION` is not already published.** Check the proposed value against `gh release list` for this repository,
      with the limits described in section 4: it decides only stable versions, it cannot see prerelease reuse, and it
      is not a failure when a re-sync deliberately preserves an already published version.
-   - **The resource key expectations are complete.** The test command in item 2 below runs the three files that
+   - **The resource key expectations are complete.** The test command in item 2 below runs the files that
      assert them, so let those tests decide instead of re-deriving the sets here. They fail with the exact missing
      or extra key.
    - **Each release-tracking constant in `common.py` matches its origin.** Section 4 derived these; confirm the file
@@ -547,7 +552,8 @@ After editing:
    python -m pytest -q \
      azext_edge/tests/edge/orchestration/test_template_unit.py \
      azext_edge/tests/edge/orchestration/test_targets_unit.py \
-     azext_edge/tests/edge/orchestration/test_work_unit.py
+     azext_edge/tests/edge/orchestration/test_work_unit.py \
+     azext_edge/tests/edge/orchestration/test_upgrade2_unit.py
    python -m flake8 \
      azext_edge/edge/providers/orchestration/template.py \
      azext_edge/edge/providers/orchestration/common.py \
@@ -558,14 +564,17 @@ After editing:
    git diff --check
    ```
 
-   Run all three test files even when only `test_template_unit.py` was edited. `test_template_unit.py` alone passing
-   is not evidence the sync is complete, because `test_targets_unit.py` and `test_work_unit.py` assert the instance
-   resource key set independently.
+   Run every file listed even when only `test_template_unit.py` was edited. `test_template_unit.py` alone passing
+   is not evidence the sync is complete: `test_targets_unit.py` and `test_work_unit.py` assert the instance
+   resource key set independently, and `test_upgrade2_unit.py` holds the only mechanical guard tying a constant
+   reconciled in section 4 to the tag the template stamps — a redaction literal and its matching constant can
+   drift apart with every other check still green.
 
-   These three files must be green before the sync is reported as successful. A failure of the form
+   All of them must be green before the sync is reported as successful. A failure of the form
    `assert N == M` on `len(template["resources"])`, or a set-equality failure naming an extra or missing resource,
-   means the step 4 key-set update is incomplete: apply it, then re-run. Do not report success, hand the branch back,
-   or move on to step 6 while any of the three files fails.
+   means the step 4 key-set update is incomplete: apply it, then re-run. A failure comparing a constant against a
+   template tag means the section 4 constant reconciliation is incomplete. Do not report success, hand the branch
+   back, or move on to step 6 while any of them fails.
 
 3. Show the final diff summary, detected versions/trains, and behavioral changes.
 4. Print the Bicep sources the templates were generated from and a ready-to-run verification block, so a developer
