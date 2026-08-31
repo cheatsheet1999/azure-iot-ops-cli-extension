@@ -1215,7 +1215,7 @@ class ExtensionUpgradeState:
                     "Cannot validate upgrade path."
                 )
             if self._has_delta_in_train():
-                self._validate_version_upgrade()
+                self._validate_version_upgrade(target_version=reconcile_version)
             return reconcile_version
 
         return None
@@ -1365,7 +1365,7 @@ class ExtensionUpgradeState:
         """
         return self.provisioning_state.lower() != PROVISIONING_STATE_SUCCESS.lower()
 
-    def _validate_version_upgrade(self):
+    def _validate_version_upgrade(self, target_version: Optional[str] = None):
         # Skip validation for CREATE/DELETE operations
         if self.operation_type in [ExtensionOperation.CREATE, ExtensionOperation.DELETE]:
             return
@@ -1373,12 +1373,14 @@ class ExtensionUpgradeState:
         if self.force:
             return
 
+        target_version = target_version or self.desired_version[0]
+
         # Validate required fields are present
         if not self.current_version[0]:
             raise ValidationError(
                 f"Unable to determine installed version for {self.moniker} extension. Cannot validate upgrade path."
             )
-        if not self.desired_version[0]:
+        if not target_version:
             raise ValidationError(
                 f"Unable to determine target version for {self.moniker} extension. Cannot validate upgrade path."
             )
@@ -1394,7 +1396,7 @@ class ExtensionUpgradeState:
             )
 
         parsed_current = self.semver.parse(self.current_version[0])
-        parsed_desired = self.semver.parse(self.desired_version[0])
+        parsed_desired = self.semver.parse(target_version)
 
         current_is_preview = self.current_version[1].lower() != "stable"
         desired_is_preview = self.desired_version[1].lower() != "stable"
@@ -1403,7 +1405,7 @@ class ExtensionUpgradeState:
         if parsed_desired < parsed_current:
             raise ValidationError(
                 f"Installed {self.moniker} extension version is {self.current_version[0]}.\n"
-                f"The desired {self.desired_version[0]} version is a downgrade which is not supported."
+                f"The desired {target_version} version is a downgrade which is not supported."
             )
 
         if self.moniker != EXTENSION_MONIKER_OPS:
@@ -1413,14 +1415,14 @@ class ExtensionUpgradeState:
         if parsed_desired.major != parsed_current.major:
             raise ValidationError(
                 f"Installed {self.moniker} extension version is {self.current_version[0]}.\n"
-                f"The desired {self.desired_version[0]} version is incompatible (different major version)."
+                f"The desired {target_version} version is incompatible (different major version)."
             )
 
         minor_diff = parsed_desired.minor - parsed_current.minor
         if minor_diff > 2:
             raise ValidationError(
                 f"Installed {self.moniker} extension version is {self.current_version[0]}.\n"
-                f"The desired {self.desired_version[0]} version is incompatible (more than 2 minor versions ahead)."
+                f"The desired {target_version} version is incompatible (more than 2 minor versions ahead)."
             )
 
         min_v2_semver_broker_upgrade = self.semver.parse(MIN_INSTANCE_VERSION_V1_FOR_V2_UPGRADE)
@@ -1428,7 +1430,7 @@ class ExtensionUpgradeState:
         if parsed_current < min_v2_semver_broker_upgrade and parsed_desired >= min_v2_semver:
             raise ValidationError(
                 f"Installed {self.moniker} extension version is {self.current_version[0]}.\n"
-                f"The desired {self.desired_version[0]} version is incompatible "
+                f"The desired {target_version} version is incompatible "
                 f"(min compatible upgrade version {min_v2_semver_broker_upgrade}).\n"
                 f"Please first upgrade to at least {min_v2_semver_broker_upgrade}/AIO2506. "
                 "See https://aka.ms/aio-versions for version details."

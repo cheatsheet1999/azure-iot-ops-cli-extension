@@ -3017,6 +3017,21 @@ def test_reconcile_cannot_bypass_release_train_guard(built_in_train, train_overr
         ext.get_patch()
 
 
+def test_reconcile_train_delta_validates_the_version_the_patch_sends():
+    # A train override re-runs the guard, it must compare the reconcile version, not the stale built-in.
+    ext = build_ext_upgrade_state(
+        ext_type=EXTENSION_TYPE_OPS,
+        current_version="1.4.73",
+        built_in_version="1.3.105",
+        train_override="stable",
+        provisioning_state=PROVISIONING_STATE_FAILED,
+    )
+
+    ext.validate_upgrade()
+
+    assert ext.get_patch()["properties"]["version"] == "1.4.73"
+
+
 @pytest.mark.parametrize("provisioning_state", [PROVISIONING_STATE_SUCCESS, PROVISIONING_STATE_FAILED])
 def test_explicit_downgrade_still_blocked(provisioning_state):
     ext = build_ext_upgrade_state(version_override="1.0.0", provisioning_state=provisioning_state)
