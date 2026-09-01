@@ -1127,7 +1127,7 @@ class ExtensionUpgradeState:
 
         try:
             return self.semver.parse(built_in_version) < self.semver.parse(self.current_version[0])
-        except ValueError:
+        except (ValueError, TypeError):
             return False
 
     def can_upgrade(self) -> bool:

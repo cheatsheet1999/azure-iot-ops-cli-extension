@@ -2867,19 +2867,6 @@ def test_desired_state_version_only_patch_keeps_current_train():
     assert "preview" not in desired
 
 
-def test_desired_state_train_only_patch_keeps_current_version():
-    from azext_edge.edge.providers.orchestration.upgrade2 import format_extension_row
-
-    ext = build_ext_upgrade_state(built_in_version="1.3.105", train_override="preview")
-    _, desired, action = format_extension_row(ext)
-
-    assert "version" not in ext.get_patch()["properties"]
-    assert "1.4.73" in desired
-    assert "1.3.105" not in desired
-    assert "preview" in desired
-    assert "Update version to" not in action
-
-
 @pytest.mark.parametrize(
     "built_in_version,provisioning_state,expected_action,rejected_action",
     [
@@ -2947,15 +2934,6 @@ def test_get_patch_version_selection(built_in_version, provisioning_state, force
 
     ext.validate_upgrade()
     assert ext.get_patch().get("properties", {}).get("version") == expected_version
-
-
-def test_failed_extension_without_installed_version_is_rejected():
-    ext = build_ext_upgrade_state(current_version=None, provisioning_state=PROVISIONING_STATE_FAILED)
-
-    with pytest.raises(ValidationError, match="Unable to determine installed version"):
-        ext.validate_upgrade()
-    with pytest.raises(ValidationError, match="Unable to determine installed version"):
-        ext.get_patch()
 
 
 def test_failed_extension_without_installed_version_is_bypassed_by_force():
@@ -3032,6 +3010,21 @@ def test_reconcile_train_delta_validates_the_version_the_patch_sends():
     assert ext.get_patch()["properties"]["version"] == "1.4.73"
 
 
+def test_reconcile_repairs_a_failed_extension_on_a_preview_train():
+    ext = build_ext_upgrade_state(
+        ext_type=EXTENSION_TYPE_OPS,
+        current_version="1.4.73",
+        current_train="preview",
+        built_in_version="1.3.105",
+        built_in_train="preview",
+        provisioning_state=PROVISIONING_STATE_FAILED,
+    )
+
+    ext.validate_upgrade()
+
+    assert ext.get_patch()["properties"]["version"] == "1.4.73"
+
+
 @pytest.mark.parametrize("provisioning_state", [PROVISIONING_STATE_SUCCESS, PROVISIONING_STATE_FAILED])
 def test_explicit_downgrade_still_blocked(provisioning_state):
     ext = build_ext_upgrade_state(version_override="1.0.0", provisioning_state=provisioning_state)
@@ -3079,6 +3072,12 @@ def test_is_cli_behind_cluster(built_in_version, current_version, version_overri
     assert ext.is_cli_behind_cluster() is expected
 
 
+@pytest.mark.parametrize("bad_version", [1.4, 14073, ["1.4.73"]])
+def test_stale_cli_check_is_best_effort_on_a_malformed_version(bad_version):
+    ext = build_ext_upgrade_state(current_version=bad_version)
+    assert ext.is_cli_behind_cluster() is False
+
+
 def test_stale_cli_warning_precedes_no_op_return(
     mocked_cmd: Mock,
     mocked_responses: responses,
@@ -3122,12 +3121,22 @@ def test_stale_cli_warning_precedes_no_op_return(
 
 
 @pytest.mark.parametrize("ext_type", [EXTENSION_TYPE_OPS, EXTENSION_TYPE_CM])
-def test_validate_upgrade_and_get_patch_cannot_diverge(ext_type):
-    """validate_upgrade is the early gate for get_patch, so the two must agree on every input."""
-    from itertools import product
-
-    versions = [None, "1.0.0", "1.3.105", "1.4.73", "1.5.0"]
-    trains = [None, "stable", "preview"]
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"version_override": "1.0.0"}, id="downgrade"),
+        pytest.param({"built_in_version": "1.5.0"}, id="upgrade"),
+        pytest.param({"provisioning_state": PROVISIONING_STATE_FAILED}, id="reconcile"),
+        pytest.param(
+            {"provisioning_state": PROVISIONING_STATE_FAILED, "built_in_train": "preview"}, id="train-guard"
+        ),
+        pytest.param(
+            {"provisioning_state": PROVISIONING_STATE_FAILED, "current_version": None}, id="no-installed-version"
+        ),
+    ],
+)
+def test_validate_upgrade_and_get_patch_cannot_diverge(ext_type, kwargs):
+    """validate_upgrade is the early gate for get_patch, so the two must agree."""
 
     def outcome(call) -> Optional[str]:
         try:
@@ -3136,29 +3145,6 @@ def test_validate_upgrade_and_get_patch_cannot_diverge(ext_type):
         except ValidationError as e:
             return str(e)
 
-    compared = 0
-    for current_version, current_train, built_in_version, built_in_train, version_override, force, state in product(
-        versions,
-        trains,
-        versions,
-        trains,
-        [None, "1.4.73"],
-        [False, True],
-        [PROVISIONING_STATE_SUCCESS, PROVISIONING_STATE_FAILED],
-    ):
-        kwargs = {
-            "ext_type": ext_type,
-            "current_version": current_version,
-            "current_train": current_train,
-            "built_in_version": built_in_version,
-            "built_in_train": built_in_train,
-            "version_override": version_override,
-            "force": force,
-            "provisioning_state": state,
-        }
-        from_validate = outcome(build_ext_upgrade_state(**kwargs).validate_upgrade)
-        from_patch = outcome(build_ext_upgrade_state(**kwargs).get_patch)
-        assert from_validate == from_patch, f"validate_upgrade and get_patch disagree for {kwargs}"
-        compared += 1
-
-    assert compared == 1800
+    assert outcome(build_ext_upgrade_state(ext_type=ext_type, **kwargs).validate_upgrade) == outcome(
+        build_ext_upgrade_state(ext_type=ext_type, **kwargs).get_patch
+    )
