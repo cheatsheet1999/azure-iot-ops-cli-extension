@@ -90,10 +90,9 @@ def upgrade_ops_instance(
     stale_monikers = upgrade_state.get_stale_cli_extensions()
     if stale_monikers:
         logger.warning(
-            "The version of %s built into this azure-iot-ops CLI extension is older than the "
-            "version deployed on the cluster, so this CLI has no newer version to offer. "
-            "Nothing will be downgraded: a lower version is only applied when explicitly "
-            "requested together with --force. "
+            "This azure-iot-ops CLI extension has no newer version to offer for: %s. "
+            "The version deployed on the cluster is newer than the version built into this CLI. "
+            "No deployed extension version will be changed. "
             "Run 'az extension update --name azure-iot-ops' to pick up newer versions.",
             ", ".join(stale_monikers),
         )
@@ -495,12 +494,12 @@ def format_extension_row(ext: "ExtensionUpgradeState") -> Tuple[str, str, str]:
         patch = ext.get_patch()
         props = patch.get("properties", {})
 
-        desired = "[cyan]{}[/cyan]".format(
-            format_version_with_train(
-                props.get("version", ext.current_version[0]),
-                props.get("releaseTrain", ext.current_version[1]),
-            )
+        desired_state = format_version_with_train(
+            props.get("version", ext.current_version[0]),
+            props.get("releaseTrain", ext.current_version[1]),
         )
+        desired_style = "cyan" if ("version" in props or "releaseTrain" in props) else "dim"
+        desired = f"[{desired_style}]{desired_state}[/{desired_style}]"
 
         if not patch or "properties" not in patch:
             return current, desired, "[dim]No changes[/dim]"
@@ -1214,6 +1213,8 @@ class ExtensionUpgradeState:
                     f"Unable to determine installed version for {self.moniker} extension. "
                     "Cannot validate upgrade path."
                 )
+            # A failed extension can report a version with no release train; guarding on the delta
+            # avoids rejecting it for a missing train the patch never sends.
             if self._has_delta_in_train():
                 self._validate_version_upgrade(target_version=reconcile_version)
             return reconcile_version

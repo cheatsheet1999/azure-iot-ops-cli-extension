@@ -2851,6 +2851,8 @@ def test_desired_state_ignores_built_in_target_when_no_version_is_sent():
     assert "1.4.73" in current
     assert "1.4.73" in desired
     assert "1.3.105" not in desired
+    assert "[dim]" in desired
+    assert "cyan" not in desired
     assert "Set a: [bold]b[/bold]" in action
 
 
@@ -3113,9 +3115,9 @@ def test_stale_cli_warning_precedes_no_op_return(
     warning_calls = mocked_logger.warning.call_args_list
     assert len(warning_calls) == 2
     advisory = warning_calls[0].args[0]
-    assert "older than the version deployed on the cluster" in advisory
-    assert "--force" in advisory
-    assert "Unless a version is explicitly requested" not in advisory
+    assert "newer than the version built into this CLI" in advisory
+    assert "No deployed extension version will be changed" in advisory
+    assert "--force" not in advisory
     assert warning_calls[0].args[1] == EXTENSION_TYPE_TO_MONIKER_MAP[EXTENSION_TYPE_CM]
     assert warning_calls[1].args[0] == DEFAULT_LOG_WARNING_MESSAGE
 
@@ -3135,8 +3137,8 @@ def test_stale_cli_warning_precedes_no_op_return(
         ),
     ],
 )
-def test_validate_upgrade_and_get_patch_cannot_diverge(ext_type, kwargs):
-    """validate_upgrade is the early gate for get_patch, so the two must agree."""
+def test_validate_upgrade_and_get_patch_have_same_validation_outcome(ext_type, kwargs):
+    """Both entry points resolve the target through the same helper, so their validation must agree."""
 
     def outcome(call) -> Optional[str]:
         try:
