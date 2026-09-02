@@ -3116,7 +3116,7 @@ def test_stale_cli_warning_precedes_no_op_return(
     assert len(warning_calls) == 2
     advisory = warning_calls[0].args[0]
     assert "newer than the version built into this CLI" in advisory
-    assert "No deployed extension version will be changed" in advisory
+    assert "No deployed version of the listed extensions will be changed" in advisory
     assert "--force" not in advisory
     assert warning_calls[0].args[1] == EXTENSION_TYPE_TO_MONIKER_MAP[EXTENSION_TYPE_CM]
     assert warning_calls[1].args[0] == DEFAULT_LOG_WARNING_MESSAGE

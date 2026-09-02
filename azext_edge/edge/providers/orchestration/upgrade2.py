@@ -92,7 +92,7 @@ def upgrade_ops_instance(
         logger.warning(
             "This azure-iot-ops CLI extension has no newer version to offer for: %s. "
             "The version deployed on the cluster is newer than the version built into this CLI. "
-            "No deployed extension version will be changed. "
+            "No deployed version of the listed extensions will be changed. "
             "Run 'az extension update --name azure-iot-ops' to pick up newer versions.",
             ", ".join(stale_monikers),
         )
@@ -1213,8 +1213,9 @@ class ExtensionUpgradeState:
                     f"Unable to determine installed version for {self.moniker} extension. "
                     "Cannot validate upgrade path."
                 )
-            # A failed extension can report a version with no release train; guarding on the delta
-            # avoids rejecting it for a missing train the patch never sends.
+            # A failed extension can have a version but no releaseTrain. Calling _validate_version_upgrade()
+            # unconditionally then raises "Unable to determine release train" even though the patch only
+            # reapplies the current version and sends no train.
             if self._has_delta_in_train():
                 self._validate_version_upgrade(target_version=reconcile_version)
             return reconcile_version
